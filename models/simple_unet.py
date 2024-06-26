@@ -315,9 +315,10 @@ class AttentionBlock(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        attention = nn.MultiHeadAttention(num_heads=self.heads, precision='high', qkv_features=self.dim_head, decode=False)(x)
+        normed_x = nn.LayerNorm(dtype=self.dtype)(x)
+        attention = nn.MultiHeadAttention(num_heads=self.heads, precision='high', qkv_features=self.dim_head, decode=False)(normed_x)
         out = x + attention
-        return x
+        return out
 
 class ResidualBlock(nn.Module):
     conv_type:str
@@ -450,7 +451,7 @@ class SimpleUNet(nn.Module):
                 strides=(1, 1),
                 activation=self.activation,
             )(x, temb)
-            if middle_attention is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
+            if middle_attention is not None and j == self.num_middle_res_blocks - 1:   # Apply attention only on the last block
                 x = AttentionBlock(heads=attention_config['heads'], use_linear_attention=False, name=f"middle_attention_{j}")(x)
             x = ResidualBlock(
                 "conv",

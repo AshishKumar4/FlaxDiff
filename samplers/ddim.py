@@ -6,6 +6,5 @@ class DDIMSampler(DiffusionSampler):
     def _renoise(self, 
                  current_samples, reconstructed_samples, 
                  pred_noise, current_step, state:MarkovState, next_step=None) -> tuple[jnp.ndarray, MarkovState]:
-        # state, key = state.get_random_key()
-        # newnoise = jax.random.normal(key, reconstructed_samples.shape, dtype=jnp.float32)
-        return self.noise_schedule.add_noise(reconstructed_samples, pred_noise, next_step), state
+        next_signal_rate, next_noise_rate = self.noise_schedule.get_rates(next_step)
+        return reconstructed_samples * next_signal_rate + pred_noise * next_noise_rate, state

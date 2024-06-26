@@ -1,1 +1,1 @@
-from .simple_unet import SimpleUNet
+from .simple_unet import *

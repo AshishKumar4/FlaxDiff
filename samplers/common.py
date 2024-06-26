@@ -4,8 +4,8 @@ import jax.numpy as jnp
 import tqdm
 from typing import Union
 from ..schedulers import NoiseScheduler
-from ..utils import RandomMarkovState, MarkovState
-from .prediction_transforms import DiffusionPredictionTransform, EpsilonPredictionTransform
+from ..utils import RandomMarkovState, MarkovState, clip_images
+from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
 
 class DiffusionSampler():
     model:nn.Module
@@ -26,7 +26,7 @@ class DiffusionSampler():
     def sample_step(self, current_samples, pred_images, pred_noise, current_step, next_step=None, 
                     clip_denoised=True, state:MarkovState=None) -> tuple[jnp.ndarray, MarkovState]:
         # First clip the noisy images
-        pred_images = self.noise_schedule.clip_images(pred_images)
+        # pred_images = clip_images(pred_images)
 
         # plotImages(pred_images)
         return self._renoise(current_samples=current_samples, reconstructed_samples=pred_images, 
@@ -43,9 +43,7 @@ class DiffusionSampler():
         if diffusion_steps is None or diffusion_steps == 0:
             diffusion_steps = start_step - end_step
         diffusion_steps = min(diffusion_steps, step_range)
-        step_size = step_range // diffusion_steps
-        # steps = (jnp.arange(end_step, start_step) * step_size).round()[::-1]
-        steps = jnp.arange(end_step, start_step, step_size)[::-1]
+        steps = jnp.linspace(end_step, start_step, diffusion_steps, dtype=jnp.int16)[::-1]
         return steps
 
     def generate_images(self,
@@ -61,6 +59,7 @@ class DiffusionSampler():
             rngstate, newrngs = rngstate.get_random_key()
             samples = jax.random.normal(newrngs, (num_images, image_size, image_size, 3))
         else:
+            print("Using priors")
             samples = priors
         
         step_ones = jnp.ones((num_images, ), dtype=jnp.int32)
@@ -69,13 +68,13 @@ class DiffusionSampler():
         def sample_model(x_t, t):
             model_output = self.model.apply(self.params, x_t, self.noise_schedule.transform_steps(t))
             x_0, eps = self.model_output_transform(x_t, model_output, t, self.noise_schedule)
-            return x_0, eps
+            return x_0, eps, model_output
 
-        @jax.jit
+        # @jax.jit
         def sample_step(state:RandomMarkovState, samples, current_step, next_step):
             current_step = step_ones * current_step
             next_step = step_ones * next_step
-            pred_images, pred_noises = sample_model(samples, current_step)
+            pred_images, pred_noises, _ = sample_model(samples, current_step)
             samples, state = self.sample_step(current_samples=samples,
                                               pred_images=pred_images, 
                                               pred_noise=pred_noises, 
@@ -96,8 +95,10 @@ class DiffusionSampler():
             current_step = steps[i]
             next_step = steps[i+1] if i+1 < len(steps) else 0
             if i != len(steps) - 1:
+                # print("normal step")
                 samples, rngstate = sample_step(rngstate, samples, current_step, next_step)
             else:
-                samples, _ = sample_model(samples, current_step * step_ones)
-        samples = self.noise_schedule.clip_images(samples)
+                # print("last step")
+                samples, _, _ = sample_model(samples, current_step * step_ones)
+        samples = clip_images(samples)
         return samples
