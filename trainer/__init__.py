@@ -154,7 +154,7 @@ class DiffusionTrainer:
             noise:jax.Array = jax.random.normal(rngs, shape=images.shape)
             noisy_images, expected_output = model_output_transform.train_step(images, noise, noise_level, noise_schedule)
             def loss_fn(params):
-                preds = model.apply(params, noisy_images, noise_schedule.transform_steps(noise_level))
+                preds = model.apply(params, *noise_schedule.transform_inputs(noisy_images, noise_level))
                 nloss = jnp.mean(optax.l2_loss(preds.reshape((1, -1)) - expected_output.reshape((1, -1))), axis=1)
                 nloss *= p2_loss_weights[noise_level]
                 nloss = jnp.mean(nloss)

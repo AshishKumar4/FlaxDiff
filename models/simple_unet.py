@@ -3,12 +3,8 @@ import jax.numpy as jnp
 from flax import linen as nn
 from typing import Dict, Callable, Sequence, Any, Union
 import einops
-
-# Kernel initializer to use
-def kernel_init(scale):
-    scale = max(scale, 1e-10)
-    return nn.initializers.variance_scaling(scale=scale, mode="fan_in", distribution="truncated_normal")
-
+from .common import kernel_init
+from .attention import NormalAttention
 class WeightStandardizedConv(nn.Module):
     """
     apply weight standardization  https://arxiv.org/abs/1903.10520
@@ -178,14 +174,14 @@ class Upsample(nn.Module):
 
     @nn.compact
     def __call__(self, x, residual=None):
-        # out = x
+        out = x
         # out = PixelShuffle(scale=self.scale)(out)
         B, H, W, C = x.shape
         out = jax.image.resize(x, (B, H * self.scale, W * self.scale, C), method="nearest")
         out = ConvLayer(
             "conv",
             features=self.features,
-            kernel_size=(3, 3),
+            kernel_size=(1, 1),
             strides=(1, 1),
         )(out)
         if residual is not None:
@@ -202,7 +198,7 @@ class Downsample(nn.Module):
         out = ConvLayer(
             "conv",
             features=self.features,
-            kernel_size=(4, 4),
+            kernel_size=(3, 3),
             strides=(2, 2)
         )(x)
         if residual is not None:
@@ -217,107 +213,52 @@ def l2norm(t, axis=1, eps=1e-12):
     out = t/denom
     return (out)
 
-class Attention(nn.Module):
-    heads: int = 4
-    dim_head: int = 32
-    scale: int = 10
-    dtype: Any = jnp.float32
-
-    @nn.compact
-    def __call__(self, x):
-        B, H, W, C = x.shape
-        dim = self.dim_head * self.heads
-
-        qkv = nn.Conv(features= dim * 3, kernel_size=(1, 1),
-                      use_bias=False, dtype=self.dtype, name='to_qkv.conv_0')(x)  # [B, H, W, dim *3]
-        q, k, v = jnp.split(qkv, 3, axis=-1)  # [B, H, W, dim]
-        q, k, v = map(lambda t: einops.rearrange(
-            t, 'b x y (h d) -> b (x y) h d', h=self.heads), (q, k, v))
-
-        assert q.shape == k.shape == v.shape == (
-            B, H * W, self.heads, self.dim_head)
-
-        q, k = map(l2norm, (q, k))
-
-        sim = jnp.einsum('b i h d, b j h d -> b h i j', q, k) * self.scale
-        attn = nn.softmax(sim, axis=-1)
-        assert attn.shape == (B, self.heads, H * W,  H * W)
-
-        out = jnp.einsum('b h i j , b j h d  -> b h i d', attn, v)
-        out = einops.rearrange(out, 'b h (x y) d -> b x y (h d)', x=H)
-        assert out.shape == (B, H, W, dim)
-
-        out = nn.Conv(features=C, kernel_size=(1, 1), dtype=self.dtype, name='to_out.conv_0')(out)
-        return (out)
-
-class LinearAttention(nn.Module):
-    heads: int = 4
-    dim_head: int = 32
-    dtype: Any = jnp.float32
-
-    @nn.compact
-    def __call__(self, x):
-        B, H, W, C = x.shape
-        dim = self.dim_head * self.heads
-
-        qkv = nn.Conv(
-            features=dim * 3,
-            kernel_size=(1, 1),
-            use_bias=False,
-            dtype=self.dtype,
-            name='to_qkv.conv_0')(x)  # [B, H, W, dim *3]
-        q, k, v = jnp.split(qkv, 3, axis=-1)  # [B, H, W, dim]
-        q, k, v = map(lambda t: einops.rearrange(
-            t, 'b x y (h d) -> b (x y) h d', h=self.heads), (q, k, v))
-        assert q.shape == k.shape == v.shape == (
-            B, H * W, self.heads, self.dim_head)
-        # compute softmax for q along its embedding dimensions
-        q = nn.softmax(q, axis=-1)
-        # compute softmax for k along its spatial dimensions
-        k = nn.softmax(k, axis=-3)
-
-        q = q/jnp.sqrt(self.dim_head)
-        v = v / (H * W)
-
-        context = jnp.einsum('b n h d, b n h e -> b h d e', k, v)
-        out = jnp.einsum('b h d e, b n h d -> b h e n', context, q)
-        out = einops.rearrange(out, 'b h e (x y) -> b x y (h e)', x=H)
-        assert out.shape == (B, H, W, dim)
-
-        out = nn.Conv(features=C, kernel_size=(1, 1),  dtype=self.dtype, name='to_out.conv_0')(out)
-        out = nn.LayerNorm(epsilon=1e-5, use_bias=False, dtype=self.dtype, name='to_out.norm_0')(out)
-        return (out)
-
-# class AttentionBlock(nn.Module):
-#     heads: int = 4
-#     dim_head: int = 32
-#     use_linear_attention: bool = True
-#     dtype: Any = jnp.float32
-
-
-#     @nn.compact
-#     def __call__(self, x):
-#       B, H, W, C = x.shape
-#       normed_x = nn.LayerNorm(epsilon=1e-5, use_bias=False,dtype=self.dtype)(x)
-#       if self.use_linear_attention:
-#         attn = LinearAttention(self.heads, self.dim_head, dtype=self.dtype)
-#       else:
-#         attn = Attention(self.heads, self.dim_head, dtype=self.dtype)
-#       out = attn(normed_x)
-#       assert out.shape == (B, H, W, C)
-#       return(out + x)
-
 class AttentionBlock(nn.Module):
     heads: int = 4
     dim_head: int = 32
     use_linear_attention: bool = True
     dtype: Any = jnp.float32
+    precision: Any = jax.lax.Precision.HIGH
+    use_projection: bool = False
 
     @nn.compact
     def __call__(self, x):
-        normed_x = nn.LayerNorm(dtype=self.dtype)(x)
-        attention = nn.MultiHeadAttention(num_heads=self.heads, precision='high', qkv_features=self.dim_head, decode=False)(normed_x)
-        out = x + attention
+        inner_dim = self.heads * self.dim_head
+        B, H, W, C = x.shape
+        normed_x = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)(x)
+        if self.use_projection:
+            if self.use_linear_attention:
+                projected_x = nn.Dense(features=inner_dim, use_bias=False, precision=self.precision, dtype=self.dtype, name=f'project_in')(normed_x)
+            else:
+                projected_x = nn.Conv(
+                    features=inner_dim, kernel_size=(1, 1),
+                    strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
+                    precision=self.precision, name=f'project_in_conv',
+                )(normed_x)
+        else:
+            projected_x = normed_x
+            inner_dim = C
+
+        projected_x = NormalAttention(
+            query_dim=inner_dim,
+            heads=self.heads,
+            dim_head=self.dim_head,
+            name=f'Attention',
+            precision=self.precision,
+            use_bias=False,
+        )(projected_x)
+
+        if self.use_projection:
+            if self.use_linear_attention:
+                projected_x = nn.Dense(features=C, precision=self.precision, dtype=self.dtype, use_bias=False, name=f'project_out')(projected_x)
+            else:
+                projected_x = nn.Conv(
+                    features=C, kernel_size=(1, 1),
+                    strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
+                    precision=self.precision, name=f'project_out_conv',
+                )(projected_x)
+
+        out = x + projected_x
         return out
 
 class ResidualBlock(nn.Module):
@@ -335,7 +276,7 @@ class ResidualBlock(nn.Module):
     @nn.compact
     def __call__(self, x:jax.Array, temb:jax.Array, extra_features:jax.Array=None):
         residual = x
-        out = nn.GroupNorm(8)(x)
+        out = nn.GroupNorm(self.norm_groups)(x)
         out = self.activation(out)
 
         out = ConvLayer(
@@ -346,12 +287,14 @@ class ResidualBlock(nn.Module):
             kernel_init=self.kernel_init,
             name="conv1"
         )(out)
-        out = nn.GroupNorm(8)(out)
 
-        temb = nn.DenseGeneral(features=self.features*2, name="temb_projection")(temb)[:, None, None, :]
-        scale, shift = jnp.split(temb, 2, axis=-1)
-        out = out * (1 + scale) + shift
+        temb = nn.DenseGeneral(features=self.features, name="temb_projection")(temb)
+        temb = jnp.expand_dims(jnp.expand_dims(temb, 1), 1)
+        # scale, shift = jnp.split(temb, 2, axis=-1)
+        # out = out * (1 + scale) + shift
+        out = out + temb
 
+        out = nn.GroupNorm(self.norm_groups)(out)
         out = self.activation(out)
 
         out = ConvLayer(

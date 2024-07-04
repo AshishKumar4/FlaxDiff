@@ -1,5 +1,5 @@
 import numpy as np
-from .common import DiscreteNoiseScheduler
+from .discrete import DiscreteNoiseScheduler
 
 def linear_beta_schedule(timesteps, beta_start=0.0001, beta_end=0.02):
     scale = 1000 / timesteps

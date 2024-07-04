@@ -66,7 +66,7 @@ class DiffusionSampler():
 
         @jax.jit
         def sample_model(x_t, t):
-            model_output = self.model.apply(self.params, x_t, self.noise_schedule.transform_steps(t))
+            model_output = self.model.apply(self.params, *self.noise_schedule.transform_inputs(x_t, t))
             x_0, eps = self.model_output_transform(x_t, model_output, t, self.noise_schedule)
             return x_0, eps, model_output
 

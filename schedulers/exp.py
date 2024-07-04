@@ -1,5 +1,5 @@
 import numpy as np
-from .common import DiscreteNoiseScheduler
+from .discrete import DiscreteNoiseScheduler
 
 def exp_beta_schedule(timesteps, start_angle=0.008, end_angle=0.999):
     ts = np.linspace(0, 1, timesteps + 1, dtype=np.float64)
