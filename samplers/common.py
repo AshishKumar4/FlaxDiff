@@ -37,6 +37,10 @@ class DiffusionSampler():
         # estimate the q(x_{t-1} | x_t, x_0). 
         # pred_images is x_0, noisy_images is x_t, steps is t
         return NotImplementedError
+    
+    def scale_steps(self, steps):
+        scale_factor = self.noise_schedule.max_timesteps / 1000
+        return steps * scale_factor
 
     def get_steps(self, start_step, end_step, diffusion_steps):
         step_range = start_step - end_step
@@ -45,10 +49,15 @@ class DiffusionSampler():
         diffusion_steps = min(diffusion_steps, step_range)
         steps = jnp.linspace(end_step, start_step, diffusion_steps, dtype=jnp.int16)[::-1]
         return steps
-
+    
+    def get_initial_samples(self, num_images, rngs:jax.random.PRNGKey, start_step, image_size=64):
+        start_step = self.scale_steps(start_step)
+        alpha_n, sigma_n = self.noise_schedule.get_rates(start_step)
+        variance = jnp.sqrt(alpha_n ** 2 + sigma_n ** 2) 
+        return jax.random.normal(rngs, (num_images, image_size, image_size, 3)) * variance
+    
     def generate_images(self,
                         num_images=16, 
-                        image_size=64,
                         diffusion_steps=1000, 
                         start_step:int = None,
                         end_step:int = 0,
@@ -57,16 +66,18 @@ class DiffusionSampler():
                         rngstate:RandomMarkovState=RandomMarkovState(jax.random.PRNGKey(42))) -> jnp.ndarray:
         if priors is None:
             rngstate, newrngs = rngstate.get_random_key()
-            samples = jax.random.normal(newrngs, (num_images, image_size, image_size, 3))
+            samples = self.get_initial_samples(num_images, newrngs, start_step)
         else:
             print("Using priors")
             samples = priors
-        
+
         step_ones = jnp.ones((num_images, ), dtype=jnp.int32)
 
         @jax.jit
         def sample_model(x_t, t):
-            model_output = self.model.apply(self.params, *self.noise_schedule.transform_inputs(x_t, t))
+            rates = self.noise_schedule.get_rates(t)
+            c_in = self.model_output_transform.get_input_scale(rates)
+            model_output = self.model.apply(self.params, *self.noise_schedule.transform_inputs(x_t * c_in, t))
             x_0, eps = self.model_output_transform(x_t, model_output, t, self.noise_schedule)
             return x_0, eps, model_output
 
@@ -92,8 +103,8 @@ class DiffusionSampler():
 
         # print("Sampling steps", steps)
         for i in tqdm.tqdm(range(0, len(steps))):
-            current_step = steps[i]
-            next_step = steps[i+1] if i+1 < len(steps) else 0
+            current_step = self.scale_steps(steps[i])
+            next_step = self.scale_steps(steps[i+1] if i+1 < len(steps) else 0)
             if i != len(steps) - 1:
                 # print("normal step")
                 samples, rngstate = sample_step(rngstate, samples, current_step, next_step)

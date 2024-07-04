@@ -87,6 +87,19 @@ class TimeEmbedding(nn.Module):
         emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
         return emb
 
+class FourierEmbedding(nn.Module):
+    features:int
+    scale:int = 16
+
+    def setup(self):
+        self.freqs = jax.random.normal(jax.random.PRNGKey(42), (self.features // 2, ), dtype=jnp.float32) * self.scale
+
+    def __call__(self, x):
+        x = jax.lax.convert_element_type(x, jnp.float32)
+        emb = x[:, None] * (2 * jnp.pi * self.freqs)[None, :]
+        emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
+        return emb
+
 class TimeProjection(nn.Module):
     features:int
     activation:Callable=jax.nn.gelu
@@ -327,20 +340,24 @@ class SimpleUNet(nn.Module):
     attention_configs:list=[{"heads":8}, {"heads":8}, {"heads":8}, {"heads":8}],
     num_res_blocks:int=2,
     num_middle_res_blocks:int=1,
-    activation:Callable = jax.nn.mish
+    activation:Callable = jax.nn.swish
+    norm_groups:int=8
 
     @nn.compact
     def __call__(self, x, temb):
         # print("embedding features", self.emb_features)
-        temb = TimeEmbedding(features=self.emb_features)(temb)
+        temb = FourierEmbedding(features=self.emb_features)(temb)
         temb = TimeProjection(features=self.emb_features)(temb)
         # print("time embedding", temb.shape)
         feature_depths = self.feature_depths
         attention_configs = self.attention_configs
+
+        conv_type = "conv"
+
         x = ConvLayer(
             "conv",
             features=self.feature_depths[0],
-            kernel_size=(7, 7),
+            kernel_size=(3, 3),
             strides=(1, 1),
             kernel_init=kernel_init(1.0)
         )(x)
@@ -352,16 +369,19 @@ class SimpleUNet(nn.Module):
             # dim_in = dim_out
             for j in range(self.num_res_blocks):
                 x = ResidualBlock(
-                    "conv",
+                    conv_type,
                     name=f"down_{i}_residual_{j}",
                     features=dim_in,
                     kernel_init=kernel_init(1.0),
                     kernel_size=(3, 3),
                     strides=(1, 1),
                     activation=self.activation,
+                    norm_groups=self.norm_groups
                 )(x, temb)
                 if attention_config is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
-                    x = AttentionBlock(heads=attention_config['heads'], name=f"down_{i}_attention_{j}")(x)
+                    x = AttentionBlock(heads=attention_config['heads'], 
+                                       dim_head=dim_out // attention_config['heads'],
+                                       name=f"down_{i}_attention_{j}")(x)
                 # print("down residual for feature level", i, "is of shape", x.shape, "features", dim_in)
                 downs.append(x)
             if i != len(feature_depths) - 1:
@@ -376,34 +396,31 @@ class SimpleUNet(nn.Module):
         # Middle Blocks
         middle_dim_out = self.feature_depths[-1]
         middle_attention = self.attention_configs[-1]
-        x = ConvLayer(
-            "conv",
-            features=middle_dim_out,
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            kernel_init=kernel_init(1.0),
-            name="middle_conv"
-        )(x)
+        
         for j in range(self.num_middle_res_blocks):
             x = ResidualBlock(
-                "conv",
+                conv_type,
                 name=f"middle_res1_{j}",
                 features=middle_dim_out,
                 kernel_init=kernel_init(1.0),
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 activation=self.activation,
+                norm_groups=self.norm_groups
             )(x, temb)
             if middle_attention is not None and j == self.num_middle_res_blocks - 1:   # Apply attention only on the last block
-                x = AttentionBlock(heads=attention_config['heads'], use_linear_attention=False, name=f"middle_attention_{j}")(x)
+                x = AttentionBlock(heads=attention_config['heads'], 
+                                   dim_head=dim_out // attention_config['heads'],
+                                   use_linear_attention=False, name=f"middle_attention_{j}")(x)
             x = ResidualBlock(
-                "conv",
+                conv_type,
                 name=f"middle_res2_{j}",
                 features=middle_dim_out,
                 kernel_init=kernel_init(1.0),
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 activation=self.activation,
+                norm_groups=self.norm_groups
             )(x, temb)
 
         # Upscaling Blocks
@@ -415,16 +432,19 @@ class SimpleUNet(nn.Module):
                 # kernel_size = (1 + 2 * (j + 1), 1 + 2 * (j + 1))
                 kernel_size = (3, 3)
                 x = ResidualBlock(
-                    "conv", # if j == 0 else "separable",
+                    conv_type,# if j == 0 else "separable",
                     name=f"up_{i}_residual_{j}",
                     features=dim_out,
                     kernel_init=kernel_init(1.0),
                     kernel_size=kernel_size,
                     strides=(1, 1),
                     activation=self.activation,
+                    norm_groups=self.norm_groups
                 )(x, temb)
                 if attention_config is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
-                    x = AttentionBlock(heads=attention_config['heads'], name=f"up_{i}_attention_{j}")(x)
+                    x = AttentionBlock(heads=attention_config['heads'], 
+                                       dim_head=dim_out // attention_config['heads'],
+                                       name=f"up_{i}_attention_{j}")(x)
             # print("Upscaling ", i, x.shape)
             if i != len(feature_depths) - 1:
                 x = Upsample(
@@ -433,36 +453,29 @@ class SimpleUNet(nn.Module):
                     activation=self.activation,
                     name=f"up_{i}_upsample"
                 )(x)
-
-        x = ConvLayer(
-            "conv",
-            features=self.feature_depths[0],
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            kernel_init=kernel_init(0.0)
-        )(x)
     
         x = jnp.concatenate([x, downs.pop()], axis=-1)
 
         x = ResidualBlock(
-            "conv",
+            conv_type,
             name="final_residual",
             features=self.feature_depths[0],
             kernel_init=kernel_init(1.0),
             kernel_size=(3,3),
             strides=(1, 1),
             activation=self.activation,
+            norm_groups=self.norm_groups
         )(x, temb)
 
-        x = nn.GroupNorm(8)(x)
+        x = nn.GroupNorm(self.norm_groups)(x)
         x = self.activation(x)
 
-        noise_out = ConvLayer(
+        output = ConvLayer(
             "conv",
             features=3,
-            kernel_size=(1, 1),
+            kernel_size=(3,3),
             strides=(1, 1),
             # activation=jax.nn.mish
             kernel_init=kernel_init(0.0)
         )(x)
-        return noise_out#, attentions
+        return output#, attentions

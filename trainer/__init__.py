@@ -15,7 +15,7 @@ import orbax
 from flax.training import orbax_utils
 
 from ..schedulers import NoiseScheduler
-from ..samplers.prediction_transforms import DiffusionPredictionTransform, EpsilonPredictionTransform
+from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
 
 @struct.dataclass
 class Metrics(metrics.Collection):
@@ -27,12 +27,22 @@ class ModelState():
     noise_schedule: NoiseScheduler
     model_output_transform: DiffusionPredictionTransform
 
+# Define the TrainState with EMA parameters
 class TrainState(train_state.TrainState):
-    rngs:jax.random.PRNGKey
-    
+    rngs: jax.random.PRNGKey
+    ema_params: dict
+
     def get_random_key(self):
         rngs, subkey = jax.random.split(self.rngs)
         return self.replace(rngs=rngs), subkey
+
+    def apply_ema(self, decay: float=0.999):
+        new_ema_params = jax.tree_util.tree_map(
+            lambda ema, param: decay * ema + (1 - decay) * param,
+            self.ema_params,
+            self.params,
+        )
+        return self.replace(ema_params=new_ema_params)
 
 class DiffusionTrainer:
     state : TrainState
@@ -41,54 +51,50 @@ class DiffusionTrainer:
     model : nn.Module
     noise_schedule : NoiseScheduler
     model_output_transform:DiffusionPredictionTransform
+    ema_decay:float = 0.999
     
     def __init__(self, 
                  model:nn.Module, 
-                 batch_size:int,
-                 image_size:int,
                  optimizer: optax.GradientTransformation,
                  noise_schedule:NoiseScheduler,
                  rngs:jax.random.PRNGKey,
                  train_state:TrainState=None,
                  name:str="Diffusion",
                  load_from_checkpoint:bool=False,
-                 p2_loss_weight_k:float=1,
-                 p2_loss_weight_gamma:float=1,
                  param_transforms:Callable=None,
-                 model_output_transform:DiffusionPredictionTransform=EpsilonPredictionTransform()
+                 model_output_transform:DiffusionPredictionTransform=EpsilonPredictionTransform(),
+                 loss_fn=optax.l2_loss,
                  ):
         self.model = model
         self.noise_schedule = noise_schedule
         self.name = name
-        self.p2_loss_weights = self.noise_schedule.get_p2_weights(p2_loss_weight_k, p2_loss_weight_gamma)
         self.model_output_transform = model_output_transform
+        self.loss_fn = loss_fn
 
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=4, create=True)
         self.checkpointer = orbax.checkpoint.CheckpointManager(self.checkpoint_path(), checkpointer, options)
+
         if load_from_checkpoint:
             params = self.load()
         else:
             params = None
 
         if train_state == None:
-            self.init_state(
-                batch_size, image_size,
-                optimizer, rngs, params=params, 
-                model=model, param_transforms=param_transforms)
+            self.init_state(optimizer, rngs, params=params, model=model, param_transforms=param_transforms)
         else:
-            train_state.params = params
             self.state = train_state
             self.best_state = train_state
+            self.best_loss = 1e9
 
     def init_state(self, 
-                    batch_size:int,
-                    image_size:int,
                    optimizer: optax.GradientTransformation, 
                    rngs:jax.random.PRNGKey,
                    params:dict=None,
                    model:nn.Module=None,
                      param_transforms:Callable=None,
+                     batch_size=16,
+                    image_size=64
                    ):
         inp = jnp.ones((batch_size, image_size, image_size, 3))
         temb = jnp.ones((batch_size,))
@@ -101,6 +107,7 @@ class DiffusionTrainer:
         self.state = TrainState.create(
             apply_fn=model.apply,
             params=params,
+            ema_params=params,
             tx=optimizer,
             rngs=rngs,
         )
@@ -135,16 +142,16 @@ class DiffusionTrainer:
         save_args = orbax_utils.save_args_from_target(ckpt)
         self.checkpointer.save(epoch, ckpt, save_kwargs={'save_args': save_args})
 
-    def summary(self):
-        inp = jnp.ones((1, 64, 64, 3))
+    def summary(self, image_size=64):
+        inp = jnp.ones((1, image_size, image_size, 3))
         temb = jnp.ones((1,))
         print(self.model.tabulate(jax.random.key(0), inp, temb, console_kwargs={"width": 200, "force_jupyter":True, }))
 
     def _define_train_step(self):
         noise_schedule = self.noise_schedule
         model = self.model
-        p2_loss_weights = self.p2_loss_weights
         model_output_transform = self.model_output_transform
+        loss_fn = self.loss_fn
         @jax.jit
         def train_step(state:TrainState, batch):
             """Train for a single step."""
@@ -152,16 +159,20 @@ class DiffusionTrainer:
             noise_level, state = noise_schedule.generate_timesteps(images.shape[0], state)
             state, rngs = state.get_random_key()
             noise:jax.Array = jax.random.normal(rngs, shape=images.shape)
-            noisy_images, expected_output = model_output_transform.train_step(images, noise, noise_level, noise_schedule)
-            def loss_fn(params):
-                preds = model.apply(params, *noise_schedule.transform_inputs(noisy_images, noise_level))
-                nloss = jnp.mean(optax.l2_loss(preds.reshape((1, -1)) - expected_output.reshape((1, -1))), axis=1)
-                nloss *= p2_loss_weights[noise_level]
+            rates = noise_schedule.get_rates(noise_level)
+            noisy_images, c_in, expected_output = model_output_transform.forward_diffusion(images, noise, rates)
+            def model_loss(params):
+                preds = model.apply(params, *noise_schedule.transform_inputs(noisy_images*c_in, noise_level))
+                preds = model_output_transform.pred_transform(noisy_images, preds, rates)
+                nloss = loss_fn(preds, expected_output)
+                # nloss = jnp.mean(nloss, axis=1)
+                nloss *= noise_schedule.get_weights(noise_level)
                 nloss = jnp.mean(nloss)
                 loss = nloss
                 return loss
-            loss, grads = jax.value_and_grad(loss_fn)(state.params)
+            loss, grads = jax.value_and_grad(model_loss)(state.params)
             state = state.apply_gradients(grads=grads) 
+            state = state.apply_ema(self.ema_decay)
             return state, loss
         return train_step
     

@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 from .common import DiffusionSampler
 from ..utils import MarkovState, RandomMarkovState
-
 class DDPMSampler(DiffusionSampler):
     def _renoise(self, 
                  current_samples, reconstructed_samples, 
@@ -30,14 +29,15 @@ class SimpleDDPMSampler(DiffusionSampler):
         current_signal_rate, current_noise_rate = self.noise_schedule.get_rates(current_step)
         next_signal_rate, next_noise_rate = self.noise_schedule.get_rates(next_step)
         
+        pred_noise_coeff = ((next_noise_rate ** 2) * current_signal_rate) / (current_noise_rate * next_signal_rate)
+        
         noise_ratio_squared = (next_noise_rate ** 2) / (current_noise_rate ** 2)
-        betas = 1 - ((current_signal_rate ** 2) / (next_signal_rate ** 2))
+        signal_ratio_squared = (current_signal_rate ** 2) / (next_signal_rate ** 2)
+        betas = (1 - signal_ratio_squared)
         gamma = jnp.sqrt(noise_ratio_squared * betas)
         
+        next_samples = next_signal_rate * reconstructed_samples + pred_noise_coeff * pred_noise + noise * gamma
         # pred_noise_coeff = ((next_noise_rate ** 2) * current_signal_rate) / (current_noise_rate * next_signal_rate)
-        # next_samples = next_signal_rate * reconstructed_samples + pred_noise_coeff * pred_noise + noise * gamma
-       
         # next_samples =  (2 - jnp.sqrt(1 - betas)) * current_samples - betas * (pred_noise / current_noise_rate) + noise * gamma#jnp.sqrt(betas)
-        next_samples = (1 / (jnp.sqrt(1 - betas) + 1.e-24)) * (current_samples - betas * (pred_noise / current_noise_rate)) + noise * gamma
-        
+        # next_samples = (1 / (jnp.sqrt(1 - betas) + 1.e-24)) * (current_samples - betas * (pred_noise / current_noise_rate)) + noise * gamma
         return next_samples, state
