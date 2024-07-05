@@ -1,6 +1,6 @@
 # FlaxDiff
 
-## A complete and easy to understand Diffusion library for Generating Images
+## A versatile and easy to understand Diffusion library
 
 In recent years, Diffusion and Score based multi step models have taken over the generative AI domain. However, the latest research in this field have been very math intensive. Its not very easy to understand how exactly some of the current state-of-the-art diffusion models work and generate such awesome images. Replicating the research in code can be at times quite daunting. 
 
