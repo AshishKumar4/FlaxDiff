@@ -11,6 +11,8 @@ setup(
     packages=find_packages(),
     version='0.1.0',
     description='A versatile and easy to understand Diffusion library',
+    long_description=open('README.md').read(),
+    long_description_content_type='text/markdown',
     author='Ashish Kumar Singh',
     author_email='ashishkmr472@gmail.com',
     install_requires=required_packages,
