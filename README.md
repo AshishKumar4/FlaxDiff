@@ -1,4 +1,4 @@
-# FlaxDiff
+# ![](logo.jpeg "FlaxDiff")
 
 ## A Versatile and Easy-to-Understand Diffusion Library
 
