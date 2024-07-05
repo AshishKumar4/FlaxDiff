@@ -16,7 +16,6 @@ class WeightStandardizedConv(nn.Module):
     dtype: Any = jnp.float32
     param_dtype: Any = jnp.float32
 
-
     @nn.compact
     def __call__(self, x):
         """
@@ -194,7 +193,7 @@ class Upsample(nn.Module):
         out = ConvLayer(
             "conv",
             features=self.features,
-            kernel_size=(1, 1),
+            kernel_size=(3, 3),
             strides=(1, 1),
         )(out)
         if residual is not None:
@@ -239,7 +238,7 @@ class AttentionBlock(nn.Module):
         inner_dim = self.heads * self.dim_head
         B, H, W, C = x.shape
         normed_x = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)(x)
-        if self.use_projection:
+        if self.use_projection == True:
             if self.use_linear_attention:
                 projected_x = nn.Dense(features=inner_dim, use_bias=False, precision=self.precision, dtype=self.dtype, name=f'project_in')(normed_x)
             else:
@@ -261,7 +260,7 @@ class AttentionBlock(nn.Module):
             use_bias=False,
         )(projected_x)
 
-        if self.use_projection:
+        if self.use_projection == True:
             if self.use_linear_attention:
                 projected_x = nn.Dense(features=C, precision=self.precision, dtype=self.dtype, use_bias=False, name=f'project_out')(projected_x)
             else:
@@ -380,7 +379,7 @@ class SimpleUNet(nn.Module):
                 )(x, temb)
                 if attention_config is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
                     x = AttentionBlock(heads=attention_config['heads'], 
-                                       dim_head=dim_out // attention_config['heads'],
+                                       dim_head=dim_in // attention_config['heads'],
                                        name=f"down_{i}_attention_{j}")(x)
                 # print("down residual for feature level", i, "is of shape", x.shape, "features", dim_in)
                 downs.append(x)
@@ -410,7 +409,7 @@ class SimpleUNet(nn.Module):
             )(x, temb)
             if middle_attention is not None and j == self.num_middle_res_blocks - 1:   # Apply attention only on the last block
                 x = AttentionBlock(heads=attention_config['heads'], 
-                                   dim_head=dim_out // attention_config['heads'],
+                                   dim_head=middle_dim_out // attention_config['heads'],
                                    use_linear_attention=False, name=f"middle_attention_{j}")(x)
             x = ResidualBlock(
                 conv_type,

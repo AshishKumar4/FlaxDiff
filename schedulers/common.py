@@ -94,3 +94,8 @@ class GeneralizedNoiseScheduler(NoiseScheduler):
         sigmas_discrete = sigmas_discrete.astype(jnp.int32)
         return x, sigmas_discrete
     
+    def get_timesteps(self, sigmas):
+        """
+        Inverse of the get_sigmas method
+        """
+        raise NotImplementedError("This method should be implemented in the subclass")

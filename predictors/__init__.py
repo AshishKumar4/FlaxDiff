@@ -70,7 +70,7 @@ class VPredictionTransform(DiffusionPredictionTransform):
         variance = signal_rate**2 + noise_rate**2
         return v / jnp.sqrt(variance)
     
-class KarraasPredictionTransform(DiffusionPredictionTransform):
+class KarrasPredictionTransform(DiffusionPredictionTransform):
     def __init__(self, sigma_data=0.5) -> None:
         super().__init__()
         self.sigma_data = sigma_data
