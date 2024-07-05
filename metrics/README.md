@@ -1,1 +1,0 @@
-The FID Metrics utils and inception model were taken from https://github.com/matthias-wright/jax-fid

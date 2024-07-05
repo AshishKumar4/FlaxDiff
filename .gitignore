@@ -1,2 +1,6 @@
 __pycache__
 *.pyc
+.ipynb_checkpoints
+checkpoints
+good models
+*(old).ipynb
