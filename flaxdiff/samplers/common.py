@@ -62,11 +62,11 @@ class DiffusionSampler():
         steps = jnp.linspace(end_step, start_step, diffusion_steps, dtype=jnp.int16)[::-1]
         return steps
     
-    def get_initial_samples(self, num_images, rngs:jax.random.PRNGKey, start_step):
+    def get_initial_samples(self, num_images, rngs:jax.random.PRNGKey, start_step, image_size=64):
         start_step = self.scale_steps(start_step)
         alpha_n, sigma_n = self.noise_schedule.get_rates(start_step)
         variance = jnp.sqrt(alpha_n ** 2 + sigma_n ** 2) 
-        return jax.random.normal(rngs, (num_images, IMAGE_SIZE, IMAGE_SIZE, 3)) * variance
+        return jax.random.normal(rngs, (num_images, image_size, image_size, 3)) * variance
 
     def generate_images(self,
                         num_images=16, 
