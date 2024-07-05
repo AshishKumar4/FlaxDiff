@@ -4,3 +4,5 @@ __pycache__
 checkpoints
 good models
 *(old).ipynb
+.env
+.env
