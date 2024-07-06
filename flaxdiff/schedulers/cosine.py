@@ -27,6 +27,7 @@ class CosineGeneralNoiseScheduler(GeneralizedNoiseScheduler):
     
     def get_sigmas(self, steps):
         return jnp.tan(self.theta_min + steps * (self.theta_max - self.theta_min)) / self.kappa
+    
 class CosineContinuousNoiseScheduler(ContinuousNoiseScheduler):
     def get_rates(self, steps, shape=(-1, 1, 1, 1)) -> tuple[jnp.ndarray, jnp.ndarray]:
         signal_rates = jnp.cos((jnp.pi * steps) / (2 * self.max_timesteps))
