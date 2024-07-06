@@ -187,7 +187,7 @@ plotImages(samples, dpi=300)
 - The [k-diffusion](https://github.com/crowsonkb/k-diffusion/) codebase Katherine Crowson, which hosts an exhaustive implementation of the EDM paper (Karras et al) along with the DPM-Solver, DPM-Solver++ (both 2S and 2M) in pytorch. Most other diffusion libraries borrow from this.
 - The [Official EDM implementation](https://github.com/NVlabs/edm) by Tero Karras, in pytorch. Really neat code and the reference implementation for all the karras based samplers/schedules.
 - The [Hugging Face Diffusers Library](https://github.com/huggingface/diffusers), Arguably the most complete set of implementations for the latest state-of-the-art techniques and concepts in this field. Written mainly in pytorch, but with flax implementations also available for a lot of the concepts, the focus of this repository is on completeness and ease of understanding as well.
-- The [Keras DDPM Tutorial](https://keras.io/examples/generative/ddpm/) by A_K Nain, and the [Keras DDPM implementation](https://keras.io/examples/generative/ddim/) by András Béres, which are great starting points for beginners to understand the basics of diffusion models. I started my journey by trying to implement the concepts introduced in these tutorials from scratch.
+- The [Keras DDPM Tutorial](https://keras.io/examples/generative/ddpm/) by A_K Nain, and the [Keras DDIM implementation](https://keras.io/examples/generative/ddim/) by András Béres, which are great starting points for beginners to understand the basics of diffusion models. I started my journey by trying to implement the concepts introduced in these tutorials from scratch.
 - Special thanks to ChatGPT-4 by OpenAI for helping clear my doubts.
 
 ## Pending things to do list
