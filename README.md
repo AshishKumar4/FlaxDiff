@@ -10,9 +10,43 @@ I initially started this project in Keras, being familiar with TensorFlow 2.0, b
 
 The `Diffusion_flax_linen.ipynb` notebook is my main workspace for experiments. Several checkpoints are uploaded to the `pretrained` folder along with a copy of the working notebook associated with each checkpoint. *You may need to copy the notebook to the working root for it to function properly.*
 
+## Example Notebooks from scratch
+
+In the `example notebooks` folder, you will find comprehensive notebooks for various diffusion techniques, written entirely from scratch and are independent of the FlaxDiff library. Each notebook includes detailed explanations of the underlying mathematics and concepts, making them invaluable resources for learning and understanding diffusion models.
+
+### Available Notebooks
+
+- **[DDPM and DDIM Explained](example notebooks/ddpm + ddim flax.ipynb)**
+  - **WORK IN PROGRESS** An in-depth exploration of the DDPM (Denoising Diffusion Probabilistic Models) framework and also DDIM (Denoising Diffusion Implicit Models), covering the theoretical foundations and practical implementations of both techniques and providing step-by-step coding examples.
+
+- **[EDM (Elucidating the Design Space of Diffusion-based Generative Models)](example notebooks/edm flax.ipynb)**
+  - **TODO** A thorough guide to EDM, discussing the innovative approaches and techniques used in this advanced diffusion model.
+
+These notebooks aim to provide a very easy to understand and step-by-step guide to the various diffusion models and techniques. They are designed to be beginner-friendly, and thus although they may not adhere to the exact formulations and implementations of the original papers to make them more understandable and generalizable, I have tried my best to keep them as accurate as possible. If you find any mistakes or have any suggestions, please feel free to open an issue or a pull request.
+
 ## Disclaimer (and About Me)
 
 I worked as a Machine Learning Researcher at Hyperverge from 2019-2021, focusing on computer vision, specifically facial anti-spoofing and facial detection & recognition. Since switching to my current job in 2021, I haven't engaged in as much R&D work, leading me to start this pet project to revisit and relearn the fundamentals and get familiar with the state-of-the-art. My current role involves primarily Golang system engineering with some applied ML work just sprinkled in. Therefore, the code may reflect my learning journey. Please forgive any mistakes and do open an issue to let me know.
+
+## Index
+
+- [A Versatile and Easy-to-Understand Diffusion Library](#a-versatile-and-easy-to-understand-diffusion-library)
+- [Disclaimer (and About Me)](#disclaimer-and-about-me)
+- [Features](#features)
+  - [Schedulers](#schedulers)
+  - [Model Predictors](#model-predictors)
+  - [Samplers](#samplers)
+  - [Training](#training)
+  - [Models](#models)
+- [Installation of FlaxDiff](#installation)
+- [Getting Started with FlaxDiff](#getting-started)
+  - [Training Example](#training-example)
+  - [Inference Example](#inference-example)
+- [References and Acknowledgements](#references-and-acknowledgements)
+- [Pending things to do list](#pending-things-to-do-list)
+- [Gallery](#gallery)
+- [Contribution](#contribution)
+- [License](#license)
 
 ## Features
 
