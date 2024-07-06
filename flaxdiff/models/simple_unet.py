@@ -135,7 +135,6 @@ class SeparableConv(nn.Module):
         )(depthwise)
         return pointwise
 
-
 class ConvLayer(nn.Module):
     conv_type:str
     features:int

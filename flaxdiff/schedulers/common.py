@@ -13,9 +13,16 @@ class NoiseScheduler():
         self.dtype = dtype
         self.clip_min = clip_min
         self.clip_max = clip_max
+        if type(timesteps) == int and timesteps > 1:
+            timestep_generator = lambda rng, batch_size, max_timesteps = timesteps: jax.random.randint(rng, (batch_size,), 0, max_timesteps)
+        else:
+            timestep_generator = lambda rng, batch_size, max_timesteps = timesteps: jax.random.uniform(rng, (batch_size,), minval=0, maxval=max_timesteps)
+        self.timestep_generator = timestep_generator
 
     def generate_timesteps(self, batch_size, state:RandomMarkovState) -> tuple[jnp.ndarray, RandomMarkovState]:
-        raise NotImplementedError
+        state, rng = state.get_random_key()
+        timesteps = self.timestep_generator(rng, batch_size, self.max_timesteps)
+        return timesteps, state
     
     def get_weights(self, steps):
         raise NotImplementedError
@@ -65,16 +72,6 @@ class GeneralizedNoiseScheduler(NoiseScheduler):
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
         self.sigma_data = sigma_data
-        if type(timesteps) == int and timesteps > 1:
-            timestep_generator = lambda rng, batch_size, max_timesteps = timesteps: jax.random.randint(rng, (batch_size,), 0, max_timesteps)
-        else:
-            timestep_generator = lambda rng, batch_size, max_timesteps = timesteps: jax.random.uniform(rng, (batch_size,), minval=0, maxval=max_timesteps)
-        self.timestep_generator = timestep_generator
-
-    def generate_timesteps(self, batch_size, state:RandomMarkovState) -> tuple[jnp.ndarray, RandomMarkovState]:
-        state, rng = state.get_random_key()
-        timesteps = self.timestep_generator(rng, batch_size, self.max_timesteps)
-        return timesteps, state
     
     def get_weights(self, steps, shape=(-1, 1, 1, 1)):
         sigma = self.get_sigmas(steps)
