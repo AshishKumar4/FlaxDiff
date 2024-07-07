@@ -16,7 +16,7 @@ In the `example notebooks` folder, you will find comprehensive notebooks for var
 
 ### Available Notebooks
 
-- **[DDPM and DDIM Explained](example%20notebooks/ddpm%20%2B%20ddim%20flax.ipynb)**
+- **[Diffusion explained](example%20notebooks/simple%20diffusion%20flax.ipynb)**
   - **WORK IN PROGRESS** An in-depth exploration of the DDPM (Denoising Diffusion Probabilistic Models) framework and also DDIM (Denoising Diffusion Implicit Models), covering the theoretical foundations and practical implementations of both techniques and providing step-by-step coding examples.
 
 - **[EDM (Elucidating the Design Space of Diffusion-based Generative Models)](example%20notebooks/edm%20flax.ipynb)**
