@@ -1,6 +1,6 @@
 # ![](images/logo.jpeg "FlaxDiff")
 
-## A Versatile and Easy-to-Understand Diffusion Library
+## A Versatile and simple Diffusion Library
 
 In recent years, diffusion and score-based multi-step models have revolutionized the generative AI domain. However, the latest research in this field has become highly math-intensive, making it challenging to understand how state-of-the-art diffusion models work and generate such impressive images. Replicating this research in code can be daunting.
 
