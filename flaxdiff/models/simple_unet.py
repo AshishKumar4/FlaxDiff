@@ -69,14 +69,11 @@ class PixelShuffle(nn.Module):
 
 class TimeEmbedding(nn.Module):
     features:int
-    max_timesteps:int=10000
+    nax_positions:int=10000
 
     def setup(self):
-        # self.embeddings = nn.Embed(
-        #     num_embeddings=max_timesteps, features=out_features
-        # )
         half_dim = self.features // 2
-        emb = jnp.log(self.max_timesteps) / (half_dim - 1)
+        emb = jnp.log(self.nax_positions) / (half_dim - 1)
         emb = jnp.exp(-emb * jnp.arange(half_dim, dtype=jnp.float32))
         self.embeddings = emb
 
