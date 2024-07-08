@@ -17,7 +17,7 @@ In the `example notebooks` folder, you will find comprehensive notebooks for var
 ### Available Notebooks
 
 - **[Diffusion explained](example%20notebooks/simple%20diffusion%20flax.ipynb)**
-  - **WORK IN PROGRESS** An in-depth exploration of the DDPM (Denoising Diffusion Probabilistic Models) framework and also DDIM (Denoising Diffusion Implicit Models), covering the theoretical foundations and practical implementations of both techniques and providing step-by-step coding examples.
+  - **WORK IN PROGRESS** An in-depth exploration of the concept of Diffusion based generative models, DDPM (Denoising Diffusion Probabilistic Models), DDIM (Denoising Diffusion Implicit Models), and the SDE/ODE generalizations of diffusion, with step-by-step explainations and code.
 
 - **[EDM (Elucidating the Design Space of Diffusion-based Generative Models)](example%20notebooks/edm%20flax.ipynb)**
   - **TODO** A thorough guide to EDM, discussing the innovative approaches and techniques used in this advanced diffusion model.
@@ -27,6 +27,8 @@ These notebooks aim to provide a very easy to understand and step-by-step guide 
 ## Disclaimer (and About Me)
 
 I worked as a Machine Learning Researcher at Hyperverge from 2019-2021, focusing on computer vision, specifically facial anti-spoofing and facial detection & recognition. Since switching to my current job in 2021, I haven't engaged in as much R&D work, leading me to start this pet project to revisit and relearn the fundamentals and get familiar with the state-of-the-art. My current role involves primarily Golang system engineering with some applied ML work just sprinkled in. Therefore, the code may reflect my learning journey. Please forgive any mistakes and do open an issue to let me know.
+
+Also, few of the text may be generated with help of github copilot, so please excuse any mistakes in the text.
 
 ## Index
 
