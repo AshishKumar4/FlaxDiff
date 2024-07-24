@@ -16,7 +16,7 @@ In the `example notebooks` folder, you will find comprehensive notebooks for var
 
 ### Available Notebooks
 
-- **[Diffusion explained (nbviewer link)](https://github.com/AshishKumar4/FlaxDiff/blob/main/tutorial%20notebooks/edm%20tutorial.ipynb) [(local link)](tutorial%20notebooks/simple%20diffusion%20flax.ipynb)** 
+- **[Diffusion explained (nbviewer link)](https://nbviewer.org/github/AshishKumar4/FlaxDiff/blob/main/tutorial%20notebooks/simple%20diffusion%20flax.ipynb) [(local link)](tutorial%20notebooks/simple%20diffusion%20flax.ipynb)** 
 
   - **WORK IN PROGRESS** An in-depth exploration of the concept of Diffusion based generative models, DDPM (Denoising Diffusion Probabilistic Models), DDIM (Denoising Diffusion Implicit Models), and the SDE/ODE generalizations of diffusion, with step-by-step explainations and code.
   
