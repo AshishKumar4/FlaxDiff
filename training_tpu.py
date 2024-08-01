@@ -6,7 +6,6 @@ from typing import Dict, Callable, Sequence, Any, Union
 from dataclasses import field
 import jax.numpy as jnp
 import grain.python as pygrain
-import tensorflow as tf
 import numpy as np
 import augmax
 
@@ -34,27 +33,6 @@ import argparse
 ################################################# Initialization ####################################################
 #####################################################################################################################
 
-# %%
-jax.distributed.initialize() 
-
-# %%
-print(f"Number of devices: {jax.device_count()}")
-print(f"Local devices: {jax.local_devices()}")
-
-# %%
-normalizeImage = lambda x: jax.nn.standardize(x, mean=[127.5], std=[127.5])
-denormalizeImage = lambda x: (x + 1.0) * 127.5
-
-
-def plotImages(imgs, fig_size=(8, 8), dpi=100):
-    fig = plt.figure(figsize=fig_size, dpi=dpi)
-    imglen = imgs.shape[0]
-    for i in range(imglen):
-        plt.subplot(fig_size[0], fig_size[1], i + 1)
-        plt.imshow(jnp.astype(denormalizeImage(imgs[i, :, :, :]), jnp.uint8))
-        plt.axis("off")
-    plt.show()
-
 class RandomClass():
     def __init__(self, rng: jax.random.PRNGKey):
         self.rng = rng
@@ -79,10 +57,6 @@ class RandomMarkovState(MarkovState):
         rng, subkey = jax.random.split(self.rng)
         return RandomMarkovState(rng), subkey
 
-# %% [markdown]
-# # Data Pipeline
-
-# %%
 def defaultTextEncodeModel(backend="jax"):
     modelname = "openai/clip-vit-large-patch14"
     if backend == "jax":
@@ -146,6 +120,7 @@ def data_source_cc12m(source="/home/mrwhite0racle/research/FlaxDiff/datasets/gcs
 def labelizer_oxford_flowers102(path):
     with open(path, "r") as f:
         textlabels = [i.strip() for i in f.readlines()]
+    import tensorflow as tf
     textlabels = tf.convert_to_tensor(textlabels)
     def load_labels(sample):
         return textlabels[sample['label']]
@@ -188,16 +163,18 @@ def unpack_dict_of_byte_arrays(packed_data):
         unpacked_dict[key] = byte_array
     return unpacked_dict
 
-def get_dataset_grain(data_name="oxford_flowers102", 
+def get_dataset_grain(data_name="cc12m", 
                       batch_size=64, image_scale=256, 
                       count=None, num_epochs=None,
-                      text_encoders=defaultTextEncodeModel(), 
+                      text_encoders=None, 
                       method=jax.image.ResizeMethod.LANCZOS3,
                       grain_worker_count=32, grain_read_thread_count=64, 
                       grain_read_buffer_size=50, grain_worker_buffer_size=20):
     dataset = datasetMap[data_name]
     data_source = dataset["source"]()
     labelizer = dataset["labelizer"]()
+    
+    local_batch_size = batch_size // jax.process_count()
     
     import cv2
     
@@ -235,7 +212,7 @@ def get_dataset_grain(data_name="oxford_flowers102",
         shard_options=pygrain.NoSharding(),
     )
 
-    transformations = [augmenter(), pygrain.Batch(batch_size, drop_remainder=True)]
+    transformations = [augmenter(), pygrain.Batch(local_batch_size, drop_remainder=True)]
 
     loader = pygrain.DataLoader(
         data_source=data_source,
@@ -252,13 +229,14 @@ def get_dataset_grain(data_name="oxford_flowers102",
     return {
         "train": get_trainset,
         "train_len": len(data_source),
-        "batch_size": batch_size,
+        "local_batch_size": local_batch_size,
+        "global_batch_size": batch_size,
         "null_labels": null_labels,
         "null_labels_full": null_labels_full,
         "model": model,
         "tokenizer": tokenizer,
     }
-
+    
 # %%
 from flaxdiff.schedulers import CosineNoiseSchedule, NoiseScheduler, GeneralizedNoiseScheduler, KarrasVENoiseScheduler, EDMNoiseScheduler
 from flaxdiff.predictors import VPredictionTransform, EpsilonPredictionTransform, DiffusionPredictionTransform, DirectPredictionTransform, KarrasPredictionTransform
@@ -702,7 +680,7 @@ class SimpleTrainer:
         device_count = jax.device_count()
         # train_ds = flax.jax_utils.prefetch_to_device(train_ds, jax.devices())
         
-        summary_writer = self.init_tensorboard(data['batch_size'], steps_per_epoch, epochs)
+        summary_writer = self.init_tensorboard(data['global_batch_size'], steps_per_epoch, epochs)
         
         while self.latest_epoch <= epochs:
             self.latest_epoch += 1
@@ -898,9 +876,9 @@ class DiffusionTrainer(SimpleTrainer):
 
     def fit(self, data, steps_per_epoch, epochs):
         null_labels_full = data['null_labels_full']
-        batch_size = data['batch_size']
+        local_batch_size = data['local_batch_size']
         text_embedder = data['model']
-        super().fit(data, steps_per_epoch, epochs, {"batch_size":batch_size, "null_labels_seq":null_labels_full, "text_embedder":text_embedder})
+        super().fit(data, steps_per_epoch, epochs, {"batch_size":local_batch_size, "null_labels_seq":null_labels_full, "text_embedder":text_embedder})
 
 # %%
 # Parse command-line arguments
@@ -932,121 +910,136 @@ parser.add_argument('--activation', type=str, default='swish', help='activation 
 parser.add_argument('--dtype', type=str, default='bfloat16', help='dtype to use')
 parser.add_argument('--precision', type=str, default='high', help='precision to use')
 
+def main(argv):
+    # %%
+    jax.distributed.initialize() 
 
-args = parser.parse_args()
+    print(f"Number of devices: {jax.device_count()}")
+    print(f"Local devices: {jax.local_devices()}")
 
-DTYPE_MAP = {
-    'bfloat16': jnp.bfloat16,
-    'float32': jnp.float32
-}
+    DTYPE_MAP = {
+        'bfloat16': jnp.bfloat16,
+        'float32': jnp.float32
+    }
 
-PRECISION_MAP = {
-    'high': jax.lax.Precision.HIGH,
-    'default': jax.lax.Precision.DEFAULT,
-    'highes': jax.lax.Precision.HIGHEST
-}
+    PRECISION_MAP = {
+        'high': jax.lax.Precision.HIGH,
+        'default': jax.lax.Precision.DEFAULT,
+        'highes': jax.lax.Precision.HIGHEST
+    }
 
-ACTIVATION_MAP = {
-    'swish': jax.nn.swish,
-    'mish': jax.nn.mish,
-}
+    ACTIVATION_MAP = {
+        'swish': jax.nn.swish,
+        'mish': jax.nn.mish,
+    }
 
-DTYPE = DTYPE_MAP[args.dtype]
-PRECISION = PRECISION_MAP[args.precision]
+    DTYPE = DTYPE_MAP[args.dtype]
+    PRECISION = PRECISION_MAP[args.precision]
 
-GRAIN_WORKER_COUNT = args.GRAIN_WORKER_COUNT
-GRAIN_READ_THREAD_COUNT = args.GRAIN_READ_THREAD_COUNT
-GRAIN_READ_BUFFER_SIZE = args.GRAIN_READ_BUFFER_SIZE
-GRAIN_WORKER_BUFFER_SIZE = args.GRAIN_WORKER_BUFFER_SIZE
+    GRAIN_WORKER_COUNT = args.GRAIN_WORKER_COUNT
+    GRAIN_READ_THREAD_COUNT = args.GRAIN_READ_THREAD_COUNT
+    GRAIN_READ_BUFFER_SIZE = args.GRAIN_READ_BUFFER_SIZE
+    GRAIN_WORKER_BUFFER_SIZE = args.GRAIN_WORKER_BUFFER_SIZE
 
-BATCH_SIZE = args.BATCH_SIZE
-IMAGE_SIZE = args.IMAGE_SIZE
+    BATCH_SIZE = args.BATCH_SIZE
+    IMAGE_SIZE = args.IMAGE_SIZE
 
-dataset_name = args.dataset
-datalen = len(datasetMap[dataset_name]['source']())
-batches = datalen // BATCH_SIZE
+    dataset_name = args.dataset
+    datalen = len(datasetMap[dataset_name]['source']())
+    batches = datalen // BATCH_SIZE
+    # Define the configuration using the command-line arguments
+    attention_configs = [
+        None,
+    ]
 
-# Define the configuration using the command-line arguments
-attention_configs = [
-    None,
-]
+    attention_configs += [
+        {"heads": args.attention_heads, "dtype": DTYPE, "flash_attention": args.flash_attention, "use_projection": args.use_projection, "use_self_and_cross": args.use_self_and_cross},
+    ] * (len(args.feature_depths) - 2)
 
-attention_configs += [
-    {"heads": args.attention_heads, "dtype": DTYPE, "flash_attention": args.flash_attention, "use_projection": args.use_projection, "use_self_and_cross": args.use_self_and_cross},
-] * (len(args.feature_depths) - 2)
+    attention_configs += [
+        {"heads": args.attention_heads, "dtype": DTYPE, "flash_attention": False, "use_projection": False, "use_self_and_cross": False},
+    ]
 
-attention_configs += [
-    {"heads": args.attention_heads, "dtype": DTYPE, "flash_attention": False, "use_projection": False, "use_self_and_cross": False},
-]
+    CONFIG = {
+        "model": {
+            "emb_features": args.emb_features,
+            "feature_depths": args.feature_depths,
+            "attention_configs": attention_configs,
+            "num_res_blocks": args.num_res_blocks,
+            "num_middle_res_blocks": args.num_middle_res_blocks,
+            "dtype": DTYPE,
+            "precision": PRECISION,
+            "activation": ACTIVATION_MAP[args.activation],
+        },
+        "dataset": {
+            "name": dataset_name,
+            "length": datalen,
+            "batches": datalen // BATCH_SIZE,
+        },
+        "learning_rate": args.learning_rate,
+        "batch_size": BATCH_SIZE,
+        "input_shapes": {
+            "x": (args.IMAGE_SIZE, args.IMAGE_SIZE, 3),
+            "temb": (),
+            "textcontext": (77, 768)
+        },
+    }
+    
+    text_encoders = defaultTextEncodeModel()
+    
+    data = get_dataset_grain(
+        CONFIG['dataset']['name'], 
+        batch_size=BATCH_SIZE, image_scale=IMAGE_SIZE,
+        grain_worker_count=GRAIN_WORKER_COUNT, grain_read_thread_count=GRAIN_READ_THREAD_COUNT,
+        grain_read_buffer_size=GRAIN_READ_BUFFER_SIZE, grain_worker_buffer_size=GRAIN_WORKER_BUFFER_SIZE,
+        text_encoders=text_encoders, 
+    )
 
-CONFIG = {
-    "model": {
-        "emb_features": args.emb_features,
-        "feature_depths": args.feature_depths,
-        "attention_configs": attention_configs,
-        "num_res_blocks": args.num_res_blocks,
-        "num_middle_res_blocks": args.num_middle_res_blocks,
-        "dtype": DTYPE,
-        "precision": PRECISION,
-        "activation": ACTIVATION_MAP[args.activation],
-    },
-    "dataset": {
-        "name": dataset_name,
-        "length": datalen,
-        "batches": datalen // BATCH_SIZE,
-    },
-    "learning_rate": args.learning_rate,
-    "input_shapes": {
-        "x": (args.IMAGE_SIZE, args.IMAGE_SIZE, 3),
-        "temb": (),
-        "textcontext": (77, 768)
-    },
-}
+    # dataset = iter(data['train']())
 
-cosine_schedule = CosineNoiseSchedule(1000, beta_end=1)
-karas_ve_schedule = KarrasVENoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
-edm_schedule = EDMNoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
+    # for _ in tqdm.tqdm(range(1000)):
+    #     batch = next(dataset)
 
-experiment_name = "{name}_{date}".format(
-    name="Diffusion_SDE_VE_TEXT", date=datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-)
-print("Experiment_Name:", experiment_name)
+    cosine_schedule = CosineNoiseSchedule(1000, beta_end=1)
+    karas_ve_schedule = KarrasVENoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
+    edm_schedule = EDMNoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
 
-unet = Unet(**CONFIG['model'])
+    experiment_name = "{name}_{date}".format(
+        name="Diffusion_SDE_VE_TEXT", date=datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+    )
+    print("Experiment_Name:", experiment_name)
 
-learning_rate = CONFIG['learning_rate']
-solver = optax.adam(learning_rate)
-# solver = optax.adamw(2e-6)
+    unet = Unet(**CONFIG['model'])
 
-trainer = DiffusionTrainer(unet, optimizer=solver, 
-                           input_shapes=CONFIG['input_shapes'], 
-                           noise_schedule=edm_schedule,
-                           rngs=jax.random.PRNGKey(4), 
-                           name=experiment_name,
-                           model_output_transform=KarrasPredictionTransform(sigma_data=edm_schedule.sigma_data),
-                        #    train_state=trainer.best_state,
-                        #    loss_fn=lambda x, y: jnp.abs(x - y),
-                            # param_transforms=params_transform,
-                        #    load_from_checkpoint=True,
-                           wandb_config={
-                                 "project": "flaxdiff",
-                                 "config": CONFIG,
-                                 "name": experiment_name,
-                               },
-                           )
+    learning_rate = CONFIG['learning_rate']
+    solver = optax.adam(learning_rate)
+    # solver = optax.adamw(2e-6)
+
+    trainer = DiffusionTrainer(unet, optimizer=solver, 
+                            input_shapes=CONFIG['input_shapes'], 
+                            noise_schedule=edm_schedule,
+                            rngs=jax.random.PRNGKey(4), 
+                            name=experiment_name,
+                            model_output_transform=KarrasPredictionTransform(sigma_data=edm_schedule.sigma_data),
+                            #    train_state=trainer.best_state,
+                            #    loss_fn=lambda x, y: jnp.abs(x - y),
+                                # param_transforms=params_transform,
+                            #    load_from_checkpoint=True,
+                            wandb_config={
+                                    "project": "flaxdiff",
+                                    "config": CONFIG,
+                                    "name": experiment_name,
+                                },
+                            )
 
 
-# %%
-print(trainer.summary())
+    # %%
+    batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
+    print(f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
+    jax.profiler.start_server(6009)
+    final_state = trainer.fit(data, batches, epochs=10)
 
-# %%
-data = get_dataset_grain(CONFIG['dataset']['name'], 
-                         batch_size=BATCH_SIZE, image_scale=IMAGE_SIZE,
-                         grain_worker_count=GRAIN_WORKER_COUNT, grain_read_thread_count=GRAIN_READ_THREAD_COUNT,
-                        grain_read_buffer_size=GRAIN_READ_BUFFER_SIZE, grain_worker_buffer_size=GRAIN_WORKER_BUFFER_SIZE,
-                         )
 
-batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
-print(f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
-jax.profiler.start_server(6009)
-final_state = trainer.fit(data, batches, epochs=10)
+if __name__ == '__main__':
+    args = parser.parse_args()
+    main(args)
