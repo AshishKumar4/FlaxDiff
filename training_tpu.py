@@ -890,7 +890,7 @@ parser.add_argument('--GRAIN_WORKER_BUFFER_SIZE', type=int, default=20, help='Gr
 
 parser.add_argument('--BATCH_SIZE', type=int, default=64, help='Batch size')
 parser.add_argument('--IMAGE_SIZE', type=int, default=128, help='Image size')
-parser.add_argument('--epochs', type=int, default=3, help='Number of epochs')
+parser.add_argument('--epochs', type=int, default=20, help='Number of epochs')
 parser.add_argument('--steps_per_epoch', type=int, default=None, help='Steps per epoch')
 parser.add_argument('--dataset', type=str, default='cc12m', help='Dataset to use')
 
