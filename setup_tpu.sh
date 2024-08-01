@@ -6,6 +6,8 @@ pip install jax[tpu] flax[all] -f https://storage.googleapis.com/jax-releases/li
 # Install CPU version of tensorflow
 pip install tensorflow[cpu] keras orbax optax clu grain augmax transformers opencv-python pandas tensorflow-datasets jupyterlab python-dotenv scikit-learn termcolor wrapt wandb
 
+pip install flaxdiff
+
 wget https://secure.nic.cz/files/knot-resolver/knot-resolver-release.deb
 sudo dpkg -i knot-resolver-release.deb
 sudo apt update
