@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0", 'flax>=0.8.4', 'optax>=0.2.2', 'jax>=0.4.28', 'orbax', 'clu']
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flaxdiff"
+version = "0.1.1"
+authors = [
+  { name="Ashish Kumar Singh", email="ashishkmr472@gmail.com" },
+]
+description = "A versatile and easy to understand Diffusion library"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/AshishKumar4/FlaxDiff"
+Issues = "https://github.com/AshishKumar4/FlaxDiff/issues"

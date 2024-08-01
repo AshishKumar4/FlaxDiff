@@ -6,7 +6,6 @@ required_packages=[
     'jax>=0.4.28',
     'orbax', 
     'clu', 
-    'mlcommons'
 ]
 
 setup(
