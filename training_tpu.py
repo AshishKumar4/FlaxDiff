@@ -983,6 +983,7 @@ def main(argv):
             "temb": (),
             "textcontext": (77, 768)
         },
+        "arguments": args
     }
     
     text_encoders = defaultTextEncodeModel()
