@@ -1,9 +1,12 @@
 from setuptools import find_packages, setup
 
 required_packages=[
-    'flax==0.8.4', 
+    'flax>=0.8.4', 
     'optax>=0.2.2', 
-    'jax==0.4.28',
+    'jax>=0.4.28',
+    'orbax', 
+    'clu', 
+    'mlcommons'
 ]
 
 setup(
