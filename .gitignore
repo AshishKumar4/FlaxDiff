@@ -10,3 +10,5 @@ tensorboard
 wandb
 gcs_mount
 datacache
+*.deb
+gcsfuse.yml
