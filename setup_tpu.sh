@@ -4,11 +4,7 @@
 pip install jax[tpu] flax[all] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
 # Install CPU version of tensorflow
-pip install tensorflow[cpu] keras orbax optax clu grain augmax transformers opencv-python pandas 
-
-pip install tensorflow-datasets jupyterlab python-dotenv scikit-learn termcolor wrapt
-
-pip install "packaging>=22.0"
+pip install tensorflow[cpu] keras orbax optax clu grain augmax transformers opencv-python pandas tensorflow-datasets jupyterlab python-dotenv scikit-learn termcolor wrapt wandb
 
 wget https://secure.nic.cz/files/knot-resolver/knot-resolver-release.deb
 sudo dpkg -i knot-resolver-release.deb
@@ -66,7 +62,7 @@ sudo apt update
 sudo apt install gcsfuse
 
 # Define the file name
-gcsfuse_conf="gcsfuse.yml"
+gcsfuse_conf="$HOME/gcsfuse.yml"
 
 # Define the contents of the file
 gcsfuse_conf_content=$(cat <<EOF
