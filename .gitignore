@@ -7,3 +7,6 @@ good models
 .env
 .env
 tensorboard
+wandb
+gcs_mount
+datacache
