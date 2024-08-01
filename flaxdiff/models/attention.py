@@ -109,48 +109,56 @@ def jax_memory_efficient_attention(
 
     return jnp.concatenate(res, axis=-3)  # fuse the chunked result back
 
+
 class EfficientAttention(nn.Module):
     """
-    Simple implementation of memory efficient attention.
+    Based on the pallas attention implementation.
     """
     query_dim: int
     heads: int = 4
     dim_head: int = 64
     dtype: Any = jnp.float32
+    precision: Any = jax.lax.Precision.HIGHEST
+    use_bias: bool = True
+    kernel_init: Callable = lambda : kernel_init(1.0)
 
     def setup(self):
         inner_dim = self.dim_head * self.heads
         # Weights were exported with old names {to_q, to_k, to_v, to_out}
-        self.query = nn.DenseGeneral(inner_dim, use_bias=False, dtype=self.dtype, name="to_q")
-        self.key = nn.DenseGeneral(inner_dim, use_bias=False, dtype=self.dtype, name="to_k")
-        self.value = nn.DenseGeneral(inner_dim, use_bias=False, dtype=self.dtype, name="to_v")
-
-        self.proj_attn = nn.DenseGeneral(self.query_dim, dtype=self.dtype, name="to_out_0")
+        self.query = nn.DenseGeneral(inner_dim, use_bias=False, precision=self.precision, 
+                                     kernel_init=self.kernel_init(), dtype=self.dtype, name="to_q")
+        self.key = nn.DenseGeneral(inner_dim, use_bias=False, precision=self.precision, 
+                                     kernel_init=self.kernel_init(), dtype=self.dtype, name="to_k")
+        self.value = nn.DenseGeneral(inner_dim, use_bias=False, precision=self.precision, 
+                                     kernel_init=self.kernel_init(), dtype=self.dtype, name="to_v")
+        self.proj_attn = nn.DenseGeneral(self.query_dim, use_bias=False, precision=self.precision, 
+                                     kernel_init=self.kernel_init(), dtype=self.dtype, name="to_out_0")
+        # self.attnfn = make_fast_generalized_attention(qkv_dim=inner_dim, lax_scan_unroll=16)
 
     @nn.compact
-    def __call__(self, x, context=None):
+    def __call__(self, x:jax.Array, context=None):
         # x has shape [B, H * W, C]
         context = x if context is None else context
         query = self.query(x)
         key = self.key(context)
         value = self.value(context)
         
-        flatten_latent_dim = query.shape[-3]
-        if flatten_latent_dim % 64 == 0:
-            query_chunk_size = int(flatten_latent_dim / 64)
-        elif flatten_latent_dim % 16 == 0:
-            query_chunk_size = int(flatten_latent_dim / 16)
-        elif flatten_latent_dim % 4 == 0:
-            query_chunk_size = int(flatten_latent_dim / 4)
-        else:
-            query_chunk_size = int(flatten_latent_dim)
-
-        hidden_states = jax_memory_efficient_attention(
-            query, key, value, query_chunk_size=query_chunk_size, key_chunk_size=4096 * 4
+        # print(query.shape, key.shape, value.shape)
+        
+        # hidden_states = jax.experimental.pallas.ops.tpu.flash_attention.mha_reference(
+        #     query, key, value, None
+        # )
+        
+        hidden_states = nn.dot_product_attention(
+            query, key, value, dtype=self.dtype, broadcast_dropout=False, dropout_rng=None, precision=self.precision
         )
-
+        # hidden_states = self.attnfn(
+        #     query, key, value, None
+        # )
+        
         proj = self.proj_attn(hidden_states)
         return proj
+
 
 class NormalAttention(nn.Module):
     """
@@ -187,6 +195,7 @@ class NormalAttention(nn.Module):
             dtype=self.dtype, 
             name="to_out_0",
             kernel_init=self.kernel_init()
+            # kernel_init=jax.nn.initializers.xavier_uniform()
         )
 
     @nn.compact
@@ -196,13 +205,175 @@ class NormalAttention(nn.Module):
         query = self.query(x)
         key = self.key(context)
         value = self.value(context)
-
+        
         hidden_states = nn.dot_product_attention(
             query, key, value, dtype=self.dtype, broadcast_dropout=False, dropout_rng=None, precision=self.precision
         )
         proj = self.proj_attn(hidden_states)
         return proj
     
+class AttentionBlock(nn.Module):
+    # Has self and cross attention
+    query_dim: int
+    heads: int = 4
+    dim_head: int = 64
+    dtype: Any = jnp.float32
+    precision: Any = jax.lax.Precision.HIGHEST
+    use_bias: bool = True
+    kernel_init: Callable = lambda : kernel_init(1.0)
+    use_flash_attention:bool = False
+    use_cross_only:bool = False
+    
+    def setup(self):
+        if self.use_flash_attention:
+            attenBlock = EfficientAttention
+        else:
+            attenBlock = NormalAttention
+            
+        self.attention1 = attenBlock(
+         query_dim=self.query_dim,
+            heads=self.heads,
+            dim_head=self.dim_head,
+            name=f'Attention1',
+            precision=self.precision,
+            use_bias=self.use_bias,
+            dtype=self.dtype,
+            kernel_init=self.kernel_init
+        )
+        self.attention2 = attenBlock(
+            query_dim=self.query_dim,
+            heads=self.heads,
+            dim_head=self.dim_head,
+            name=f'Attention2',
+            precision=self.precision,
+            use_bias=self.use_bias,
+            dtype=self.dtype,
+            kernel_init=self.kernel_init
+        )
+        
+        self.ff = nn.DenseGeneral(
+            features=self.query_dim,
+            use_bias=self.use_bias,
+            precision=self.precision,
+            dtype=self.dtype,
+            kernel_init=self.kernel_init(),
+            name="ff"
+        )
+        self.norm1 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
+        self.norm2 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
+        self.norm3 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
+        self.norm4 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
+        
+    @nn.compact
+    def __call__(self, hidden_states, context=None):
+        # self attention
+        residual = hidden_states
+        hidden_states = self.norm1(hidden_states)
+        if self.use_cross_only:
+            hidden_states = self.attention1(hidden_states, context)
+        else:
+            hidden_states = self.attention1(hidden_states)
+        hidden_states = hidden_states + residual
+
+        # cross attention
+        residual = hidden_states
+        hidden_states = self.norm2(hidden_states)
+        hidden_states = self.attention2(hidden_states, context)
+        hidden_states = hidden_states + residual
+
+        # feed forward
+        residual = hidden_states
+        hidden_states = self.norm3(hidden_states)
+        hidden_states = nn.gelu(hidden_states)
+        hidden_states = self.ff(hidden_states)
+        hidden_states = hidden_states + residual
+        
+        return hidden_states
+
+class TransformerBlock(nn.Module):
+    heads: int = 4
+    dim_head: int = 32
+    use_linear_attention: bool = True
+    dtype: Any = jnp.float32
+    precision: Any = jax.lax.Precision.HIGH
+    use_projection: bool = False
+    use_flash_attention:bool = True
+    use_self_and_cross:bool = False
+
+    @nn.compact
+    def __call__(self, x, context=None):
+        inner_dim = self.heads * self.dim_head
+        B, H, W, C = x.shape
+        normed_x = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)(x)
+        if self.use_projection == True:
+            if self.use_linear_attention:
+                projected_x = nn.Dense(features=inner_dim, 
+                                       use_bias=False, precision=self.precision, 
+                                       kernel_init=kernel_init(1.0),
+                                       dtype=self.dtype, name=f'project_in')(normed_x)
+            else:
+                projected_x = nn.Conv(
+                    features=inner_dim, kernel_size=(1, 1),
+                    kernel_init=kernel_init(1.0),
+                    strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
+                    precision=self.precision, name=f'project_in_conv',
+                )(normed_x)
+        else:
+            projected_x = normed_x
+            inner_dim = C
+            
+        context = projected_x if context is None else context
+
+        if self.use_self_and_cross:
+            projected_x = AttentionBlock(
+                query_dim=inner_dim,
+                heads=self.heads,
+                dim_head=self.dim_head,
+                name=f'Attention',
+                precision=self.precision,
+                use_bias=False,
+                dtype=self.dtype,
+                use_flash_attention=self.use_flash_attention,
+                use_cross_only=False
+            )(projected_x, context)
+        elif self.use_flash_attention == True:
+            projected_x = EfficientAttention(
+                query_dim=inner_dim,
+                heads=self.heads,
+                dim_head=self.dim_head,
+                name=f'Attention',
+                precision=self.precision,
+                use_bias=False,
+                dtype=self.dtype,
+            )(projected_x, context)
+        else:
+            projected_x = NormalAttention(
+                query_dim=inner_dim,
+                heads=self.heads,
+                dim_head=self.dim_head,
+                name=f'Attention',
+                precision=self.precision,
+                use_bias=False,
+            )(projected_x, context)
+        
+
+        if self.use_projection == True:
+            if self.use_linear_attention:
+                projected_x = nn.Dense(features=C, precision=self.precision, 
+                                       dtype=self.dtype, use_bias=False, 
+                                       kernel_init=kernel_init(1.0),
+                                       name=f'project_out')(projected_x)
+            else:
+                projected_x = nn.Conv(
+                    features=C, kernel_size=(1, 1),
+                    kernel_init=kernel_init(1.0),
+                    strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
+                    precision=self.precision, name=f'project_out_conv',
+                )(projected_x)
+
+        out = x + projected_x
+        return out
+
 class FlaxGEGLU(nn.Module):
     r"""
     Flax implementation of a Linear layer followed by the variant of the gated linear unit activation function from
