@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # Install JAX and Flax
-pip install jax[tpu] flax[all] orbax optax clu grain augmax transformers opencv-python pandas -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+pip install jax[tpu] flax[all] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
 # Install CPU version of tensorflow
-pip install tensorflow[cpu] keras
+pip install tensorflow[cpu] keras orbax optax clu grain augmax transformers opencv-python pandas 
 
 pip install tensorflow-datasets jupyterlab python-dotenv scikit-learn termcolor wrapt
 
@@ -64,3 +64,48 @@ echo "deb [signed-by=/usr/share/keyrings/cloud.google.asc] https://packages.clou
 curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo tee /usr/share/keyrings/cloud.google.asc
 sudo apt update
 sudo apt install gcsfuse
+
+# Define the file name
+gcsfuse_conf="gcsfuse.yml"
+
+# Define the contents of the file
+gcsfuse_conf_content=$(cat <<EOF
+file-cache:
+  max-size-mb: 81920
+  cache-file-for-range-read: True
+metadata-cache:
+  stat-cache-max-size-mb: 4096
+  ttl-secs: 60
+  type-cache-max-size-mb: 4096
+file-system:
+  kernel-list-cache-ttl-secs: 60
+  ignore-interrupts: True
+EOF
+)
+
+# Create the file and write the contents
+echo "$gcsfuse_conf_content" > $gcsfuse_conf
+
+ulimit -n 65535
+
+# Increase the limits of number of open files to unlimited
+# Add the limits to /etc/security/limits.conf
+limits_conf="/etc/security/limits.conf"
+sudo bash -c "cat <<EOF >> $limits_conf
+* soft nofile unlimited
+* hard nofile unlimited
+EOF"
+
+# Create a systemd override directory if it doesn't exist
+systemd_override_dir="/etc/systemd/system.conf.d"
+sudo mkdir -p $systemd_override_dir
+
+# Add the limits to the systemd service configuration
+systemd_limits_conf="$systemd_override_dir/99-nofile.conf"
+sudo bash -c "cat <<EOF > $systemd_limits_conf
+[Manager]
+DefaultLimitNOFILE=infinity
+EOF"
+
+# Reload the systemd configuration
+sudo systemctl daemon-reload
