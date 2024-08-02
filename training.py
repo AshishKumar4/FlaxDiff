@@ -438,10 +438,16 @@ class SimpleTrainer:
         self.best_state = best_state
 
     def get_state(self):
-        return flax.jax_utils.unreplicate(self.state)
+        if self.distributed_training:
+            return flax.jax_utils.unreplicate(self.state)
+        else:
+            return self.state
 
     def get_best_state(self):
-        return flax.jax_utils.unreplicate(self.best_state)
+        if self.distributed_training:
+            return flax.jax_utils.unreplicate(self.best_state)
+        else:
+            return self.best_state
 
     def checkpoint_path(self):
         experiment_name = self.name
