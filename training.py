@@ -138,7 +138,7 @@ def data_source_tfds(name, use_tf=True, split="all"):
     return data_source
 
 
-def data_source_cc12m(source="/home/mrwhite0racle/research/FlaxDiff/datasets/gcs_mount/arrayrecord/cc12m/"):
+def data_source_cc12m(source="/mnt/gcs_mount/arrayrecord/cc12m/"):
     def data_source():
         cc12m_records_path = source
         cc12m_records = [os.path.join(cc12m_records_path, i) for i in os.listdir(
