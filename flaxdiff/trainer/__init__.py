@@ -17,18 +17,9 @@ from flax.training import orbax_utils
 from ..schedulers import NoiseScheduler
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
 
-@struct.dataclass
-class Metrics(metrics.Collection):
-  loss: metrics.Average.from_output('loss') # type: ignore
+from .simple_trainer import SimpleTrainer, SimpleTrainState
 
-class ModelState():
-    model: nn.Module
-    params: dict
-    noise_schedule: NoiseScheduler
-    model_output_transform: DiffusionPredictionTransform
-
-# Define the TrainState with EMA parameters
-class TrainState(train_state.TrainState):
+class TrainState(SimpleTrainState):
     rngs: jax.random.PRNGKey
     ema_params: dict
 
@@ -36,7 +27,7 @@ class TrainState(train_state.TrainState):
         rngs, subkey = jax.random.split(self.rngs)
         return self.replace(rngs=rngs), subkey
 
-    def apply_ema(self, decay: float=0.999):
+    def apply_ema(self, decay: float = 0.999):
         new_ema_params = jax.tree_util.tree_map(
             lambda ema, param: decay * ema + (1 - decay) * param,
             self.ema_params,
@@ -44,141 +35,142 @@ class TrainState(train_state.TrainState):
         )
         return self.replace(ema_params=new_ema_params)
 
-class DiffusionTrainer:
-    state : TrainState
-    best_state : TrainState
-    best_loss : float
-    model : nn.Module
-    noise_schedule : NoiseScheduler
-    model_output_transform:DiffusionPredictionTransform
-    ema_decay:float = 0.999
-    
-    def __init__(self, 
-                 model:nn.Module, 
+class DiffusionTrainer(SimpleTrainer):
+    noise_schedule: NoiseScheduler
+    model_output_transform: DiffusionPredictionTransform
+    ema_decay: float = 0.999
+
+    def __init__(self,
+                 model: nn.Module,
+                 input_shapes: Dict[str, Tuple[int]],
                  optimizer: optax.GradientTransformation,
-                 noise_schedule:NoiseScheduler,
-                 rngs:jax.random.PRNGKey,
-                 train_state:TrainState=None,
-                 name:str="Diffusion",
-                 load_from_checkpoint:bool=False,
-                 param_transforms:Callable=None,
-                 model_output_transform:DiffusionPredictionTransform=EpsilonPredictionTransform(),
-                 loss_fn=optax.l2_loss,
+                 noise_schedule: NoiseScheduler,
+                 rngs: jax.random.PRNGKey,
+                 unconditional_prob: float = 0.2,
+                 name: str = "Diffusion",
+                 model_output_transform: DiffusionPredictionTransform = EpsilonPredictionTransform(),
+                 **kwargs
                  ):
-        self.model = model
+        super().__init__(
+            model=model,
+            input_shapes=input_shapes,
+            optimizer=optimizer,
+            rngs=rngs,
+            name=name,
+            **kwargs
+        )
         self.noise_schedule = noise_schedule
-        self.name = name
         self.model_output_transform = model_output_transform
-        self.loss_fn = loss_fn
+        self.unconditional_prob = unconditional_prob
 
-        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-        options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=4, create=True)
-        self.checkpointer = orbax.checkpoint.CheckpointManager(self.checkpoint_path(), checkpointer, options)
-
-        if load_from_checkpoint:
-            params = self.load()
-        else:
-            params = None
-
-        if train_state == None:
-            self.init_state(optimizer, rngs, params=params, model=model, param_transforms=param_transforms)
-        else:
-            self.state = train_state
-            self.best_state = train_state
-            self.best_loss = 1e9
-
-    def init_state(self, 
-                   optimizer: optax.GradientTransformation, 
-                   rngs:jax.random.PRNGKey,
-                   params:dict=None,
-                   model:nn.Module=None,
-                     param_transforms:Callable=None,
-                     batch_size=16,
-                    image_size=64
-                   ):
-        inp = jnp.ones((batch_size, image_size, image_size, 3))
-        temb = jnp.ones((batch_size,))
+    def __init_fn(
+        self,
+        optimizer: optax.GradientTransformation,
+        rngs: jax.random.PRNGKey,
+        existing_state: dict = None,
+        existing_best_state: dict = None,
+        model: nn.Module = None,
+        param_transforms: Callable = None
+    ) -> Tuple[TrainState, TrainState]:
         rngs, subkey = jax.random.split(rngs)
-        if params == None:
-            params = model.init(subkey, inp, temb)
+
+        if existing_state == None:
+            input_vars = self.get_input_ones()
+            params = model.init(subkey, **input_vars)
+            new_state = {"params": params, "ema_params": params}
+        else:
+            new_state = existing_state
+
         if param_transforms is not None:
             params = param_transforms(params)
-        self.best_loss = 1e9
-        self.state = TrainState.create(
+
+        state = TrainState.create(
             apply_fn=model.apply,
-            params=params,
-            ema_params=params,
+            params=new_state['params'],
+            ema_params=new_state['ema_params'],
             tx=optimizer,
             rngs=rngs,
+            metrics=Metrics.empty()
         )
-        self.best_state = self.state
+            
+        if existing_best_state is not None:
+            best_state = state.replace(
+                params=existing_best_state['params'], ema_params=existing_best_state['ema_params'])
+        else:
+            best_state = state
 
-    def checkpoint_path(self):
-        experiment_name = self.name
-        path = os.path.join(os.path.abspath('./models'), experiment_name)
-        if not os.path.exists(path):
-            os.makedirs(path)
-        return path
+        return state, best_state
 
-    def load(self):
-        step = self.checkpointer.latest_step()
-        print("Loading model from checkpoint", step)
-        ckpt = self.checkpointer.restore(step)
-        state = ckpt['state']
-        # Convert the state to a TrainState
-        self.best_loss = ckpt['best_loss']
-        print(f"Loaded model from checkpoint at step {step}", ckpt['best_loss'])
-        return state.get('params', None)#, ckpt.get('model', None)
-
-    def save(self, epoch=0, best=False):
-        print(f"Saving model at epoch {epoch}")
-        state = self.best_state if best else self.state
-        # filename = os.path.join(self.checkpoint_path(), f'model_{epoch}' if not best else 'best_model')
-        ckpt = {
-            'model': self.model,
-            'state': state,
-            'best_loss': self.best_loss
-        }
-        save_args = orbax_utils.save_args_from_target(ckpt)
-        self.checkpointer.save(epoch, ckpt, save_kwargs={'save_args': save_args})
-
-    def summary(self, image_size=64):
-        inp = jnp.ones((1, image_size, image_size, 3))
-        temb = jnp.ones((1,))
-        print(self.model.tabulate(jax.random.key(0), inp, temb, console_kwargs={"width": 200, "force_jupyter":True, }))
-
-    def _define_train_step(self):
+    def _define_train_step(self, batch_size, null_labels_seq, text_embedder):
         noise_schedule = self.noise_schedule
         model = self.model
         model_output_transform = self.model_output_transform
         loss_fn = self.loss_fn
-        @jax.jit
-        def train_step(state:TrainState, batch):
+        unconditional_prob = self.unconditional_prob
+
+        # Determine the number of unconditional samples
+        num_unconditional = int(batch_size * unconditional_prob)
+
+        nS, nC = null_labels_seq.shape
+        null_labels_seq = jnp.broadcast_to(
+            null_labels_seq, (batch_size, nS, nC))
+
+        distributed_training = self.distributed_training
+
+        def train_step(state: TrainState, batch):
             """Train for a single step."""
-            images = batch
-            noise_level, state = noise_schedule.generate_timesteps(images.shape[0], state)
+            images = batch['image']
+            # normalize image
+            images = (images - 127.5) / 127.5
+
+            output = text_embedder(
+                input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
+            # output = infer(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
+
+            label_seq = output.last_hidden_state
+
+            # Generate random probabilities to decide how much of this batch will be unconditional
+
+            label_seq = jnp.concat(
+                [null_labels_seq[:num_unconditional], label_seq[num_unconditional:]], axis=0)
+
+            noise_level, state = noise_schedule.generate_timesteps(
+                images.shape[0], state)
             state, rngs = state.get_random_key()
-            noise:jax.Array = jax.random.normal(rngs, shape=images.shape)
+            noise: jax.Array = jax.random.normal(rngs, shape=images.shape)
             rates = noise_schedule.get_rates(noise_level)
-            noisy_images, c_in, expected_output = model_output_transform.forward_diffusion(images, noise, rates)
+            noisy_images, c_in, expected_output = model_output_transform.forward_diffusion(
+                images, noise, rates)
+
             def model_loss(params):
-                preds = model.apply(params, *noise_schedule.transform_inputs(noisy_images*c_in, noise_level))
-                preds = model_output_transform.pred_transform(noisy_images, preds, rates)
+                preds = model.apply(
+                    params, *noise_schedule.transform_inputs(noisy_images*c_in, noise_level), label_seq)
+                preds = model_output_transform.pred_transform(
+                    noisy_images, preds, rates)
                 nloss = loss_fn(preds, expected_output)
                 # nloss = jnp.mean(nloss, axis=1)
                 nloss *= noise_schedule.get_weights(noise_level)
                 nloss = jnp.mean(nloss)
                 loss = nloss
                 return loss
+            
             loss, grads = jax.value_and_grad(model_loss)(state.params)
-            state = state.apply_gradients(grads=grads) 
+            if distributed_training:
+                grads = jax.lax.pmean(grads, "device")
+            state = state.apply_gradients(grads=grads)
             state = state.apply_ema(self.ema_decay)
             return state, loss
+        
+        if distributed_training:
+            train_step = jax.pmap(axis_name="device")(train_step)
+        else:
+            train_step = jax.jit(train_step)
+            
         return train_step
-    
+
     def _define_compute_metrics(self):
         @jax.jit
-        def compute_metrics(state:TrainState, expected, pred):
+        def compute_metrics(state: TrainState, expected, pred):
             loss = jnp.mean(jnp.square(pred - expected))
             metric_updates = state.metrics.single_from_model_output(loss=loss)
             metrics = state.metrics.merge(metric_updates)
@@ -187,20 +179,13 @@ class DiffusionTrainer:
         return compute_metrics
 
     def fit(self, data, steps_per_epoch, epochs):
-        data = iter(data)
-        train_step = self._define_train_step()
-        compute_metrics = self._define_compute_metrics()
-        state = self.state
-        for epoch in range(epochs):
-            print(f"\nEpoch {epoch+1}/{epochs}")
-            start_time = time.time()
-            epoch_loss = 0
-            with tqdm.tqdm(total=steps_per_epoch, desc=f'\t\tEpoch {epoch+1}', ncols=100, unit='step') as pbar:
-                for i in range(steps_per_epoch):
-                    batch = next(data)
-                    state, loss = train_step(state, batch)
-                    epoch_loss += loss
-                    if i % 100 == 0:
+        null_labels_full = data['null_labels_full']
+        local_batch_size = data['local_batch_size']
+        text_embedder = data['model']
+        super().fit(data, steps_per_epoch, epochs, {
+            "batch_size": local_batch_size, "null_labels_seq": null_labels_full, "text_embedder": text_embedder})
+
+
                         pbar.set_postfix(loss=f'{loss:.4f}')
                         pbar.update(100)
             end_time = time.time()
