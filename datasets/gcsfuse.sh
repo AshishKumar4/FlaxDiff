@@ -38,15 +38,15 @@ fi
 
 if [[ -d ${MOUNT_PATH} ]]; then
   echo "$MOUNT_PATH exists, removing..."
-  sudo fusermount -u $MOUNT_PATH || rm -rf $MOUNT_PATH
+  fusermount -u $MOUNT_PATH || rm -rf $MOUNT_PATH
 fi
 
-sudo mkdir -p $MOUNT_PATH
+mkdir -p $MOUNT_PATH
 
 # see https://cloud.google.com/storage/docs/gcsfuse-cli for all configurable options of gcsfuse CLI
 # Grain uses _PROCESS_MANAGEMENT_MAX_THREADS = 64 (https://github.com/google/grain/blob/main/grain/_src/python/grain_pool.py)
 # Please make sure max-conns-per-host > grain_worker_count * _PROCESS_MANAGEMENT_MAX_THREADS
 
-sudo gcsfuse -o ro --implicit-dirs --http-client-timeout=5s --max-conns-per-host=0 --max-idle-conns-per-host=10000 \
+gcsfuse -o ro --implicit-dirs --http-client-timeout=5s --max-conns-per-host=0 --max-idle-conns-per-host=10000 \
         --experimental-enable-json-read --kernel-list-cache-ttl-secs=-1 -o ro --config-file=$HOME/gcsfuse.yml \
         --log-file=$HOME/gcsfuse.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH" 
