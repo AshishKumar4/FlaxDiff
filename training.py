@@ -317,12 +317,7 @@ class Metrics(metrics.Collection):
 
 # Define the TrainState
 class SimpleTrainState(train_state.TrainState):
-    rngs: jax.random.PRNGKey
     metrics: Metrics
-
-    def get_random_key(self):
-        rngs, subkey = jax.random.split(self.rngs)
-        return self.replace(rngs=rngs), subkey
 
 class SimpleTrainer:
     state: SimpleTrainState
@@ -358,6 +353,16 @@ class SimpleTrainer:
         if wandb_config is not None:
             run = wandb.init(**wandb_config)
             self.wandb = run
+            # define our custom x axis metric
+            self.wandb.define_metric("train/step")
+            self.wandb.define_metric("train/epoch")
+            
+            self.wandb.define_metric("train/loss", step_metric="train/step")
+            
+            self.wandb.define_metric("train/epoch_time", step_metric="train/epoch")
+            self.wandb.define_metric("train/avg_time_per_step", step_metric="train/epoch")
+            self.wandb.define_metric("train/avg_loss", step_metric="train/epoch")
+            self.wandb.define_metric("train/best_loss", step_metric="train/epoch")
 
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         options = orbax.checkpoint.CheckpointManagerOptions(
@@ -366,15 +371,21 @@ class SimpleTrainer:
             self.checkpoint_path() + checkpoint_suffix, checkpointer, options)
 
         if load_from_checkpoint:
-            latest_epoch, old_state, old_best_state = self.load()
+            latest_epoch, old_state, old_best_state, rngstate = self.load()
         else:
-            latest_epoch, old_state, old_best_state = 0, None, None
+            latest_epoch, old_state, old_best_state, rngstate = 0, None, None, None
 
         self.latest_epoch = latest_epoch
+        
+        if rngstate:
+            self.rngstate = rngstate
+        else:
+            rngs, subkey = jax.random.split(rngs)
+            self.rngstate = RandomMarkovState(rngs)
 
         if train_state == None:
             state, best_state = self.generate_states(
-                optimizer, rngs, old_state, old_best_state, model, param_transforms
+                optimizer, subkey, old_state, old_best_state, model, param_transforms
             )
             self.init_state(state, best_state)
         else:
@@ -407,7 +418,6 @@ class SimpleTrainer:
             apply_fn=model.apply,
             params=params,
             tx=optimizer,
-            rngs=rngs,
             metrics=Metrics.empty()
         )
         if existing_best_state is not None:
@@ -431,6 +441,7 @@ class SimpleTrainer:
                 print("Replicating state across devices ", devices)
                 state = flax.jax_utils.replicate(state, devices)
                 best_state = flax.jax_utils.replicate(best_state, devices)
+                self.rngstate = flax.jax_utils.replicate(self.rngstate, devices)
             else:
                 print("Not replicating any state, Only single device connected to the process")
 
@@ -448,6 +459,12 @@ class SimpleTrainer:
             return flax.jax_utils.unreplicate(self.best_state)
         else:
             return self.best_state
+        
+    def get_rngstate(self):
+        if self.distributed_training:
+            return flax.jax_utils.unreplicate(self.rngstate)
+        else:
+            return self.rngstate
 
     def checkpoint_path(self):
         experiment_name = self.name
@@ -469,16 +486,18 @@ class SimpleTrainer:
         ckpt = self.checkpointer.restore(epoch)
         state = ckpt['state']
         best_state = ckpt['best_state']
+        rngstate = ckpt['rngs']
         # Convert the state to a TrainState
         self.best_loss = ckpt['best_loss']
         print(
             f"Loaded model from checkpoint at epoch {epoch}", ckpt['best_loss'])
-        return epoch, state, best_state
+        return epoch, state, best_state, rngstate
 
     def save(self, epoch=0):
         print(f"Saving model at epoch {epoch}")
         ckpt = {
             # 'model': self.model,
+            'rngs': self.get_rngstate(),
             'state': self.get_state(),
             'best_state': self.get_best_state(),
             'best_loss': self.best_loss
@@ -496,7 +515,7 @@ class SimpleTrainer:
         loss_fn = self.loss_fn
         distributed_training = self.distributed_training
 
-        def train_step(state: SimpleTrainState, batch):
+        def train_step(train_state: SimpleTrainState, batch, rng_state: RandomMarkovState, local_device_indexes):
             """Train for a single step."""
             images = batch['image']
             labels = batch['label']
@@ -507,11 +526,11 @@ class SimpleTrainer:
                 nloss = loss_fn(preds, expected_output)
                 loss = jnp.mean(nloss)
                 return loss
-            loss, grads = jax.value_and_grad(model_loss)(state.params)
+            loss, grads = jax.value_and_grad(model_loss)(train_state.params)
             if distributed_training:
                 grads = jax.lax.pmean(grads, "device")
-            state = state.apply_gradients(grads=grads)
-            return state, loss
+            train_state = train_state.apply_gradients(grads=grads)
+            return train_state, loss, rng_state
         
         if distributed_training:
             train_step = jax.pmap(axis_name="device")(train_step)
@@ -567,9 +586,14 @@ class SimpleTrainer:
             test_ds = None
         train_step = self._define_train_step(**train_step_args)
         compute_metrics = self._define_compute_metrics()
-        state = self.state
+        train_state = self.state
+        rng_state = self.rngstate
         device_count = jax.local_device_count()
         # train_ds = flax.jax_utils.prefetch_to_device(train_ds, jax.devices())
+        if self.distributed_training:
+            local_device_indexes = jnp.arange(device_count)
+        else:
+            local_device_indexes = 0
 
         summary_writer = self.init_tensorboard(
             data['global_batch_size'], steps_per_epoch, epochs)
@@ -588,7 +612,7 @@ class SimpleTrainer:
                         batch = jax.tree.map(lambda x: x.reshape(
                             (device_count, -1, *x.shape[1:])), batch)
                     
-                    state, loss = train_step(state, batch)
+                    train_state, loss, rng_state = train_step(train_state, batch, rng_state, local_device_indexes)
                     loss = jnp.mean(loss)
                     
                     epoch_loss += loss
@@ -599,20 +623,29 @@ class SimpleTrainer:
                         summary_writer.scalar(
                             'Train Loss', loss, step=current_step)
                         if self.wandb is not None:
-                            self.wandb.log({"train/loss": loss})
+                            self.wandb.log({
+                                "train/step" : current_step,
+                                "train/loss": loss,
+                            }, step=current_step)
 
             print(f"\n\tEpoch done")
             end_time = time.time()
-            self.state = state
+            self.state = train_state
+            self.rngstate = rng_state
             total_time = end_time - start_time
             avg_time_per_step = total_time / steps_per_epoch
-            self.wandb.log({"train/epoch_time": total_time})
-            self.wandb.log({"train/avg_time_per_step": avg_time_per_step})
             avg_loss = epoch_loss / steps_per_epoch
             if avg_loss < self.best_loss:
                 self.best_loss = avg_loss
-                self.best_state = state
+                self.best_state = train_state
                 self.save(current_epoch)
+            self.wandb.log({
+                "train/epoch_time": total_time,
+                "train/avg_time_per_step": avg_time_per_step,
+                "train/avg_loss": avg_loss,
+                "train/best_loss": self.best_loss,
+                "train/epoch": current_epoch,
+            }, step=current_step)
 
             # Compute Metrics
             metrics_str = ''
@@ -628,10 +661,6 @@ class SimpleTrainer:
 class TrainState(SimpleTrainState):
     rngs: jax.random.PRNGKey
     ema_params: dict
-
-    def get_random_key(self):
-        rngs, subkey = jax.random.split(self.rngs)
-        return self.replace(rngs=rngs), subkey
 
     def apply_ema(self, decay: float = 0.999):
         new_ema_params = jax.tree_util.tree_map(
@@ -725,7 +754,7 @@ class DiffusionTrainer(SimpleTrainer):
 
         distributed_training = self.distributed_training
 
-        def train_step(state: TrainState, batch):
+        def train_step(train_state: TrainState, batch, rng_state: RandomMarkovState, local_device_index):
             """Train for a single step."""
             images = batch['image']
             # normalize image
@@ -740,10 +769,15 @@ class DiffusionTrainer(SimpleTrainer):
             label_seq = jnp.concat(
                 [null_labels_seq[:num_unconditional], label_seq[num_unconditional:]], axis=0)
 
-            noise_level, state = noise_schedule.generate_timesteps(
-                images.shape[0], state)
-            state, rngs = state.get_random_key()
+            rng_state, subkey = rng_state.get_random_key()
+            subkey = jax.random.fold_in(subkey, local_device_index)
+            local_rng_state = RandomMarkovState(subkey)
+
+            noise_level, local_rng_state = noise_schedule.generate_timesteps(images.shape[0], local_rng_state)
+            
+            local_rng_state, rngs = local_rng_state.get_random_key()
             noise: jax.Array = jax.random.normal(rngs, shape=images.shape)
+            
             rates = noise_schedule.get_rates(noise_level)
             noisy_images, c_in, expected_output = model_output_transform.forward_diffusion(
                 images, noise, rates)
@@ -760,12 +794,12 @@ class DiffusionTrainer(SimpleTrainer):
                 loss = nloss
                 return loss
             
-            loss, grads = jax.value_and_grad(model_loss)(state.params)
+            loss, grads = jax.value_and_grad(model_loss)(train_state.params)
             if distributed_training:
                 grads = jax.lax.pmean(grads, "device")
-            state = state.apply_gradients(grads=grads)
-            state = state.apply_ema(self.ema_decay)
-            return state, loss
+            train_state = train_state.apply_gradients(grads=grads)
+            train_state = train_state.apply_ema(self.ema_decay)
+            return train_state, loss, rng_state
         
         if distributed_training:
             train_step = jax.pmap(train_step, axis_name="device")
