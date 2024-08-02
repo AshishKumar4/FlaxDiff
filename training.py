@@ -40,8 +40,6 @@ import wandb
 
 import argparse
 
-# %% [markdown]
-# # Initialization
 #####################################################################################################################
 ################################################# Initialization ####################################################
 #####################################################################################################################
@@ -73,6 +71,9 @@ class RandomMarkovState(MarkovState):
         rng, subkey = jax.random.split(self.rng)
         return RandomMarkovState(rng), subkey
 
+#####################################################################################################################
+################################################## Data Pipeline ####################################################
+#####################################################################################################################
 
 def defaultTextEncodeModel(backend="jax"):
     modelname = "openai/clip-vit-large-patch14"
@@ -126,6 +127,9 @@ class CaptionProcessor:
     def __repr__(self):
         return self.__class__.__name__ + '()'
 
+#-----------------------------------------------------------------------------------------------#
+# Oxford flowers and other TFDS datasources ----------------------------------------------------#
+#-----------------------------------------------------------------------------------------------#
 
 def data_source_tfds(name, use_tf=True, split="all"):
     import tensorflow_datasets as tfds
@@ -137,17 +141,6 @@ def data_source_tfds(name, use_tf=True, split="all"):
             return tfds.data_source(name, split=split, try_gcs=False)
     return data_source
 
-
-def data_source_cc12m(source="/mnt/gcs_mount/arrayrecord/cc12m/"):
-    def data_source():
-        cc12m_records_path = source
-        cc12m_records = [os.path.join(cc12m_records_path, i) for i in os.listdir(
-            cc12m_records_path) if 'array_record' in i]
-        ds = pygrain.ArrayRecordDataSource(cc12m_records[:-1])
-        return ds
-    return data_source
-
-
 def labelizer_oxford_flowers102(path):
     with open(path, "r") as f:
         textlabels = [i.strip() for i in f.readlines()]
@@ -158,26 +151,40 @@ def labelizer_oxford_flowers102(path):
         return textlabels[sample['label']]
     return load_labels
 
+def tfds_augmenters(image_scale, method):
+    labelizer = labelizer_oxford_flowers102("/home/mrwhite0racle/tensorflow_datasets/oxford_flowers102/2.1.1/label.labels.txt")
+    class augmenters(pygrain.MapTransform):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.caption_processor = CaptionProcessor(tensor_type="np")
 
-def labelizer_cc12m(sample):
+        def map(self, element) -> Dict[str, jnp.array]:
+            image = jax.image.resize(image, (self.image_scale, self.image_scale, 3), method=self.method)
+            # image = (image - 127.5) / 127.5
+            caption = labelizer(element).decode('utf-8')
+            results = self.caption_processor(caption)
+            return {
+                "image": image,
+                "input_ids": results['input_ids'][0],
+                "attention_mask": results['attention_mask'][0],
+            }
+        
+#-----------------------------------------------------------------------------------------------#
+# CC12m and other GCS data sources -------------------------------------------------------------#
+#-----------------------------------------------------------------------------------------------#
+
+def data_source_gcs(source="/mnt/gcs_mount/arrayrecord/cc12m/"):
+    def data_source():
+        records_path = source
+        records = [os.path.join(records_path, i) for i in os.listdir(
+            records_path) if 'array_record' in i]
+        ds = pygrain.ArrayRecordDataSource(records[:-1])
+        return ds
+    return data_source
+
+
+def labelizer_gcs(sample):
     return sample['txt']
-
-
-# Configure the following for your datasets
-datasetMap = {
-    "oxford_flowers102_tf": {
-        "source": data_source_tfds("oxford_flowers102"),
-        "labelizer": lambda: labelizer_oxford_flowers102("/home/mrwhite0racle/tensorflow_datasets/oxford_flowers102/2.1.1/label.labels.txt"),
-    },
-    "oxford_flowers102": {
-        "source": data_source_tfds("oxford_flowers102", use_tf=False),
-        "labelizer": lambda: labelizer_oxford_flowers102("/home/mrwhite0racle/tensorflow_datasets/oxford_flowers102/2.1.1/label.labels.txt"),
-    },
-    "cc12m": {
-        "source": data_source_cc12m(),
-        "labelizer": lambda: labelizer_cc12m,
-    }
-}
 
 def unpack_dict_of_byte_arrays(packed_data):
     unpacked_dict = {}
@@ -198,29 +205,9 @@ def unpack_dict_of_byte_arrays(packed_data):
         unpacked_dict[key] = byte_array
     return unpacked_dict
 
-
-def get_dataset_grain(data_name="cc12m",
-                      batch_size=64, image_scale=256,
-                      count=None, num_epochs=None,
-                      text_encoders=None,
-                      method=jax.image.ResizeMethod.LANCZOS3,
-                      grain_worker_count=32, grain_read_thread_count=64,
-                      grain_read_buffer_size=50, grain_worker_buffer_size=20):
-    dataset = datasetMap[data_name]
-    data_source = dataset["source"]()
-    labelizer = dataset["labelizer"]()
-
-    local_batch_size = batch_size // jax.process_count()
-
-    import cv2
-
-    model, tokenizer = text_encoders
-
-    null_labels, null_labels_full = encodePrompts([""], model, tokenizer)
-    null_labels = np.array(null_labels[0], dtype=np.float16)
-    null_labels_full = np.array(null_labels_full[0], dtype=np.float16)
-
-    class augmenter(pygrain.MapTransform):
+def gcs_augmenters(image_scale, method):
+    labelizer = labelizer_gcs
+    class augmenters(pygrain.MapTransform):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.caption_processor = CaptionProcessor(tensor_type="np")
@@ -231,7 +218,7 @@ def get_dataset_grain(data_name="cc12m",
             image = cv2.imdecode(image, cv2.IMREAD_UNCHANGED)
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             image = cv2.resize(image, (image_scale, image_scale),
-                               interpolation=cv2.INTER_AREA)
+                            interpolation=cv2.INTER_AREA)
             # image = (image - 127.5) / 127.5
             caption = labelizer(element).decode('utf-8')
             results = self.caption_processor(caption)
@@ -240,6 +227,39 @@ def get_dataset_grain(data_name="cc12m",
                 "input_ids": results['input_ids'][0],
                 "attention_mask": results['attention_mask'][0],
             }
+
+# Configure the following for your datasets
+datasetMap = {
+    "oxford_flowers102": {
+        "source": data_source_tfds("oxford_flowers102", use_tf=False),
+        "augmenter": tfds_augmenters,
+    },
+    "cc12m": {
+        "source": data_source_gcs("/mnt/gcs_mount/arrayrecord/cc12m/"),
+        "augmenter": gcs_augmenters,
+    }
+}
+
+def get_dataset_grain(data_name="cc12m",
+                      batch_size=64, image_scale=256,
+                      count=None, num_epochs=None,
+                      text_encoders=None,
+                      method=jax.image.ResizeMethod.LANCZOS3,
+                      grain_worker_count=32, grain_read_thread_count=64,
+                      grain_read_buffer_size=50, grain_worker_buffer_size=20):
+    dataset = datasetMap[data_name]
+    data_source = dataset["source"]()
+    augmenter = dataset["augmenter"]()
+
+    local_batch_size = batch_size // jax.process_count()
+
+    import cv2
+
+    model, tokenizer = text_encoders
+
+    null_labels, null_labels_full = encodePrompts([""], model, tokenizer)
+    null_labels = np.array(null_labels[0], dtype=np.float16)
+    null_labels_full = np.array(null_labels_full[0], dtype=np.float16)
 
     sampler = pygrain.IndexSampler(
         num_records=len(data_source) if count is None else count,
@@ -276,11 +296,9 @@ def get_dataset_grain(data_name="cc12m",
         "tokenizer": tokenizer,
     }
 
-
-# %%
-
-# %%
-
+#####################################################################################################################
+#################################################### Modeling #######################################################
+#####################################################################################################################
 
 # Kernel initializer to use
 
@@ -507,6 +525,10 @@ class Unet(nn.Module):
         )(x)
         return noise_out  # , attentions
 
+#####################################################################################################################
+############################################### Training Pipeline ###################################################
+#####################################################################################################################
+
 @struct.dataclass
 class Metrics(metrics.Collection):
     accuracy: metrics.Accuracy
@@ -542,7 +564,7 @@ class SimpleTrainer:
                  wandb_config: Dict[str, Any] = None,
                  distributed_training: bool = None,
                  ):
-        if distributed_training is None:
+        if distributed_training is None or distributed_training is True:
             # Auto-detect if we are running on multiple devices
             distributed_training = jax.device_count() > 1
 
@@ -626,10 +648,13 @@ class SimpleTrainer:
         self.best_loss = 1e9
 
         if self.distributed_training:
-            devices = jax.devices()
-            print("Replicating state across devices ", devices)
-            state = flax.jax_utils.replicate(state, devices)
-            best_state = flax.jax_utils.replicate(best_state, devices)
+            devices = jax.local_devices()
+            if len(devices) > 1:
+                print("Replicating state across devices ", devices)
+                state = flax.jax_utils.replicate(state, devices)
+                best_state = flax.jax_utils.replicate(best_state, devices)
+            else:
+                print("Not replicating any state, Only single device connected to the process")
 
         self.state = state
         self.best_state = best_state
@@ -1031,9 +1056,20 @@ parser.add_argument('--dtype', type=str,
 parser.add_argument('--precision', type=str,
                     default='high', help='precision to use')
 
+parser.add_argument('--distributed_training', type=bool,
+                    default=None, help='Should use distributed training or not')
+parser.add_argument('--experiment_name', type=str,
+                    default=None, help='Experiment name, would be generated if not provided')
+parser.add_argument('--load_from_checkpoint', type=bool,
+                    default=False, help='Load from the best previously stored checkpoint. Experiment name needs to be provided')
 
-def main(argv):
-    # %%
+parser.add_argument('--dataset_test', type=bool,
+                    default=False, help='Run the dataset iterator for 3000 steps for testintg/benchmarking')
+
+def main(args):
+    if args.load_from_checkpoint:
+        assert args.experiment_name is not None and args.experiment_name != "", "Experiment name needs to be given if load_from_checkpoint is True"
+
     jax.distributed.initialize()
 
     print(f"Number of devices: {jax.device_count()}")
@@ -1102,6 +1138,7 @@ def main(argv):
         },
         "learning_rate": args.learning_rate,
         "batch_size": BATCH_SIZE,
+        "epochs": args.epochs,
         "input_shapes": {
             "x": (args.IMAGE_SIZE, args.IMAGE_SIZE, 3),
             "temb": (),
@@ -1120,19 +1157,24 @@ def main(argv):
         text_encoders=text_encoders,
     )
 
-    # dataset = iter(data['train']())
+    if args.dataset_test:
+        dataset = iter(data['train']())
 
-    # for _ in tqdm.tqdm(range(1000)):
-    #     batch = next(dataset)
+        for _ in tqdm.tqdm(range(3000)):
+            batch = next(dataset)
 
     cosine_schedule = CosineNoiseSchedule(1000, beta_end=1)
     karas_ve_schedule = KarrasVENoiseScheduler(
         1, sigma_max=80, rho=7, sigma_data=0.5)
     edm_schedule = EDMNoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
 
-    experiment_name = "{name}_{date}".format(
-        name="Diffusion_SDE_VE_TEXT", date=datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-    )
+    if args.experiment_name and args.experiment_name != "":
+        experiment_name = args.experiment_name
+    else:
+        experiment_name = "{name}_{date}".format(
+            name="Diffusion_SDE_VE_TEXT", date=datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+        )
+        
     print("Experiment_Name:", experiment_name)
 
     unet = Unet(**CONFIG['model'])
@@ -1141,30 +1183,31 @@ def main(argv):
     solver = optax.adam(learning_rate)
     # solver = optax.adamw(2e-6)
 
-    trainer = DiffusionTrainer(unet, optimizer=solver,
-                               input_shapes=CONFIG['input_shapes'],
-                               noise_schedule=edm_schedule,
-                               rngs=jax.random.PRNGKey(4),
-                               name=experiment_name,
-                               model_output_transform=KarrasPredictionTransform(
-                                   sigma_data=edm_schedule.sigma_data),
-                               #    train_state=trainer.best_state,
-                               #    loss_fn=lambda x, y: jnp.abs(x - y),
-                               # param_transforms=params_transform,
-                               #    load_from_checkpoint=True,
-                               wandb_config={
-                                   "project": "flaxdiff",
-                                   "config": CONFIG,
-                                   "name": experiment_name,
-                               },
-                               )
+    trainer = DiffusionTrainer(
+        unet, optimizer=solver,
+        input_shapes=CONFIG['input_shapes'],
+        noise_schedule=edm_schedule,
+        rngs=jax.random.PRNGKey(4),
+        name=experiment_name,
+        model_output_transform=KarrasPredictionTransform(
+        sigma_data=edm_schedule.sigma_data),
+        #    train_state=trainer.best_state,
+        #    loss_fn=lambda x, y: jnp.abs(x - y),
+        # param_transforms=params_transform,
+        #    load_from_checkpoint=True,
+        wandb_config={
+            "project": "flaxdiff",
+            "config": CONFIG,
+            "name": experiment_name,
+        },
+        distributed_training=args.distributed_training,           
+    )
 
     # %%
     batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
-    print(
-        f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
+    print(f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
     jax.profiler.start_server(6009)
-    final_state = trainer.fit(data, batches, epochs=10)
+    final_state = trainer.fit(data, batches, epochs=CONFIG['epochs'])
 
 
 if __name__ == '__main__':
