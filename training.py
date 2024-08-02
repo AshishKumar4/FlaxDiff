@@ -927,6 +927,7 @@ def main(args):
         grain_read_buffer_size=GRAIN_READ_BUFFER_SIZE, grain_worker_buffer_size=GRAIN_WORKER_BUFFER_SIZE,
         text_encoders=text_encoders,
         seed=args.dataset_seed,
+        dataset_source=args.dataset_path,
     )
 
     if args.dataset_test:
