@@ -4,9 +4,7 @@ from flax.metrics import tensorboard
 import orbax
 import orbax.checkpoint
 import flax.jax_utils
-from flaxdiff.models.attention import kernel_init, TransformerBlock
-from flaxdiff.models.simple_unet import FourierEmbedding
-from flaxdiff.models.simple_unet import ConvLayer, TimeProjection, Upsample, Downsample, ResidualBlock
+from flaxdiff.models.simple_unet import Unet
 import jax.experimental.pallas.ops.tpu.flash_attention
 from flaxdiff.predictors import VPredictionTransform, EpsilonPredictionTransform, DiffusionPredictionTransform, DirectPredictionTransform, KarrasPredictionTransform
 from flaxdiff.schedulers import CosineNoiseSchedule, NoiseScheduler, GeneralizedNoiseScheduler, KarrasVENoiseScheduler, EDMNoiseScheduler
@@ -37,7 +35,7 @@ import json
 # For CLIP
 from transformers import AutoTokenizer, FlaxCLIPTextModel, CLIPTextModel
 import wandb
-
+import cv2
 import argparse
 
 #####################################################################################################################
@@ -159,7 +157,8 @@ def tfds_augmenters(image_scale, method):
             self.caption_processor = CaptionProcessor(tensor_type="np")
 
         def map(self, element) -> Dict[str, jnp.array]:
-            image = jax.image.resize(image, (self.image_scale, self.image_scale, 3), method=self.method)
+            image = element['image']
+            image = jax.image.resize(image, (image_scale, image_scale, 3), method=method)
             # image = (image - 127.5) / 127.5
             caption = labelizer(element).decode('utf-8')
             results = self.caption_processor(caption)
@@ -168,6 +167,7 @@ def tfds_augmenters(image_scale, method):
                 "input_ids": results['input_ids'][0],
                 "attention_mask": results['attention_mask'][0],
             }
+    return augmenters
         
 #-----------------------------------------------------------------------------------------------#
 # CC12m and other GCS data sources -------------------------------------------------------------#
@@ -227,6 +227,7 @@ def gcs_augmenters(image_scale, method):
                 "input_ids": results['input_ids'][0],
                 "attention_mask": results['attention_mask'][0],
             }
+    return augmenters
 
 # Configure the following for your datasets
 datasetMap = {
@@ -249,12 +250,9 @@ def get_dataset_grain(data_name="cc12m",
                       grain_read_buffer_size=50, grain_worker_buffer_size=20):
     dataset = datasetMap[data_name]
     data_source = dataset["source"]()
-    augmenter = dataset["augmenter"]()
+    augmenter = dataset["augmenter"](image_scale, method)
 
     local_batch_size = batch_size // jax.process_count()
-
-    import cv2
-
     model, tokenizer = text_encoders
 
     null_labels, null_labels_full = encodePrompts([""], model, tokenizer)
@@ -295,235 +293,6 @@ def get_dataset_grain(data_name="cc12m",
         "model": model,
         "tokenizer": tokenizer,
     }
-
-#####################################################################################################################
-#################################################### Modeling #######################################################
-#####################################################################################################################
-
-# Kernel initializer to use
-
-def kernel_init(scale, dtype=jnp.float32):
-    scale = max(scale, 1e-10)
-    return nn.initializers.variance_scaling(scale=scale, mode="fan_avg", distribution="truncated_normal", dtype=dtype)
-
-
-class Unet(nn.Module):
-    emb_features: int = 64*4,
-    feature_depths: list = [64, 128, 256, 512],
-    attention_configs: list = [{"heads": 8}, {
-        "heads": 8}, {"heads": 8}, {"heads": 8}],
-    num_res_blocks: int = 2,
-    num_middle_res_blocks: int = 1,
-    activation: Callable = jax.nn.swish
-    norm_groups: int = 32
-    dtype: Any = jnp.bfloat16
-    precision: Any = jax.lax.Precision.HIGH
-
-    @nn.compact
-    def __call__(self, x, temb, textcontext=None):
-        # print("embedding features", self.emb_features)
-        temb = FourierEmbedding(features=self.emb_features)(temb)
-        temb = TimeProjection(features=self.emb_features)(temb)
-
-        _, TS, TC = textcontext.shape
-
-        # print("time embedding", temb.shape)
-        feature_depths = self.feature_depths
-        attention_configs = self.attention_configs
-
-        conv_type = up_conv_type = down_conv_type = middle_conv_type = "conv"
-        # middle_conv_type = "separable"
-
-        x = ConvLayer(
-            conv_type,
-            features=self.feature_depths[0],
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            kernel_init=kernel_init(1.0),
-            dtype=self.dtype,
-            precision=self.precision
-        )(x)
-        downs = [x]
-
-        # Downscaling blocks
-        for i, (dim_out, attention_config) in enumerate(zip(feature_depths, attention_configs)):
-            dim_in = x.shape[-1]
-            # dim_in = dim_out
-            for j in range(self.num_res_blocks):
-                x = ResidualBlock(
-                    down_conv_type,
-                    name=f"down_{i}_residual_{j}",
-                    features=dim_in,
-                    kernel_init=kernel_init(1.0),
-                    kernel_size=(3, 3),
-                    strides=(1, 1),
-                    activation=self.activation,
-                    norm_groups=self.norm_groups,
-                    dtype=self.dtype,
-                    precision=self.precision
-                )(x, temb)
-                if attention_config is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
-                    B, H, W, _ = x.shape
-                    if H > TS:
-                        padded_context = jnp.pad(textcontext, ((
-                            0, 0), (0, H - TS), (0, 0)), mode='constant', constant_values=0).reshape((B, 1, H, TC))
-                    else:
-                        padded_context = None
-                    x = TransformerBlock(heads=attention_config['heads'], dtype=attention_config.get('dtype', jnp.float32),
-                                         dim_head=dim_in // attention_config['heads'],
-                                         use_flash_attention=attention_config.get(
-                                             "flash_attention", True),
-                                         use_projection=attention_config.get(
-                                             "use_projection", False),
-                                         use_self_and_cross=attention_config.get(
-                                             "use_self_and_cross", True),
-                                         precision=attention_config.get(
-                                             "precision", self.precision),
-                                         name=f"down_{i}_attention_{j}")(x, padded_context)
-                # print("down residual for feature level", i, "is of shape", x.shape, "features", dim_in)
-                downs.append(x)
-            if i != len(feature_depths) - 1:
-                # print("Downsample", i, x.shape)
-                x = Downsample(
-                    features=dim_out,
-                    scale=2,
-                    activation=self.activation,
-                    name=f"down_{i}_downsample",
-                    dtype=self.dtype,
-                    precision=self.precision
-                )(x)
-
-        # Middle Blocks
-        middle_dim_out = self.feature_depths[-1]
-        middle_attention = self.attention_configs[-1]
-        for j in range(self.num_middle_res_blocks):
-            x = ResidualBlock(
-                middle_conv_type,
-                name=f"middle_res1_{j}",
-                features=middle_dim_out,
-                kernel_init=kernel_init(1.0),
-                kernel_size=(3, 3),
-                strides=(1, 1),
-                activation=self.activation,
-                norm_groups=self.norm_groups,
-                dtype=self.dtype,
-                precision=self.precision
-            )(x, temb)
-            # Apply attention only on the last block
-            if middle_attention is not None and j == self.num_middle_res_blocks - 1:
-                x = TransformerBlock(heads=middle_attention['heads'], dtype=middle_attention.get('dtype', jnp.float32),
-                                     dim_head=middle_dim_out // middle_attention['heads'],
-                                     use_flash_attention=middle_attention.get(
-                                         "flash_attention", True),
-                                     use_linear_attention=False,
-                                     use_projection=middle_attention.get(
-                                         "use_projection", False),
-                                     use_self_and_cross=False,
-                                     precision=middle_attention.get(
-                                         "precision", self.precision),
-                                     name=f"middle_attention_{j}")(x)
-            x = ResidualBlock(
-                middle_conv_type,
-                name=f"middle_res2_{j}",
-                features=middle_dim_out,
-                kernel_init=kernel_init(1.0),
-                kernel_size=(3, 3),
-                strides=(1, 1),
-                activation=self.activation,
-                norm_groups=self.norm_groups,
-                dtype=self.dtype,
-                precision=self.precision
-            )(x, temb)
-
-        # Upscaling Blocks
-        for i, (dim_out, attention_config) in enumerate(zip(reversed(feature_depths), reversed(attention_configs))):
-            # print("Upscaling", i, "features", dim_out)
-            for j in range(self.num_res_blocks):
-                residual = downs.pop()
-                x = jnp.concatenate([x, residual], axis=-1)
-                # print("concat==> ", i, "concat", x.shape)
-                # kernel_size = (1 + 2 * (j + 1), 1 + 2 * (j + 1))
-                kernel_size = (3, 3)
-                x = ResidualBlock(
-                    up_conv_type,  # if j == 0 else "separable",
-                    name=f"up_{i}_residual_{j}",
-                    features=dim_out,
-                    kernel_init=kernel_init(1.0),
-                    kernel_size=kernel_size,
-                    strides=(1, 1),
-                    activation=self.activation,
-                    norm_groups=self.norm_groups,
-                    dtype=self.dtype,
-                    precision=self.precision
-                )(x, temb)
-                if attention_config is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
-                    # B, H, W, _ = x.shape
-                    # if H > TS:
-                    #     padded_context = jnp.pad(textcontext, ((0, 0), (0, H - TS), (0, 0)), mode='constant', constant_values=0).reshape((B, 1, H, TC))
-                    # else:
-                    #     padded_context = None
-                    x = TransformerBlock(heads=attention_config['heads'], dtype=attention_config.get('dtype', jnp.float32),
-                                         dim_head=dim_out // attention_config['heads'],
-                                         use_flash_attention=attention_config.get(
-                                             "flash_attention", True),
-                                         use_projection=attention_config.get(
-                                             "use_projection", False),
-                                         use_self_and_cross=attention_config.get(
-                                             "use_self_and_cross", True),
-                                         precision=attention_config.get(
-                                             "precision", self.precision),
-                                         name=f"up_{i}_attention_{j}")(x, residual)
-            # print("Upscaling ", i, x.shape)
-            if i != len(feature_depths) - 1:
-                x = Upsample(
-                    features=feature_depths[-i],
-                    scale=2,
-                    activation=self.activation,
-                    name=f"up_{i}_upsample",
-                    dtype=self.dtype,
-                    precision=self.precision
-                )(x)
-
-        # x = nn.GroupNorm(8)(x)
-        x = ConvLayer(
-            conv_type,
-            features=self.feature_depths[0],
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            kernel_init=kernel_init(0.0),
-            dtype=self.dtype,
-            precision=self.precision
-        )(x)
-
-        x = jnp.concatenate([x, downs.pop()], axis=-1)
-
-        x = ResidualBlock(
-            conv_type,
-            name="final_residual",
-            features=self.feature_depths[0],
-            kernel_init=kernel_init(1.0),
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            activation=self.activation,
-            norm_groups=self.norm_groups,
-            dtype=self.dtype,
-            precision=self.precision
-        )(x, temb)
-
-        x = nn.RMSNorm()(x)
-        x = self.activation(x)
-
-        noise_out = ConvLayer(
-            conv_type,
-            features=3,
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            # activation=jax.nn.mish
-            kernel_init=kernel_init(0.0),
-            dtype=self.dtype,
-            precision=self.precision
-        )(x)
-        return noise_out  # , attentions
 
 #####################################################################################################################
 ############################################### Training Pipeline ###################################################
@@ -1019,8 +788,8 @@ parser.add_argument('--GRAIN_READ_BUFFER_SIZE', type=int,
 parser.add_argument('--GRAIN_WORKER_BUFFER_SIZE', type=int,
                     default=20, help='Grain worker buffer size')
 
-parser.add_argument('--BATCH_SIZE', type=int, default=64, help='Batch size')
-parser.add_argument('--IMAGE_SIZE', type=int, default=128, help='Image size')
+parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+parser.add_argument('--image_size', type=int, default=128, help='Image size')
 parser.add_argument('--epochs', type=int, default=20, help='Number of epochs')
 parser.add_argument('--steps_per_epoch', type=int,
                     default=None, help='Steps per epoch')
@@ -1032,34 +801,21 @@ parser.add_argument('--learning_rate', type=float,
 parser.add_argument('--noise_schedule', type=str, default='edm',
                     choices=['cosine', 'karras', 'edm'], help='Noise schedule')
 
-parser.add_argument('--emb_features', type=int,
-                    default=256, help='Embedding features')
-parser.add_argument('--feature_depths', type=int, nargs='+',
-                    default=[64, 128, 256, 512], help='Feature depths')
-parser.add_argument('--attention_heads', type=int,
-                    default=8, help='Number of attention heads')
-parser.add_argument('--flash_attention', type=bool,
-                    default=False, help='Use Flash Attention')
-parser.add_argument('--use_projection', type=bool,
-                    default=False, help='Use projection')
-parser.add_argument('--use_self_and_cross', type=bool,
-                    default=False, help='Use self and cross attention')
-parser.add_argument('--num_res_blocks', type=int, default=2,
-                    help='Number of residual blocks')
-parser.add_argument('--num_middle_res_blocks', type=int,
-                    default=1, help='Number of middle residual blocks')
-parser.add_argument('--activation', type=str,
-                    default='swish', help='activation to use')
+parser.add_argument('--emb_features', type=int, default=256, help='Embedding features')
+parser.add_argument('--feature_depths', type=int, nargs='+', default=[64, 128, 256, 512], help='Feature depths')
+parser.add_argument('--attention_heads', type=int, default=8, help='Number of attention heads')
+parser.add_argument('--flash_attention', type=bool, default=False, help='Use Flash Attention')
+parser.add_argument('--use_projection', type=bool, default=False, help='Use projection')
+parser.add_argument('--use_self_and_cross', type=bool, default=False, help='Use self and cross attention')
+parser.add_argument('--num_res_blocks', type=int, default=2, help='Number of residual blocks')
+parser.add_argument('--num_middle_res_blocks', type=int,  default=1, help='Number of middle residual blocks')
+parser.add_argument('--activation', type=str, default='swish', help='activation to use')
 
-parser.add_argument('--dtype', type=str,
-                    default='bfloat16', help='dtype to use')
-parser.add_argument('--precision', type=str,
-                    default='high', help='precision to use')
+parser.add_argument('--dtype', type=str, default='bfloat16', help='dtype to use')
+parser.add_argument('--precision', type=str, default='high', help='precision to use')
 
-parser.add_argument('--distributed_training', type=bool,
-                    default=None, help='Should use distributed training or not')
-parser.add_argument('--experiment_name', type=str,
-                    default=None, help='Experiment name, would be generated if not provided')
+parser.add_argument('--distributed_training', type=bool, default=None, help='Should use distributed training or not')
+parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
 parser.add_argument('--load_from_checkpoint', type=bool,
                     default=False, help='Load from the best previously stored checkpoint. Experiment name needs to be provided')
 
@@ -1099,8 +855,8 @@ def main(args):
     GRAIN_READ_BUFFER_SIZE = args.GRAIN_READ_BUFFER_SIZE
     GRAIN_WORKER_BUFFER_SIZE = args.GRAIN_WORKER_BUFFER_SIZE
 
-    BATCH_SIZE = args.BATCH_SIZE
-    IMAGE_SIZE = args.IMAGE_SIZE
+    BATCH_SIZE = args.batch_size
+    IMAGE_SIZE = args.image_size
 
     dataset_name = args.dataset
     datalen = len(datasetMap[dataset_name]['source']())
@@ -1129,7 +885,7 @@ def main(args):
             "num_middle_res_blocks": args.num_middle_res_blocks,
             "dtype": DTYPE,
             "precision": PRECISION,
-            "activation": ACTIVATION_MAP[args.activation],
+            "activation": args.activation,
         },
         "dataset": {
             "name": dataset_name,
@@ -1140,11 +896,10 @@ def main(args):
         "batch_size": BATCH_SIZE,
         "epochs": args.epochs,
         "input_shapes": {
-            "x": (args.IMAGE_SIZE, args.IMAGE_SIZE, 3),
+            "x": (IMAGE_SIZE, IMAGE_SIZE, 3),
             "temb": (),
             "textcontext": (77, 768)
-        },
-        "arguments": args
+        }
     }
 
     text_encoders = defaultTextEncodeModel()
@@ -1177,12 +932,20 @@ def main(args):
         
     print("Experiment_Name:", experiment_name)
 
-    unet = Unet(**CONFIG['model'])
+    model_config = CONFIG['model']
+    model_config['activation'] = ACTIVATION_MAP[model_config['activation']]
+    unet = Unet(**model_config)
 
     learning_rate = CONFIG['learning_rate']
     solver = optax.adam(learning_rate)
-    # solver = optax.adamw(2e-6)
 
+    wandb_config = {
+        "project": "flaxdiff",
+        "config": CONFIG,
+        "arguments": vars(args),
+        "name": experiment_name,
+    }
+    
     trainer = DiffusionTrainer(
         unet, optimizer=solver,
         input_shapes=CONFIG['input_shapes'],
@@ -1191,15 +954,8 @@ def main(args):
         name=experiment_name,
         model_output_transform=KarrasPredictionTransform(
         sigma_data=edm_schedule.sigma_data),
-        #    train_state=trainer.best_state,
-        #    loss_fn=lambda x, y: jnp.abs(x - y),
-        # param_transforms=params_transform,
-        #    load_from_checkpoint=True,
-        wandb_config={
-            "project": "flaxdiff",
-            "config": CONFIG,
-            "name": experiment_name,
-        },
+        load_from_checkpoint=args.load_from_checkpoint,
+        wandb_config=wandb_config,
         distributed_training=args.distributed_training,           
     )
 

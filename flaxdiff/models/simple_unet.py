@@ -5,6 +5,7 @@ from typing import Dict, Callable, Sequence, Any, Union
 import einops
 from .common import kernel_init
 from .attention import TransformerBlock
+
 class WeightStandardizedConv(nn.Module):
     """
     apply weight standardization  https://arxiv.org/abs/1903.10520
@@ -243,6 +244,7 @@ def l2norm(t, axis=1, eps=1e-12):
     denom = jnp.clip(jnp.linalg.norm(t, ord=2, axis=axis, keepdims=True), eps)
     out = t/denom
     return (out)
+
 class ResidualBlock(nn.Module):
     conv_type:str
     features:int
@@ -316,13 +318,14 @@ class ResidualBlock(nn.Module):
         return out
     
 class Unet(nn.Module):
-    emb_features:int=64*4,
-    feature_depths:list=[64, 128, 256, 512],
-    attention_configs:list=[{"heads":8}, {"heads":8}, {"heads":8}, {"heads":8}],
-    num_res_blocks:int=2,
-    num_middle_res_blocks:int=1,
-    activation:Callable = jax.nn.swish
-    norm_groups:int=8
+    emb_features: int = 64*4,
+    feature_depths: list = [64, 128, 256, 512],
+    attention_configs: list = [{"heads": 8}, {
+        "heads": 8}, {"heads": 8}, {"heads": 8}],
+    num_res_blocks: int = 2,
+    num_middle_res_blocks: int = 1,
+    activation: Callable = jax.nn.swish
+    norm_groups: int = 32
     dtype: Any = jnp.bfloat16
     precision: Any = jax.lax.Precision.HIGH
 
@@ -331,9 +334,9 @@ class Unet(nn.Module):
         # print("embedding features", self.emb_features)
         temb = FourierEmbedding(features=self.emb_features)(temb)
         temb = TimeProjection(features=self.emb_features)(temb)
-        
+
         _, TS, TC = textcontext.shape
-        
+
         # print("time embedding", temb.shape)
         feature_depths = self.feature_depths
         attention_configs = self.attention_configs
@@ -372,16 +375,21 @@ class Unet(nn.Module):
                 if attention_config is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
                     B, H, W, _ = x.shape
                     if H > TS:
-                        padded_context = jnp.pad(textcontext, ((0, 0), (0, H - TS), (0, 0)), mode='constant', constant_values=0).reshape((B, 1, H, TC))
+                        padded_context = jnp.pad(textcontext, ((
+                            0, 0), (0, H - TS), (0, 0)), mode='constant', constant_values=0).reshape((B, 1, H, TC))
                     else:
                         padded_context = None
                     x = TransformerBlock(heads=attention_config['heads'], dtype=attention_config.get('dtype', jnp.float32),
-                                       dim_head=dim_in // attention_config['heads'],
-                                       use_flash_attention=attention_config.get("flash_attention", True),
-                                       use_projection=attention_config.get("use_projection", False),
-                                       use_self_and_cross=attention_config.get("use_self_and_cross", True),
-                                       precision=attention_config.get("precision", self.precision),
-                                       name=f"down_{i}_attention_{j}")(x, padded_context)
+                                         dim_head=dim_in // attention_config['heads'],
+                                         use_flash_attention=attention_config.get(
+                                             "flash_attention", True),
+                                         use_projection=attention_config.get(
+                                             "use_projection", False),
+                                         use_self_and_cross=attention_config.get(
+                                             "use_self_and_cross", True),
+                                         precision=attention_config.get(
+                                             "precision", self.precision),
+                                         name=f"down_{i}_attention_{j}")(x, padded_context)
                 # print("down residual for feature level", i, "is of shape", x.shape, "features", dim_in)
                 downs.append(x)
             if i != len(feature_depths) - 1:
@@ -411,15 +419,19 @@ class Unet(nn.Module):
                 dtype=self.dtype,
                 precision=self.precision
             )(x, temb)
-            if middle_attention is not None and j == self.num_middle_res_blocks - 1:   # Apply attention only on the last block
-                x = TransformerBlock(heads=middle_attention['heads'], dtype=middle_attention.get('dtype', jnp.float32), 
-                                    dim_head=middle_dim_out // middle_attention['heads'],
-                                    use_flash_attention=middle_attention.get("flash_attention", True),
-                                    use_linear_attention=False,
-                                    use_projection=middle_attention.get("use_projection", False),
-                                    use_self_and_cross=False,
-                                    precision=attention_config.get("precision", self.precision),
-                                    name=f"middle_attention_{j}")(x)
+            # Apply attention only on the last block
+            if middle_attention is not None and j == self.num_middle_res_blocks - 1:
+                x = TransformerBlock(heads=middle_attention['heads'], dtype=middle_attention.get('dtype', jnp.float32),
+                                     dim_head=middle_dim_out // middle_attention['heads'],
+                                     use_flash_attention=middle_attention.get(
+                                         "flash_attention", True),
+                                     use_linear_attention=False,
+                                     use_projection=middle_attention.get(
+                                         "use_projection", False),
+                                     use_self_and_cross=False,
+                                     precision=middle_attention.get(
+                                         "precision", self.precision),
+                                     name=f"middle_attention_{j}")(x)
             x = ResidualBlock(
                 middle_conv_type,
                 name=f"middle_res2_{j}",
@@ -437,12 +449,13 @@ class Unet(nn.Module):
         for i, (dim_out, attention_config) in enumerate(zip(reversed(feature_depths), reversed(attention_configs))):
             # print("Upscaling", i, "features", dim_out)
             for j in range(self.num_res_blocks):
-                x = jnp.concatenate([x, downs.pop()], axis=-1)
+                residual = downs.pop()
+                x = jnp.concatenate([x, residual], axis=-1)
                 # print("concat==> ", i, "concat", x.shape)
                 # kernel_size = (1 + 2 * (j + 1), 1 + 2 * (j + 1))
                 kernel_size = (3, 3)
                 x = ResidualBlock(
-                    up_conv_type,# if j == 0 else "separable",
+                    up_conv_type,  # if j == 0 else "separable",
                     name=f"up_{i}_residual_{j}",
                     features=dim_out,
                     kernel_init=kernel_init(1.0),
@@ -454,18 +467,22 @@ class Unet(nn.Module):
                     precision=self.precision
                 )(x, temb)
                 if attention_config is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
-                    B, H, W, _ = x.shape
-                    if H > TS:
-                        padded_context = jnp.pad(textcontext, ((0, 0), (0, H - TS), (0, 0)), mode='constant', constant_values=0).reshape((B, 1, H, TC))
-                    else:
-                        padded_context = None
-                    x = TransformerBlock(heads=attention_config['heads'], dtype=attention_config.get('dtype', jnp.float32), 
-                                       dim_head=dim_out // attention_config['heads'],
-                                       use_flash_attention=attention_config.get("flash_attention", True),
-                                       use_projection=attention_config.get("use_projection", False),
-                                       use_self_and_cross=attention_config.get("use_self_and_cross", True),
-                                        precision=attention_config.get("precision", self.precision),
-                                       name=f"up_{i}_attention_{j}")(x, padded_context)
+                    # B, H, W, _ = x.shape
+                    # if H > TS:
+                    #     padded_context = jnp.pad(textcontext, ((0, 0), (0, H - TS), (0, 0)), mode='constant', constant_values=0).reshape((B, 1, H, TC))
+                    # else:
+                    #     padded_context = None
+                    x = TransformerBlock(heads=attention_config['heads'], dtype=attention_config.get('dtype', jnp.float32),
+                                         dim_head=dim_out // attention_config['heads'],
+                                         use_flash_attention=attention_config.get(
+                                             "flash_attention", True),
+                                         use_projection=attention_config.get(
+                                             "use_projection", False),
+                                         use_self_and_cross=attention_config.get(
+                                             "use_self_and_cross", True),
+                                         precision=attention_config.get(
+                                             "precision", self.precision),
+                                         name=f"up_{i}_attention_{j}")(x, residual)
             # print("Upscaling ", i, x.shape)
             if i != len(feature_depths) - 1:
                 x = Upsample(
@@ -487,7 +504,7 @@ class Unet(nn.Module):
             dtype=self.dtype,
             precision=self.precision
         )(x)
-    
+
         x = jnp.concatenate([x, downs.pop()], axis=-1)
 
         x = ResidualBlock(
@@ -495,7 +512,7 @@ class Unet(nn.Module):
             name="final_residual",
             features=self.feature_depths[0],
             kernel_init=kernel_init(1.0),
-            kernel_size=(3,3),
+            kernel_size=(3, 3),
             strides=(1, 1),
             activation=self.activation,
             norm_groups=self.norm_groups,
@@ -503,7 +520,7 @@ class Unet(nn.Module):
             precision=self.precision
         )(x, temb)
 
-        x = nn.GroupNorm(self.norm_groups)(x)
+        x = nn.RMSNorm()(x)
         x = self.activation(x)
 
         noise_out = ConvLayer(
@@ -516,4 +533,4 @@ class Unet(nn.Module):
             dtype=self.dtype,
             precision=self.precision
         )(x)
-        return noise_out#, attentions
+        return noise_out  # , attentions
