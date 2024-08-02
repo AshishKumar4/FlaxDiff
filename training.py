@@ -568,7 +568,7 @@ class SimpleTrainer:
         summary_writer = self.init_tensorboard(
             data['global_batch_size'], steps_per_epoch, epochs)
 
-        while self.latest_epoch <= epochs:
+        while self.latest_epoch < epochs:
             self.latest_epoch += 1
             current_epoch = self.latest_epoch
             print(f"\nEpoch {current_epoch}/{epochs}")
@@ -600,6 +600,8 @@ class SimpleTrainer:
             self.state = state
             total_time = end_time - start_time
             avg_time_per_step = total_time / steps_per_epoch
+            self.wandb.log({"train/epoch_time": total_time})
+            self.wandb.log({"train/avg_time_per_step": avg_time_per_step})
             avg_loss = epoch_loss / steps_per_epoch
             if avg_loss < self.best_loss:
                 self.best_loss = avg_loss
@@ -725,8 +727,6 @@ class DiffusionTrainer(SimpleTrainer):
 
             output = text_embedder(
                 input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
-            # output = infer(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
-
             label_seq = output.last_hidden_state
 
             # Generate random probabilities to decide how much of this batch will be unconditional
@@ -785,6 +785,10 @@ class DiffusionTrainer(SimpleTrainer):
         super().fit(data, steps_per_epoch, epochs, {
             "batch_size": local_batch_size, "null_labels_seq": null_labels_full, "text_embedder": text_embedder})
 
+def boolean_string(s):
+    if type(s) == bool:
+        return s
+    return s == 'True'
 
 # %%
 # Parse command-line arguments
@@ -816,9 +820,9 @@ parser.add_argument('--noise_schedule', type=str, default='edm',
 parser.add_argument('--emb_features', type=int, default=256, help='Embedding features')
 parser.add_argument('--feature_depths', type=int, nargs='+', default=[64, 128, 256, 512], help='Feature depths')
 parser.add_argument('--attention_heads', type=int, default=8, help='Number of attention heads')
-parser.add_argument('--flash_attention', type=bool, default=False, help='Use Flash Attention')
-parser.add_argument('--use_projection', type=bool, default=False, help='Use projection')
-parser.add_argument('--use_self_and_cross', type=bool, default=False, help='Use self and cross attention')
+parser.add_argument('--flash_attention', type=boolean_string, default=False, help='Use Flash Attention')
+parser.add_argument('--use_projection', type=boolean_string, default=False, help='Use projection')
+parser.add_argument('--use_self_and_cross', type=boolean_string, default=False, help='Use self and cross attention')
 parser.add_argument('--num_res_blocks', type=int, default=2, help='Number of residual blocks')
 parser.add_argument('--num_middle_res_blocks', type=int,  default=1, help='Number of middle residual blocks')
 parser.add_argument('--activation', type=str, default='swish', help='activation to use')
@@ -826,13 +830,13 @@ parser.add_argument('--activation', type=str, default='swish', help='activation 
 parser.add_argument('--dtype', type=str, default='bfloat16', help='dtype to use')
 parser.add_argument('--precision', type=str, default='high', help='precision to use')
 
-parser.add_argument('--distributed_training', type=bool, default=None, help='Should use distributed training or not')
+parser.add_argument('--distributed_training', type=boolean_string, default=True, help='Should use distributed training or not')
 parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
-parser.add_argument('--load_from_checkpoint', type=bool,
+parser.add_argument('--load_from_checkpoint', type=boolean_string,
                     default=False, help='Load from the best previously stored checkpoint. Experiment name needs to be provided')
 parser.add_argument('--dataset_seed', type=int, default=0, help='Dataset starting seed')
 
-parser.add_argument('--dataset_test', type=bool,
+parser.add_argument('--dataset_test', type=boolean_string,
                     default=False, help='Run the dataset iterator for 3000 steps for testintg/benchmarking')
 
 def main(args):
@@ -879,15 +883,20 @@ def main(args):
         None,
     ]
 
-    attention_configs += [
-        {"heads": args.attention_heads, "dtype": DTYPE, "flash_attention": args.flash_attention,
-            "use_projection": args.use_projection, "use_self_and_cross": args.use_self_and_cross},
-    ] * (len(args.feature_depths) - 2)
-
-    attention_configs += [
-        {"heads": args.attention_heads, "dtype": DTYPE, "flash_attention": False,
-            "use_projection": False, "use_self_and_cross": False},
-    ]
+    if args.attention_heads > 0:
+        attention_configs += [
+            {"heads": args.attention_heads, "dtype": DTYPE, "flash_attention": args.flash_attention,
+                "use_projection": args.use_projection, "use_self_and_cross": args.use_self_and_cross},
+        ] * (len(args.feature_depths) - 2)
+        attention_configs += [
+            {"heads": args.attention_heads, "dtype": DTYPE, "flash_attention": False,
+                "use_projection": False, "use_self_and_cross": False},
+        ]
+    else:
+        print("Attention heads not provided, disabling attention")
+        attention_configs += [
+            None,
+        ] * (len(args.feature_depths) - 1)
 
     CONFIG = {
         "model": {
@@ -974,12 +983,13 @@ def main(args):
         distributed_training=args.distributed_training,           
     )
 
+    if trainer.distributed_training:
+        print("Distributed Training enabled")
     # %%
     batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
     print(f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
     jax.profiler.start_server(6009)
     final_state = trainer.fit(data, batches, epochs=CONFIG['epochs'])
-
 
 if __name__ == '__main__':
     args = parser.parse_args()
