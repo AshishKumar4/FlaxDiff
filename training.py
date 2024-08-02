@@ -771,6 +771,7 @@ class DiffusionTrainer(SimpleTrainer):
 
             rng_state, subkey = rng_state.get_random_key()
             subkey = jax.random.fold_in(subkey, local_device_index)
+            subkey = jax.random.fold_in(subkey, jax.process_index())
             local_rng_state = RandomMarkovState(subkey)
 
             noise_level, local_rng_state = noise_schedule.generate_timesteps(images.shape[0], local_rng_state)
