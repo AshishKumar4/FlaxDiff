@@ -107,3 +107,45 @@ EOF"
 
 # Reload the systemd configuration
 sudo systemctl daemon-reload
+
+# Check for --mount-gcs argument
+for arg in "$@"
+do
+    case $arg in
+        --mount-gcs=*)
+        GCS_BUCKET="${arg#*=}"
+        shift
+        ;;
+        --dev)
+        DEV_MODE=true
+        shift
+        ;;
+    esac
+done
+
+if [ -n "$GCS_BUCKET" ]; then
+    # URL of the file to download
+    FILE_URL="https://raw.githubusercontent.com/AshishKumar4/FlaxDiff/main/datasets/gcsfuse.sh"
+    # Local path to save the downloaded file
+    LOCAL_FILE="gcsfuse.sh"
+
+    # Download the file
+    curl -o $LOCAL_FILE $FILE_URL
+
+    # Make the script executable
+    chmod +x $LOCAL_FILE
+
+    # Run the script with the specified arguments
+    ./$LOCAL_FILE DATASET_GCS_BUCKET=$GCS_BUCKET MOUNT_PATH=/mnt/gcs_mount
+fi
+
+if [ "$DEV_MODE" = true ]; then
+    # Create 'research' directory in the home folder
+    mkdir -p $HOME/research
+
+    # Clone the repository into the 'research' directory
+    git clone git@github.com:AshishKumar4/FlaxDiff.git $HOME/research
+else
+    # Download the training.py file into the home folder
+    wget -O $HOME/training.py https://github.com/AshishKumar4/FlaxDiff/raw/main/training.py
+fi
