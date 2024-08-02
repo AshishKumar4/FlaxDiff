@@ -142,11 +142,9 @@ def data_source_tfds(name, use_tf=True, split="all"):
 def labelizer_oxford_flowers102(path):
     with open(path, "r") as f:
         textlabels = [i.strip() for i in f.readlines()]
-    import tensorflow as tf
-    textlabels = tf.convert_to_tensor(textlabels)
 
     def load_labels(sample):
-        return textlabels[sample['label']]
+        return textlabels[int(sample['label'])]
     return load_labels
 
 def tfds_augmenters(image_scale, method):
@@ -157,11 +155,11 @@ def tfds_augmenters(image_scale, method):
             self.caption_processor = CaptionProcessor(tensor_type="np")
 
         def map(self, element) -> Dict[str, jnp.array]:
-            image = element['image'].numpy()
+            image = element['image']
             image = cv2.resize(image, (image_scale, image_scale),
                             interpolation=cv2.INTER_AREA)
             # image = (image - 127.5) / 127.5
-            caption = labelizer(element).decode('utf-8')
+            caption = labelizer(element)
             results = self.caption_processor(caption)
             return {
                 "image": image,
@@ -913,7 +911,8 @@ def main(args):
             "x": (IMAGE_SIZE, IMAGE_SIZE, 3),
             "temb": (),
             "textcontext": (77, 768)
-        }
+        },
+        "arguments": vars(args),
     }
 
     text_encoders = defaultTextEncodeModel()
@@ -957,7 +956,6 @@ def main(args):
     wandb_config = {
         "project": "flaxdiff",
         "config": CONFIG,
-        "arguments": vars(args),
         "name": experiment_name,
     }
     
