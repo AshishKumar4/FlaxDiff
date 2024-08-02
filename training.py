@@ -125,9 +125,9 @@ class CaptionProcessor:
     def __repr__(self):
         return self.__class__.__name__ + '()'
 
-#-----------------------------------------------------------------------------------------------#
+# -----------------------------------------------------------------------------------------------#
 # Oxford flowers and other TFDS datasources ----------------------------------------------------#
-#-----------------------------------------------------------------------------------------------#
+# -----------------------------------------------------------------------------------------------#
 
 def data_source_tfds(name, use_tf=True, split="all"):
     import tensorflow_datasets as tfds
@@ -157,8 +157,9 @@ def tfds_augmenters(image_scale, method):
             self.caption_processor = CaptionProcessor(tensor_type="np")
 
         def map(self, element) -> Dict[str, jnp.array]:
-            image = element['image']
-            image = jax.image.resize(image, (image_scale, image_scale, 3), method=method)
+            image = element['image'].numpy()
+            image = cv2.resize(image, (image_scale, image_scale),
+                            interpolation=cv2.INTER_AREA)
             # image = (image - 127.5) / 127.5
             caption = labelizer(element).decode('utf-8')
             results = self.caption_processor(caption)
@@ -168,10 +169,10 @@ def tfds_augmenters(image_scale, method):
                 "attention_mask": results['attention_mask'][0],
             }
     return augmenters
-        
-#-----------------------------------------------------------------------------------------------#
+
+# -----------------------------------------------------------------------------------------------#
 # CC12m and other GCS data sources -------------------------------------------------------------#
-#-----------------------------------------------------------------------------------------------#
+# -----------------------------------------------------------------------------------------------#
 
 def data_source_gcs(source="/mnt/gcs_mount/arrayrecord/cc12m/"):
     def data_source():
@@ -238,16 +239,24 @@ datasetMap = {
     "cc12m": {
         "source": data_source_gcs("/mnt/gcs_mount/arrayrecord/cc12m/"),
         "augmenter": gcs_augmenters,
-    }
+    },
 }
 
-def get_dataset_grain(data_name="cc12m",
-                      batch_size=64, image_scale=256,
-                      count=None, num_epochs=None,
-                      text_encoders=None,
-                      method=jax.image.ResizeMethod.LANCZOS3,
-                      grain_worker_count=32, grain_read_thread_count=64,
-                      grain_read_buffer_size=50, grain_worker_buffer_size=20):
+
+def get_dataset_grain(
+    data_name="cc12m",
+    batch_size=64,
+    image_scale=256,
+    count=None,
+    num_epochs=None,
+    text_encoders=None,
+    method=jax.image.ResizeMethod.LANCZOS3,
+    grain_worker_count=32,
+    grain_read_thread_count=64,
+    grain_read_buffer_size=50,
+    grain_worker_buffer_size=20,
+    seed=0,
+):
     dataset = datasetMap[data_name]
     data_source = dataset["source"]()
     augmenter = dataset["augmenter"](image_scale, method)
@@ -262,13 +271,15 @@ def get_dataset_grain(data_name="cc12m",
     sampler = pygrain.IndexSampler(
         num_records=len(data_source) if count is None else count,
         shuffle=True,
-        seed=0,
+        seed=seed,
         num_epochs=num_epochs,
         shard_options=pygrain.NoSharding(),
     )
 
-    transformations = [augmenter(), pygrain.Batch(
-        local_batch_size, drop_remainder=True)]
+    transformations = [
+        augmenter(),
+        pygrain.Batch(local_batch_size, drop_remainder=True),
+    ]
 
     loader = pygrain.DataLoader(
         data_source=data_source,
@@ -276,8 +287,9 @@ def get_dataset_grain(data_name="cc12m",
         operations=transformations,
         worker_count=grain_worker_count,
         read_options=pygrain.ReadOptions(
-            grain_read_thread_count, grain_read_buffer_size),
-        worker_buffer_size=grain_worker_buffer_size
+            grain_read_thread_count, grain_read_buffer_size
+        ),
+        worker_buffer_size=grain_worker_buffer_size,
     )
 
     def get_trainset():
@@ -293,6 +305,7 @@ def get_dataset_grain(data_name="cc12m",
         "model": model,
         "tokenizer": tokenizer,
     }
+
 
 #####################################################################################################################
 ############################################### Training Pipeline ###################################################
@@ -818,6 +831,7 @@ parser.add_argument('--distributed_training', type=bool, default=None, help='Sho
 parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
 parser.add_argument('--load_from_checkpoint', type=bool,
                     default=False, help='Load from the best previously stored checkpoint. Experiment name needs to be provided')
+parser.add_argument('--dataset_seed', type=int, default=0, help='Dataset starting seed')
 
 parser.add_argument('--dataset_test', type=bool,
                     default=False, help='Run the dataset iterator for 3000 steps for testintg/benchmarking')
@@ -910,6 +924,7 @@ def main(args):
         grain_worker_count=GRAIN_WORKER_COUNT, grain_read_thread_count=GRAIN_READ_THREAD_COUNT,
         grain_read_buffer_size=GRAIN_READ_BUFFER_SIZE, grain_worker_buffer_size=GRAIN_WORKER_BUFFER_SIZE,
         text_encoders=text_encoders,
+        seed=args.dataset_seed,
     )
 
     if args.dataset_test:
