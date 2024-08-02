@@ -172,8 +172,8 @@ def tfds_augmenters(image_scale, method):
 # CC12m and other GCS data sources -------------------------------------------------------------#
 # -----------------------------------------------------------------------------------------------#
 
-def data_source_gcs(source="/mnt/gcs_mount/arrayrecord/cc12m/"):
-    def data_source():
+def data_source_gcs():
+    def data_source(source="/mnt/gcs_mount/arrayrecord/cc12m/"):
         records_path = source
         records = [os.path.join(records_path, i) for i in os.listdir(
             records_path) if 'array_record' in i]
@@ -235,7 +235,7 @@ datasetMap = {
         "augmenter": tfds_augmenters,
     },
     "cc12m": {
-        "source": data_source_gcs("/mnt/gcs_mount/arrayrecord/cc12m/"),
+        "source": data_source_gcs(),
         "augmenter": gcs_augmenters,
     },
 }
@@ -254,9 +254,10 @@ def get_dataset_grain(
     grain_read_buffer_size=50,
     grain_worker_buffer_size=20,
     seed=0,
+    dataset_source="/mnt/gcs_mount/arrayrecord/cc12m/",
 ):
     dataset = datasetMap[data_name]
-    data_source = dataset["source"]()
+    data_source = dataset["source"](dataset_source)
     augmenter = dataset["augmenter"](image_scale, method)
 
     local_batch_size = batch_size // jax.process_count()
@@ -806,6 +807,8 @@ parser.add_argument('--steps_per_epoch', type=int,
                     default=None, help='Steps per epoch')
 parser.add_argument('--dataset', type=str,
                     default='cc12m', help='Dataset to use')
+parser.add_argument('--dataset_path', type=str,
+                    default='/home/mrwhite0racle/gcs_mount', help="Dataset location path")
 
 parser.add_argument('--learning_rate', type=float,
                     default=2e-4, help='Learning rate')
