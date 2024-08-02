@@ -764,7 +764,7 @@ class DiffusionTrainer(SimpleTrainer):
             return state, loss
         
         if distributed_training:
-            train_step = jax.pmap(axis_name="device")(train_step)
+            train_step = jax.pmap(train_step, axis_name="device")
         else:
             train_step = jax.jit(train_step)
             
@@ -808,7 +808,7 @@ parser.add_argument('--steps_per_epoch', type=int,
 parser.add_argument('--dataset', type=str,
                     default='cc12m', help='Dataset to use')
 parser.add_argument('--dataset_path', type=str,
-                    default='/home/mrwhite0racle/gcs_mount', help="Dataset location path")
+                    default='/home/mrwhite0racle/gcs_mount/arrayrecord/cc12m', help="Dataset location path")
 
 parser.add_argument('--learning_rate', type=float,
                     default=2e-4, help='Learning rate')
