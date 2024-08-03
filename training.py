@@ -38,6 +38,8 @@ import wandb
 import cv2
 import argparse
 
+import resource
+
 #####################################################################################################################
 ################################################# Initialization ####################################################
 #####################################################################################################################
@@ -881,6 +883,14 @@ parser.add_argument('--dataset_test', type=boolean_string,
                     default=False, help='Run the dataset iterator for 3000 steps for testintg/benchmarking')
 
 def main(args):
+    resource.setrlimit(
+        resource.RLIMIT_CORE,
+        (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+
+    resource.setrlimit(
+        resource.RLIMIT_OFILE,
+        (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+
     if args.load_from_checkpoint:
         assert args.experiment_name is not None and args.experiment_name != "", "Experiment name needs to be given if load_from_checkpoint is True"
 
