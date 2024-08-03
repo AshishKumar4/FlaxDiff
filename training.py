@@ -597,9 +597,6 @@ class SimpleTrainer:
         else:
             local_device_indexes = 0
 
-        summary_writer = self.init_tensorboard(
-            data['global_batch_size'], steps_per_epoch, epochs)
-
         while self.latest_epoch < epochs:
             self.latest_epoch += 1
             current_epoch = self.latest_epoch
@@ -622,8 +619,6 @@ class SimpleTrainer:
                         pbar.set_postfix(loss=f'{loss:.4f}')
                         pbar.update(100)
                         current_step = current_epoch*steps_per_epoch + i
-                        summary_writer.scalar(
-                            'Train Loss', loss, step=current_step)
                         if self.wandb is not None:
                             self.wandb.log({
                                 "train/step" : current_step,
