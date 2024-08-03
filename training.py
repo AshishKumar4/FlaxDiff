@@ -352,7 +352,7 @@ class SimpleTrainer:
         self.loss_fn = loss_fn
         self.input_shapes = input_shapes
 
-        if wandb_config is not None:
+        if wandb_config is not None and jax.process_index() == 0:
             run = wandb.init(**wandb_config)
             self.wandb = run
             # define our custom x axis metric
@@ -641,13 +641,14 @@ class SimpleTrainer:
                 self.best_loss = avg_loss
                 self.best_state = train_state
                 self.save(current_epoch)
-            self.wandb.log({
-                "train/epoch_time": total_time,
-                "train/avg_time_per_step": avg_time_per_step,
-                "train/avg_loss": avg_loss,
-                "train/best_loss": self.best_loss,
-                "train/epoch": current_epoch,
-            }, step=current_step)
+            if self.wandb is not None:
+                self.wandb.log({
+                    "train/epoch_time": total_time,
+                    "train/avg_time_per_step": avg_time_per_step,
+                    "train/avg_loss": avg_loss,
+                    "train/best_loss": self.best_loss,
+                    "train/epoch": current_epoch,
+                }, step=current_step)
 
             # Compute Metrics
             metrics_str = ''
@@ -1039,7 +1040,7 @@ def main(args):
     # %%
     batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
     print(f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
-    jax.profiler.start_server(6009)
+    
     final_state = trainer.fit(data, batches, epochs=CONFIG['epochs'])
 
 if __name__ == '__main__':
