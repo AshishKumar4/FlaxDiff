@@ -451,19 +451,19 @@ class SimpleTrainer:
         self.best_state = best_state
 
     def get_state(self):
-        if self.distributed_training:
+        if self.distributed_training and jax.process_index() == 0:
             return flax.jax_utils.unreplicate(self.state)
         else:
             return self.state
 
     def get_best_state(self):
-        if self.distributed_training:
+        if self.distributed_training and jax.process_index() == 0:
             return flax.jax_utils.unreplicate(self.best_state)
         else:
             return self.best_state
         
     def get_rngstate(self):
-        if self.distributed_training:
+        if self.distributed_training and jax.process_index() == 0:
             return flax.jax_utils.unreplicate(self.rngstate)
         else:
             return self.rngstate
