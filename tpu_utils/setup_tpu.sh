@@ -14,23 +14,6 @@ sudo apt update
 sudo apt install -y knot-resolver
 sudo sh -c 'echo `hostname -I` `hostname` >> /etc/hosts'
 sudo sh -c 'echo nameserver 127.0.0.1 > /etc/resolv.conf'
-sudo systemctl stop systemd-resolved
-sudo systemctl start kresd@1.service
-sudo systemctl start kresd@2.service
-sudo systemctl start kresd@3.service
-sudo systemctl start kresd@4.service
-sudo systemctl start kresd@5.service
-sudo systemctl start kresd@6.service
-sudo systemctl start kresd@7.service
-sudo systemctl start kresd@8.service
-sudo systemctl start kresd@9.service
-sudo systemctl start kresd@10.service
-sudo systemctl start kresd@11.service
-sudo systemctl start kresd@12.service
-sudo systemctl start kresd@13.service
-sudo systemctl start kresd@14.service
-sudo systemctl start kresd@15.service
-sudo systemctl start kresd@16.service
 
 # Backup the original resolv.conf
 sudo cp /etc/resolv.conf /etc/resolv.conf.bak
@@ -55,6 +38,24 @@ for ns in "${nameservers[@]}"; do
   sudo sh -c "echo \"$ns\" >> /etc/resolv.conf"
 done
 echo "Nameservers added to /etc/resolv.conf"
+
+sudo systemctl stop systemd-resolved
+sudo systemctl start kresd@1.service
+sudo systemctl start kresd@2.service
+sudo systemctl start kresd@3.service
+sudo systemctl start kresd@4.service
+sudo systemctl start kresd@5.service
+sudo systemctl start kresd@6.service
+sudo systemctl start kresd@7.service
+sudo systemctl start kresd@8.service
+sudo systemctl start kresd@9.service
+sudo systemctl start kresd@10.service
+sudo systemctl start kresd@11.service
+sudo systemctl start kresd@12.service
+sudo systemctl start kresd@13.service
+sudo systemctl start kresd@14.service
+sudo systemctl start kresd@15.service
+sudo systemctl start kresd@16.service
 
 # Installing and setting up gcsfuse
 export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
@@ -134,9 +135,9 @@ if [ -n "$GCS_BUCKET" ]; then
 
     # Make the script executable
     chmod +x $LOCAL_FILE
-
+    echo "Mounting GCS bucket: $GCS_BUCKET to $HOME/gcs_mount"
     # Run the script with the specified arguments
-    ./$LOCAL_FILE DATASET_GCS_BUCKET=$GCS_BUCKET MOUNT_PATH=/mnt/gcs_mount
+    ./$LOCAL_FILE DATASET_GCS_BUCKET=$GCS_BUCKET MOUNT_PATH=$HOME/gcs_mount
 fi
 
 if [ "$DEV_MODE" = true ]; then

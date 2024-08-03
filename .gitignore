@@ -15,3 +15,5 @@ gcs_mount
 datacache
 *.deb
 gcsfuse.yml
+*.csv
+*.tsv
