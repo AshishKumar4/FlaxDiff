@@ -889,7 +889,7 @@ def main(args):
 
     resource.setrlimit(
         resource.RLIMIT_OFILE,
-        (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+        (65535, 65535))
 
     if args.load_from_checkpoint:
         assert args.experiment_name is not None and args.experiment_name != "", "Experiment name needs to be given if load_from_checkpoint is True"
