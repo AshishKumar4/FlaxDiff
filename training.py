@@ -40,6 +40,10 @@ import argparse
 
 import resource
 
+from jax.sharding import Mesh, PartitionSpec as P
+from jax.experimental import mesh_utils
+from jax.experimental.shard_map import shard_map
+
 #####################################################################################################################
 ################################################# Initialization ####################################################
 #####################################################################################################################
@@ -345,6 +349,7 @@ class SimpleTrainer:
         if distributed_training is None or distributed_training is True:
             # Auto-detect if we are running on multiple devices
             distributed_training = jax.device_count() > 1
+            self.mesh = jax.sharding.Mesh(jax.devices(), 'data')
 
         self.distributed_training = distributed_training
         self.model = model
@@ -517,6 +522,7 @@ class SimpleTrainer:
         loss_fn = self.loss_fn
         distributed_training = self.distributed_training
 
+        @jax.jit
         def train_step(train_state: SimpleTrainState, batch, rng_state: RandomMarkovState, local_device_indexes):
             """Train for a single step."""
             images = batch['image']
@@ -530,14 +536,13 @@ class SimpleTrainer:
                 return loss
             loss, grads = jax.value_and_grad(model_loss)(train_state.params)
             if distributed_training:
-                grads = jax.lax.pmean(grads, "device")
+                grads = jax.lax.pmean(grads, "data")
             train_state = train_state.apply_gradients(grads=grads)
             return train_state, loss, rng_state
         
         if distributed_training:
-            train_step = jax.pmap(axis_name="device")(train_step)
-        else:
-            train_step = jax.jit(train_step)
+            # train_step = jax.pmap(axis_name="data")(train_step)
+            train_step = shard_map(train_step, mesh=self.mesh, in_specs=P('data'), out_specs=P())
             
         return train_step
 
@@ -607,12 +612,12 @@ class SimpleTrainer:
             with tqdm.tqdm(total=steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step') as pbar:
                 for i in range(steps_per_epoch):
                     batch = next(train_ds)
-                    if self.distributed_training and device_count > 1:
-                        batch = jax.tree.map(lambda x: x.reshape(
-                            (device_count, -1, *x.shape[1:])), batch)
                     
                     train_state, loss, rng_state = train_step(train_state, batch, rng_state, local_device_indexes)
-                    loss = jnp.mean(loss)
+                    
+                    if self.distributed_training:
+                        loss = jax.experimental.multihost_utils.process_allgather(loss)
+                        loss = jnp.mean(loss)
                     
                     epoch_loss += loss
                     if i % 100 == 0:
@@ -752,6 +757,7 @@ class DiffusionTrainer(SimpleTrainer):
 
         distributed_training = self.distributed_training
 
+        @jax.jit
         def train_step(train_state: TrainState, batch, rng_state: RandomMarkovState, local_device_index):
             """Train for a single step."""
             images = batch['image']
@@ -795,15 +801,13 @@ class DiffusionTrainer(SimpleTrainer):
             
             loss, grads = jax.value_and_grad(model_loss)(train_state.params)
             if distributed_training:
-                grads = jax.lax.pmean(grads, "device")
+                grads = jax.lax.pmean(grads, "data")
             train_state = train_state.apply_gradients(grads=grads)
             train_state = train_state.apply_ema(self.ema_decay)
             return train_state, loss, rng_state
         
         if distributed_training:
-            train_step = jax.pmap(train_step, axis_name="device")
-        else:
-            train_step = jax.jit(train_step)
+            train_step = shard_map(train_step, mesh=self.mesh, in_specs=P('data'), out_specs=P())
             
         return train_step
 
