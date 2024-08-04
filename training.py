@@ -540,7 +540,7 @@ class SimpleTrainer:
             return train_state, loss, rng_state
         
         if distributed_training:
-            train_step = jax.pmap(axis_name="data")(train_step)
+            train_step = jax.pmap(train_step, axis_name="data")
             # train_step = shard_map(train_step, mesh=self.mesh, in_specs=P('data'), out_specs=P())
         else:
             train_step = jax.jit(train_step)
@@ -811,7 +811,7 @@ class DiffusionTrainer(SimpleTrainer):
             return train_state, loss, rng_state
         
         if distributed_training:
-            train_step = jax.pmap(axis_name="data")(train_step)
+            train_step = jax.pmap(train_step, axis_name="data")
             # train_step = shard_map(train_step, mesh=self.mesh, in_specs=P('data'), out_specs=P())
         else:
             train_step = jax.jit(train_step)
