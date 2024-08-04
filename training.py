@@ -522,7 +522,6 @@ class SimpleTrainer:
         loss_fn = self.loss_fn
         distributed_training = self.distributed_training
 
-        @jax.jit
         def train_step(train_state: SimpleTrainState, batch, rng_state: RandomMarkovState, local_device_indexes):
             """Train for a single step."""
             images = batch['image']
@@ -541,8 +540,10 @@ class SimpleTrainer:
             return train_state, loss, rng_state
         
         if distributed_training:
-            # train_step = jax.pmap(axis_name="data")(train_step)
-            train_step = shard_map(train_step, mesh=self.mesh, in_specs=P('data'), out_specs=P())
+            train_step = jax.pmap(axis_name="data")(train_step)
+            # train_step = shard_map(train_step, mesh=self.mesh, in_specs=P('data'), out_specs=P())
+        else:
+            train_step = jax.jit(train_step)
             
         return train_step
 
@@ -612,7 +613,10 @@ class SimpleTrainer:
             with tqdm.tqdm(total=steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step') as pbar:
                 for i in range(steps_per_epoch):
                     batch = next(train_ds)
-                    
+                    if self.distributed_training and device_count > 1:
+                        batch = jax.tree.map(lambda x: x.reshape(
+                            (device_count, -1, *x.shape[1:])), batch)
+                        
                     train_state, loss, rng_state = train_step(train_state, batch, rng_state, local_device_indexes)
                     
                     if self.distributed_training:
@@ -757,7 +761,7 @@ class DiffusionTrainer(SimpleTrainer):
 
         distributed_training = self.distributed_training
 
-        @jax.jit
+        # @jax.jit
         def train_step(train_state: TrainState, batch, rng_state: RandomMarkovState, local_device_index):
             """Train for a single step."""
             images = batch['image']
@@ -807,7 +811,10 @@ class DiffusionTrainer(SimpleTrainer):
             return train_state, loss, rng_state
         
         if distributed_training:
-            train_step = shard_map(train_step, mesh=self.mesh, in_specs=P('data'), out_specs=P())
+            train_step = jax.pmap(axis_name="data")(train_step)
+            # train_step = shard_map(train_step, mesh=self.mesh, in_specs=P('data'), out_specs=P())
+        else:
+            train_step = jax.jit(train_step)
             
         return train_step
 
