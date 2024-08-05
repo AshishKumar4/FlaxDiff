@@ -929,6 +929,7 @@ parser.add_argument('--dataset_test', type=boolean_string,
                     default=False, help='Run the dataset iterator for 3000 steps for testintg/benchmarking')
 
 parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', help='Checkpoint directory')
+parser.add_argument('--checkpoint_fs', type=str, default='local', choices=['local', 'gcs'], help='Checkpoint filesystem')
 
 parser.add_argument('--optimizer', type=str, default='adamw',
                     choices=['adam', 'adamw', 'lamb'], help='Optimizer to use')
@@ -954,6 +955,7 @@ def main(args):
 
     jax.distributed.initialize()
 
+    jax.config.update('jax_threefry_partitionable', True)
     print(f"Number of devices: {jax.device_count()}")
     print(f"Local devices: {jax.local_devices()}")
 
@@ -978,6 +980,10 @@ def main(args):
         'adamw' : optax.adamw,
         'lamb' : optax.lamb,
     }
+    
+    CHECKPOINT_DIR = args.checkpoint_dir
+    if args.checkpoint_fs == 'gcs':
+        CHECKPOINT_DIR = f"gs://{CHECKPOINT_DIR}"
 
     DTYPE = DTYPE_MAP[args.dtype]
     PRECISION = PRECISION_MAP[args.precision]
@@ -1103,7 +1109,7 @@ def main(args):
         load_from_checkpoint=args.load_from_checkpoint,
         wandb_config=wandb_config,
         distributed_training=args.distributed_training,  
-        checkpoint_base_path=args.checkpoint_dir,         
+        checkpoint_base_path=CHECKPOINT_DIR,         
     )
 
     if trainer.distributed_training:
@@ -1120,10 +1126,11 @@ if __name__ == '__main__':
 
 """
 python3 training.py --dataset=laiona_coco --dataset_path='/home/mrwhite0racle/gcs_mount/arrayrecord/laion-aesthetics-12m+mscoco-2017'\
-            --epochs=40 --batch_size=256 \
-            --learning_rate=2.7e-4 --num_res_blocks=3 \
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=1024 \
+            --learning_rate=1e-4 --num_res_blocks=4 \
             --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
-            --experiment_name='batch 256 v4-16 host laiona_coco with lr schedule'\
-            --learning_rate_schedule=cosine --learning_rate_peak=5e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=10000\
-            --optimizer=lamb 
+            --experiment_name='batch 1024 v4-64 host laiona_coco'\
+            --learning_rate_schedule=cosine --learning_rate_peak=2e-4 --learning_rate_end=1e-5 --learning_rate_warmup_steps=1000\
+            --optimizer=adamw
 """
