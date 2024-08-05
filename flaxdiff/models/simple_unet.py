@@ -342,8 +342,6 @@ class Unet(nn.Module):
 
         conv_type = up_conv_type = down_conv_type = middle_conv_type = "conv"
         # middle_conv_type = "separable"
-
-        print(f"input shape: {x.shape}")
         
         x = ConvLayer(
             conv_type,
@@ -355,8 +353,6 @@ class Unet(nn.Module):
             precision=self.precision
         )(x)
         downs = [x]
-        
-        print(f"x shape: {x.shape}")
 
         # Downscaling blocks
         for i, (dim_out, attention_config) in enumerate(zip(feature_depths, attention_configs)):
