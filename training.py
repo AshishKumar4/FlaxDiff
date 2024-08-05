@@ -653,9 +653,9 @@ class SimpleTrainer:
                 epoch_loss += loss
                     
                 if pbar is not None:
-                    if i % 10 == 0:
+                    if i % 100 == 0:
                         pbar.set_postfix(loss=f'{loss:.4f}')
-                        pbar.update(10)
+                        pbar.update(100)
                         current_step = current_epoch*steps_per_epoch + i
                         if self.wandb is not None:
                             self.wandb.log({
