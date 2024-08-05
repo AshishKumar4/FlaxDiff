@@ -300,7 +300,7 @@ def get_dataset_grain(
         shuffle=True,
         seed=seed,
         num_epochs=num_epochs,
-        shard_options=pygrain.NoSharding(),
+        shard_options=pygrain.ShardByJaxProcess(),
     )
 
     transformations = [
@@ -1093,9 +1093,9 @@ if __name__ == '__main__':
     main(args)
 
 """
-JAX_TRACEBACK_FILTERING=off python3 training.py --dataset=laiona_coco --dataset_path='/home/mrwhite0racle/gcs_mount/arrayrecord/laion-aesthetics-12m+mscoco-2017'\
-            --epochs=40 --batch_size=128 \
+python3 training.py --dataset=laiona_coco --dataset_path='/home/mrwhite0racle/gcs_mount/arrayrecord/laion-aesthetics-12m+mscoco-2017'\
+            --epochs=40 --batch_size=64 \
             --learning_rate=2.7e-4 --num_res_blocks=3 \
-        --use_self_and_cross=False --dtype=float32 --precision=high --attention_heads=16 \
-            --experiment_name='batch 128 multi-host laiona_coco' 
+            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
+            --experiment_name='batch 64 v4-16 host laiona_coco'"
 """
