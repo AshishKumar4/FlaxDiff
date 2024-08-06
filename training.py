@@ -755,6 +755,7 @@ class TrainState(SimpleTrainState):
         )
         return self.replace(ema_params=new_ema_params)
 
+from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
 
 class DiffusionTrainer(SimpleTrainer):
     noise_schedule: NoiseScheduler
@@ -770,6 +771,7 @@ class DiffusionTrainer(SimpleTrainer):
                  unconditional_prob: float = 0.2,
                  name: str = "Diffusion",
                  model_output_transform: DiffusionPredictionTransform = EpsilonPredictionTransform(),
+                 autoencoder: AutoEncoder = None,
                  **kwargs
                  ):
         super().__init__(
@@ -783,6 +785,8 @@ class DiffusionTrainer(SimpleTrainer):
         self.noise_schedule = noise_schedule
         self.model_output_transform = model_output_transform
         self.unconditional_prob = unconditional_prob
+        
+        self.autoencoder = autoencoder
 
     def generate_states(
         self,
@@ -838,6 +842,8 @@ class DiffusionTrainer(SimpleTrainer):
             null_labels_seq, (batch_size, nS, nC))
 
         distributed_training = self.distributed_training
+        
+        autoencoder = self.autoencoder
 
         # @jax.jit
         def train_step(train_state: TrainState, rng_state: RandomMarkovState, batch, local_device_index):
@@ -847,8 +853,14 @@ class DiffusionTrainer(SimpleTrainer):
             local_rng_state = RandomMarkovState(subkey)
             
             images = batch['image']
-            # normalize image
-            images = (images - 127.5) / 127.5
+            
+            if autoencoder is not None:
+                # Convert the images to latent space
+                local_rng_state, rngs = local_rng_state.get_random_key()
+                images = autoencoder.encode(images, rngs)
+            else:
+                # normalize image
+                images = (images - 127.5) / 127.5
 
             output = text_embedder(
                 input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
@@ -869,8 +881,7 @@ class DiffusionTrainer(SimpleTrainer):
                 images, noise, rates)
 
             def model_loss(params):
-                preds = model.apply(
-                    params, *noise_schedule.transform_inputs(noisy_images*c_in, noise_level), label_seq)
+                preds = model.apply(params, *noise_schedule.transform_inputs(noisy_images*c_in, noise_level), label_seq)
                 preds = model_output_transform.pred_transform(
                     noisy_images, preds, rates)
                 nloss = loss_fn(preds, expected_output)
@@ -979,6 +990,11 @@ parser.add_argument('--learning_rate_warmup_steps', type=int, default=10000, hel
 
 parser.add_argument('--checkpoint_id', type=str, default=None, help='Checkpoint ID to be used for saving/loading checkpoints')
 
+parser.add_argument('--autoencoder', type=str, default=None, help='Autoencoder model for Latend Diffusion technique',
+                    choices=[None, 'stable_diffusion'])
+parser.add_argument('--autoencoder_opts', type=str, 
+                    default='{"modelname":"CompVis/stable-diffusion-v1-4"}', help='Autoencoder options as a dictionary')
+
 def main(args):
     resource.setrlimit(
         resource.RLIMIT_CORE,
@@ -1057,6 +1073,18 @@ def main(args):
             None,
         ] * (len(args.feature_depths) - 1)
 
+    INPUT_CHANNELS = 3
+    DIFFUSION_INPUT_SIZE = IMAGE_SIZE
+    autoencoder = None
+    if args.autoencoder is not None:
+        autoencoder_opts = json.loads(args.autoencoder_opts)
+        if args.autoencoder == 'stable_diffusion':
+            print("Using Stable Diffusion Autoencoder for Latent Diffusion Modeling")
+            from flaxdiff.models.autoencoder.diffusers import StableDiffusionVAE
+            autoencoder = StableDiffusionVAE(**autoencoder_opts)
+            INPUT_CHANNELS = 4
+            DIFFUSION_INPUT_SIZE = DIFFUSION_INPUT_SIZE // 8
+
     CONFIG = {
         "model": {
             "emb_features": args.emb_features,
@@ -1067,6 +1095,7 @@ def main(args):
             "dtype": DTYPE,
             "precision": PRECISION,
             "activation": args.activation,
+            "output_channels": INPUT_CHANNELS,
         },
         "dataset": {
             "name": dataset_name,
@@ -1077,11 +1106,13 @@ def main(args):
         "batch_size": BATCH_SIZE,
         "epochs": args.epochs,
         "input_shapes": {
-            "x": (IMAGE_SIZE, IMAGE_SIZE, 3),
+            "x": (DIFFUSION_INPUT_SIZE, DIFFUSION_INPUT_SIZE, INPUT_CHANNELS),
             "temb": (),
             "textcontext": (77, 768)
         },
         "arguments": vars(args),
+        "autoencoder": args.autoencoder,
+        "autoencoder_opts": args.autoencoder_opts,
     }
 
     text_encoders = defaultTextEncodeModel()
@@ -1153,8 +1184,9 @@ def main(args):
         distributed_training=args.distributed_training,  
         checkpoint_base_path=CHECKPOINT_DIR,
         checkpoint_id=args.checkpoint_id,  
+        autoencoder=autoencoder,
     )
-
+    
     if trainer.distributed_training:
         print("Distributed Training enabled")
     # %%
@@ -1178,6 +1210,17 @@ python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0r
             --experiment_name='batch {batch_size} v4-64 host-{dataset} imagesize-{image_size}'\
             --learning_rate_schedule=cosine --learning_rate_peak=2.2e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=1000\
             --optimizer=adamw
+            
+Laten Diffusion:
+
+python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=64 --image_size=256 \
+            --learning_rate=2.7e-4 --num_res_blocks=3 \
+            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
+            --experiment_name='batch {batch_size} v4-8 host-{dataset} imagesize-{image_size} latent diffusion'\
+            --learning_rate_peak=2.2e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=1000\
+            --optimizer=adamw --autoencoder=stable_diffusion
             
 for tpu-v4-32
 
@@ -1206,4 +1249,17 @@ python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0r
         --dtype=bfloat16 --precision=low --attention_heads=16 --experiment_name='batch {batch_size} v4-32 host-{dataset} imagesize-{image_size}' \
         --learning_rate_peak=4e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=5000 --optimizer=adamw \
         --load_from_checkpoint=True --checkpoint_id='batch 256 laiona_coco 2'
+        
+for tpu-v4-8
+
+Laten Diffusion:
+
+python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=64 --image_size=256 \
+            --learning_rate=2.7e-4 --num_res_blocks=3 \
+            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
+            --experiment_name='batch {batch_size} v4-8 host-{dataset} imagesize-{image_size} latent diffusion'\
+            --learning_rate_peak=2.2e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=1000\
+            --optimizer=adamw --autoencoder=stable_diffusion
 """
