@@ -189,6 +189,8 @@ plotImages(samples, dpi=300)
 
 ## References and Acknowledgements
 
+** This project is partially supported by Google TPU Research cloud. I would like to thank the Google Cloud TPU team for providing me with the resources to train the bigger models in multi-host distributed settings. **
+
 ### Research papers and preprints
 - The Original Denoising Diffusion Probabilistic Models (DDPM) [paper](https://arxiv.org/abs/2006.11239)
 - Denoising Diffusion Implicit Models (DDIM) [paper](https://arxiv.org/abs/2010.02502)
