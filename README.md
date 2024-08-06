@@ -1,5 +1,7 @@
 # ![](images/logo.jpeg "FlaxDiff")
 
+**This project is partially supported by [Google TPU Research Cloud](https://sites.research.google/trc/about/). I would like to thank the Google Cloud TPU team for providing me with the resources to train the bigger text-conditional models in multi-host distributed settings.**
+
 ## A Versatile and simple Diffusion Library
 
 In recent years, diffusion and score-based multi-step models have revolutionized the generative AI domain. However, the latest research in this field has become highly math-intensive, making it challenging to understand how state-of-the-art diffusion models work and generate such impressive images. Replicating this research in code can be daunting.
@@ -188,8 +190,6 @@ plotImages(samples, dpi=300)
 ```
 
 ## References and Acknowledgements
-
-** This project is partially supported by Google TPU Research cloud. I would like to thank the Google Cloud TPU team for providing me with the resources to train the bigger models in multi-host distributed settings. **
 
 ### Research papers and preprints
 - The Original Denoising Diffusion Probabilistic Models (DDPM) [paper](https://arxiv.org/abs/2006.11239)
