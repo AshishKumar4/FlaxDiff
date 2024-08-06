@@ -62,8 +62,13 @@ class EfficientAttention(nn.Module):
         # x has shape [B, H * W, C]
         context = x if context is None else context
         
-        B, H, W, C = x.shape
-        x = x.reshape((B, 1, H * W, C))
+        orig_x_shape = x.shape
+        if len(x.shape) == 4:
+            B, H, W, C = x.shape
+            x = x.reshape((B, 1, H * W, C))
+        else:
+            B, SEQ, C = x.shape
+            x = x.reshape((B, 1, SEQ, C))
         
         if len(context.shape) == 4:
             B, _H, _W, _C = context.shape
@@ -93,7 +98,7 @@ class EfficientAttention(nn.Module):
         
         proj = self.proj_attn(hidden_states)
         
-        proj = proj.reshape((B, H, W, C))
+        proj = proj.reshape(orig_x_shape)
         
         return proj
 
@@ -138,8 +143,10 @@ class NormalAttention(nn.Module):
     @nn.compact
     def __call__(self, x, context=None):
         # x has shape [B, H, W, C]
-        B, H, W, C = x.shape
-        x = x.reshape((B, H*W, C))
+        orig_x_shape = x.shape
+        if len(x.shape) == 4:
+            B, H, W, C = x.shape
+            x = x.reshape((B, H*W, C))
         context = x if context is None else context
         if len(context.shape) == 4:
             context = context.reshape((B, H*W, C))
@@ -151,10 +158,10 @@ class NormalAttention(nn.Module):
             query, key, value, dtype=self.dtype, broadcast_dropout=False, dropout_rng=None, precision=self.precision
         )
         proj = self.proj_attn(hidden_states)
-        proj = proj.reshape((B, H, W, C))
+        proj = proj.reshape(orig_x_shape)
         return proj
-    
-class AttentionBlock(nn.Module):
+
+class BasicTransformerBlock(nn.Module):
     # Has self and cross attention
     query_dim: int
     heads: int = 4
@@ -193,128 +200,25 @@ class AttentionBlock(nn.Module):
             kernel_init=self.kernel_init
         )
         
-        self.ff = nn.DenseGeneral(
-            features=self.query_dim,
-            use_bias=self.use_bias,
-            precision=self.precision,
-            dtype=self.dtype,
-            kernel_init=self.kernel_init(),
-            name="ff"
-        )
+        self.ff = FlaxFeedForward(dim=self.query_dim)
         self.norm1 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
         self.norm2 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
         self.norm3 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
-        self.norm4 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
         
     @nn.compact
     def __call__(self, hidden_states, context=None):
         # self attention
-        residual = hidden_states
-        hidden_states = self.norm1(hidden_states)
-        if self.use_cross_only:
-            hidden_states = self.attention1(hidden_states, context)
-        else:
-            hidden_states = self.attention1(hidden_states)
-        hidden_states = hidden_states + residual
+        if not self.use_cross_only:
+            print("Using self attention")
+            hidden_states = hidden_states + self.attention1(self.norm1(hidden_states))
 
         # cross attention
-        residual = hidden_states
-        hidden_states = self.norm2(hidden_states)
-        hidden_states = self.attention2(hidden_states, context)
-        hidden_states = hidden_states + residual
+        hidden_states = hidden_states + self.attention2(self.norm2(hidden_states), context)
 
         # feed forward
-        residual = hidden_states
-        hidden_states = self.norm3(hidden_states)
-        hidden_states = nn.gelu(hidden_states)
-        hidden_states = self.ff(hidden_states)
-        hidden_states = hidden_states + residual
+        hidden_states = hidden_states + self.ff(self.norm3(hidden_states))
         
         return hidden_states
-
-class TransformerBlock(nn.Module):
-    heads: int = 4
-    dim_head: int = 32
-    use_linear_attention: bool = True
-    dtype: Any = jnp.float32
-    precision: Any = jax.lax.Precision.HIGH
-    use_projection: bool = False
-    use_flash_attention:bool = True
-    use_self_and_cross:bool = False
-
-    @nn.compact
-    def __call__(self, x, context=None):
-        inner_dim = self.heads * self.dim_head
-        B, H, W, C = x.shape
-        normed_x = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)(x)
-        if self.use_projection == True:
-            if self.use_linear_attention:
-                projected_x = nn.Dense(features=inner_dim, 
-                                       use_bias=False, precision=self.precision, 
-                                       kernel_init=kernel_init(1.0),
-                                       dtype=self.dtype, name=f'project_in')(normed_x)
-            else:
-                projected_x = nn.Conv(
-                    features=inner_dim, kernel_size=(1, 1),
-                    kernel_init=kernel_init(1.0),
-                    strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
-                    precision=self.precision, name=f'project_in_conv',
-                )(normed_x)
-        else:
-            projected_x = normed_x
-            inner_dim = C
-            
-        context = projected_x if context is None else context
-
-        if self.use_self_and_cross:
-            projected_x = AttentionBlock(
-                query_dim=inner_dim,
-                heads=self.heads,
-                dim_head=self.dim_head,
-                name=f'Attention',
-                precision=self.precision,
-                use_bias=False,
-                dtype=self.dtype,
-                use_flash_attention=self.use_flash_attention,
-                use_cross_only=False
-            )(projected_x, context)
-        elif self.use_flash_attention == True:
-            projected_x = EfficientAttention(
-                query_dim=inner_dim,
-                heads=self.heads,
-                dim_head=self.dim_head,
-                name=f'Attention',
-                precision=self.precision,
-                use_bias=False,
-                dtype=self.dtype,
-            )(projected_x, context)
-        else:
-            projected_x = NormalAttention(
-                query_dim=inner_dim,
-                heads=self.heads,
-                dim_head=self.dim_head,
-                name=f'Attention',
-                precision=self.precision,
-                use_bias=False,
-            )(projected_x, context)
-        
-
-        if self.use_projection == True:
-            if self.use_linear_attention:
-                projected_x = nn.Dense(features=C, precision=self.precision, 
-                                       dtype=self.dtype, use_bias=False, 
-                                       kernel_init=kernel_init(1.0),
-                                       name=f'project_out')(projected_x)
-            else:
-                projected_x = nn.Conv(
-                    features=C, kernel_size=(1, 1),
-                    kernel_init=kernel_init(1.0),
-                    strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
-                    precision=self.precision, name=f'project_out_conv',
-                )(projected_x)
-
-        out = x + projected_x
-        return out
 
 class FlaxGEGLU(nn.Module):
     r"""
@@ -333,10 +237,11 @@ class FlaxGEGLU(nn.Module):
     dim: int
     dropout: float = 0.0
     dtype: jnp.dtype = jnp.float32
+    precision: Any = jax.lax.Precision.DEFAULT
 
     def setup(self):
         inner_dim = self.dim * 4
-        self.proj = nn.Dense(inner_dim * 2, dtype=self.dtype, precision=jax.lax.Precision.DEFAULT)
+        self.proj = nn.Dense(inner_dim * 2, dtype=self.dtype, precision=self.precision)
 
     def __call__(self, hidden_states):
         hidden_states = self.proj(hidden_states)
@@ -362,14 +267,14 @@ class FlaxFeedForward(nn.Module):
     """
 
     dim: int
-    dropout: float = 0.0
     dtype: jnp.dtype = jnp.float32
+    precision: Any = jax.lax.Precision.DEFAULT
 
     def setup(self):
         # The second linear layer needs to be called
         # net_2 for now to match the index of the Sequential layer
-        self.net_0 = FlaxGEGLU(self.dim, self.dtype)
-        self.net_2 = nn.Dense(self.dim, dtype=self.dtype, precision=jax.lax.Precision.DEFAULT)
+        self.net_0 = FlaxGEGLU(self.dim, self.dtype, precision=self.precision)
+        self.net_2 = nn.Dense(self.dim, dtype=self.dtype, precision=self.precision)
 
     def __call__(self, hidden_states):
         hidden_states = self.net_0(hidden_states)
@@ -377,55 +282,127 @@ class FlaxFeedForward(nn.Module):
         return hidden_states
 
 class BasicTransformerBlock(nn.Module):
+    # Has self and cross attention
     query_dim: int
-    heads: int
-    dim_head: int
-    dropout: float = 0.0
-    only_cross_attention: bool = False
-    dtype: jnp.dtype = jnp.float32
-    use_memory_efficient_attention: bool = False
-    split_head_dim: bool = False
-    precision: Any = jax.lax.Precision.DEFAULT
-
+    heads: int = 4
+    dim_head: int = 64
+    dtype: Any = jnp.float32
+    precision: Any = jax.lax.Precision.HIGHEST
+    use_bias: bool = True
+    kernel_init: Callable = lambda : kernel_init(1.0)
+    use_flash_attention:bool = False
+    use_cross_only:bool = False
+    only_pure_attention:bool = False
+    
     def setup(self):
-        # self attention (or cross_attention if only_cross_attention is True)
-        self.attn1 = NormalAttention(
+        if self.use_flash_attention:
+            attenBlock = EfficientAttention
+        else:
+            attenBlock = NormalAttention
+            
+        self.attention1 = attenBlock(
+         query_dim=self.query_dim,
+            heads=self.heads,
+            dim_head=self.dim_head,
+            name=f'Attention1',
+            precision=self.precision,
+            use_bias=self.use_bias,
+            dtype=self.dtype,
+            kernel_init=self.kernel_init
+        )
+        self.attention2 = attenBlock(
             query_dim=self.query_dim,
             heads=self.heads,
             dim_head=self.dim_head,
-            dtype=self.dtype,
+            name=f'Attention2',
             precision=self.precision,
-        )
-        # cross attention
-        self.attn2 = NormalAttention(
-            query_dim=self.query_dim,
-            heads=self.heads,
-            dim_head=self.dim_head,
+            use_bias=self.use_bias,
             dtype=self.dtype,
-            precision=self.precision,
+            kernel_init=self.kernel_init
         )
-        self.ff = FlaxFeedForward(dim=self.query_dim, dropout=self.dropout, dtype=self.dtype)
+        
+        self.ff = FlaxFeedForward(dim=self.query_dim)
         self.norm1 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
         self.norm2 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
         self.norm3 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
-
-    def __call__(self, hidden_states, context, deterministic=True):
+        
+    @nn.compact
+    def __call__(self, hidden_states, context=None):
+        if self.only_pure_attention:
+            return self.attention2(self.norm2(hidden_states), context)
+        
         # self attention
-        residual = hidden_states
-        if self.only_cross_attention:
-            hidden_states = self.attn1(self.norm1(hidden_states), context)
-        else:
-            hidden_states = self.attn1(self.norm1(hidden_states))
-        hidden_states = hidden_states + residual
-
+        if not self.use_cross_only:
+            hidden_states = hidden_states + self.attention1(self.norm1(hidden_states))
+        
         # cross attention
-        residual = hidden_states
-        hidden_states = self.attn2(self.norm2(hidden_states), context)
-        hidden_states = hidden_states + residual
-
+        hidden_states = hidden_states + self.attention2(self.norm2(hidden_states), context)
         # feed forward
-        residual = hidden_states
-        hidden_states = self.ff(self.norm3(hidden_states))
-        hidden_states = hidden_states + residual
-
+        hidden_states = hidden_states + self.ff(self.norm3(hidden_states))
+        
         return hidden_states
+
+class TransformerBlock(nn.Module):
+    heads: int = 4
+    dim_head: int = 32
+    use_linear_attention: bool = True
+    dtype: Any = jnp.float32
+    precision: Any = jax.lax.Precision.HIGH
+    use_projection: bool = False
+    use_flash_attention:bool = True
+    use_self_and_cross:bool = False
+    only_pure_attention:bool = False
+
+    @nn.compact
+    def __call__(self, x, context=None):
+        inner_dim = self.heads * self.dim_head
+        B, H, W, C = x.shape
+        normed_x = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)(x)
+        if self.use_projection == True:
+            if self.use_linear_attention:
+                projected_x = nn.Dense(features=inner_dim, 
+                                       use_bias=False, precision=self.precision, 
+                                       kernel_init=kernel_init(1.0),
+                                       dtype=self.dtype, name=f'project_in')(normed_x)
+            else:
+                projected_x = nn.Conv(
+                    features=inner_dim, kernel_size=(1, 1),
+                    kernel_init=kernel_init(1.0),
+                    strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
+                    precision=self.precision, name=f'project_in_conv',
+                )(normed_x)
+        else:
+            projected_x = normed_x
+            inner_dim = C
+            
+        context = projected_x if context is None else context
+
+        projected_x = BasicTransformerBlock(
+            query_dim=inner_dim,
+            heads=self.heads,
+            dim_head=self.dim_head,
+            name=f'Attention',
+            precision=self.precision,
+            use_bias=False,
+            dtype=self.dtype,
+            use_flash_attention=self.use_flash_attention,
+            use_cross_only=(not self.use_self_and_cross),
+            only_pure_attention=self.only_pure_attention
+        )(projected_x, context)
+        
+        if self.use_projection == True:
+            if self.use_linear_attention:
+                projected_x = nn.Dense(features=C, precision=self.precision, 
+                                       dtype=self.dtype, use_bias=False, 
+                                       kernel_init=kernel_init(1.0),
+                                       name=f'project_out')(projected_x)
+            else:
+                projected_x = nn.Conv(
+                    features=C, kernel_size=(1, 1),
+                    kernel_init=kernel_init(1.0),
+                    strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
+                    precision=self.precision, name=f'project_out_conv',
+                )(projected_x)
+
+        out = x + projected_x
+        return out

@@ -1,31 +1,23 @@
-import orbax.checkpoint
-import tqdm
 from flax import linen as nn
 import jax
 from typing import Callable
 from dataclasses import field
 import jax.numpy as jnp
-from clu import metrics
-from flax.training import train_state  # Useful dataclass to keep train state
 import optax
-from flax import struct                # Flax dataclasses
-import time
-import os
-import orbax
-from flax.training import orbax_utils
+from jax.sharding import Mesh, PartitionSpec as P
+from jax.experimental.shard_map import shard_map
+from typing import Dict, Callable, Sequence, Any, Union, Tuple
 
 from ..schedulers import NoiseScheduler
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
 
-from .simple_trainer import SimpleTrainer, SimpleTrainState
+from flaxdiff.utils import RandomMarkovState
+
+from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics
 
 class TrainState(SimpleTrainState):
     rngs: jax.random.PRNGKey
     ema_params: dict
-
-    def get_random_key(self):
-        rngs, subkey = jax.random.split(self.rngs)
-        return self.replace(rngs=rngs), subkey
 
     def apply_ema(self, decay: float = 0.999):
         new_ema_params = jax.tree_util.tree_map(
@@ -63,7 +55,7 @@ class DiffusionTrainer(SimpleTrainer):
         self.model_output_transform = model_output_transform
         self.unconditional_prob = unconditional_prob
 
-    def __init_fn(
+    def generate_states(
         self,
         optimizer: optax.GradientTransformation,
         rngs: jax.random.PRNGKey,
@@ -72,6 +64,7 @@ class DiffusionTrainer(SimpleTrainer):
         model: nn.Module = None,
         param_transforms: Callable = None
     ) -> Tuple[TrainState, TrainState]:
+        print("Generating states for DiffusionTrainer")
         rngs, subkey = jax.random.split(rngs)
 
         if existing_state == None:
@@ -102,7 +95,7 @@ class DiffusionTrainer(SimpleTrainer):
         return state, best_state
 
     def _define_train_step(self, batch_size, null_labels_seq, text_embedder):
-        noise_schedule = self.noise_schedule
+        noise_schedule: NoiseScheduler = self.noise_schedule
         model = self.model
         model_output_transform = self.model_output_transform
         loss_fn = self.loss_fn
@@ -117,16 +110,19 @@ class DiffusionTrainer(SimpleTrainer):
 
         distributed_training = self.distributed_training
 
-        def train_step(state: TrainState, batch):
+        # @jax.jit
+        def train_step(train_state: TrainState, rng_state: RandomMarkovState, batch, local_device_index):
             """Train for a single step."""
+            rng_state, subkey = rng_state.get_random_key()
+            subkey = jax.random.fold_in(subkey, local_device_index.reshape())
+            local_rng_state = RandomMarkovState(subkey)
+            
             images = batch['image']
             # normalize image
             images = (images - 127.5) / 127.5
 
             output = text_embedder(
                 input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
-            # output = infer(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
-
             label_seq = output.last_hidden_state
 
             # Generate random probabilities to decide how much of this batch will be unconditional
@@ -134,10 +130,11 @@ class DiffusionTrainer(SimpleTrainer):
             label_seq = jnp.concat(
                 [null_labels_seq[:num_unconditional], label_seq[num_unconditional:]], axis=0)
 
-            noise_level, state = noise_schedule.generate_timesteps(
-                images.shape[0], state)
-            state, rngs = state.get_random_key()
+            noise_level, local_rng_state = noise_schedule.generate_timesteps(images.shape[0], local_rng_state)
+            
+            local_rng_state, rngs = local_rng_state.get_random_key()
             noise: jax.Array = jax.random.normal(rngs, shape=images.shape)
+            
             rates = noise_schedule.get_rates(noise_level)
             noisy_images, c_in, expected_output = model_output_transform.forward_diffusion(
                 images, noise, rates)
@@ -154,16 +151,17 @@ class DiffusionTrainer(SimpleTrainer):
                 loss = nloss
                 return loss
             
-            loss, grads = jax.value_and_grad(model_loss)(state.params)
+            loss, grads = jax.value_and_grad(model_loss)(train_state.params)
             if distributed_training:
-                grads = jax.lax.pmean(grads, "device")
-            state = state.apply_gradients(grads=grads)
-            state = state.apply_ema(self.ema_decay)
-            return state, loss
-        
+                grads = jax.lax.pmean(grads, "data")
+                loss = jax.lax.pmean(loss, "data")
+            train_state = train_state.apply_gradients(grads=grads)
+            train_state = train_state.apply_ema(self.ema_decay)
+            return train_state, loss, rng_state
+
         if distributed_training:
-            train_step = jax.pmap(axis_name="device")(train_step)
-        else:
+            train_step = shard_map(train_step, mesh=self.mesh, in_specs=(P(), P(), P('data'), P('data')), 
+                                   out_specs=(P(), P(), P()))
             train_step = jax.jit(train_step)
             
         return train_step
@@ -184,18 +182,3 @@ class DiffusionTrainer(SimpleTrainer):
         text_embedder = data['model']
         super().fit(data, steps_per_epoch, epochs, {
             "batch_size": local_batch_size, "null_labels_seq": null_labels_full, "text_embedder": text_embedder})
-
-
-                        pbar.set_postfix(loss=f'{loss:.4f}')
-                        pbar.update(100)
-            end_time = time.time()
-            self.state = state
-            total_time = end_time - start_time
-            avg_time_per_step = total_time / steps_per_epoch
-            avg_loss = epoch_loss / steps_per_epoch
-            if avg_loss < self.best_loss:
-                self.best_loss = avg_loss
-                self.best_state = state
-                self.save(epoch, best=True)
-            print(f"\n\tEpoch {epoch+1} completed. Avg Loss: {avg_loss}, Time: {total_time:.2f}s, Best Loss: {self.best_loss}")
-        return self.state
