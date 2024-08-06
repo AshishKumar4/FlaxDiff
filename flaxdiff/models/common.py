@@ -1,7 +1,250 @@
 import jax.numpy as jnp
+import jax
 from flax import linen as nn
+from typing import Dict, Callable, Sequence, Any, Union
+import einops
 
 # Kernel initializer to use
 def kernel_init(scale, dtype=jnp.float32):
     scale = max(scale, 1e-10)
     return nn.initializers.variance_scaling(scale=scale, mode="fan_avg", distribution="truncated_normal", dtype=dtype)
+
+
+class WeightStandardizedConv(nn.Module):
+    """
+    apply weight standardization  https://arxiv.org/abs/1903.10520
+    """
+    features: int
+    kernel_size: Sequence[int] = 3
+    strides: Union[None, int, Sequence[int]] = 1
+    padding: Any = 1
+    dtype: Any = jnp.float32
+    param_dtype: Any = jnp.float32
+
+    @nn.compact
+    def __call__(self, x):
+        """
+        Applies a weight standardized convolution to the inputs.
+
+        Args:
+          inputs: input data with dimensions (batch, spatial_dims..., features).
+
+        Returns:
+          The convolved data.
+        """
+        x = x.astype(self.dtype)
+
+        conv = nn.Conv(
+            features=self.features,
+            kernel_size=self.kernel_size,
+            strides = self.strides,
+            padding=self.padding,
+            dtype=self.dtype,
+            param_dtype = self.param_dtype,
+            parent=None)
+
+        kernel_init = lambda  rng, x: conv.init(rng,x)['params']['kernel']
+        bias_init = lambda  rng, x: conv.init(rng,x)['params']['bias']
+
+        # standardize kernel
+        kernel = self.param('kernel', kernel_init, x)
+        eps = 1e-5 if self.dtype == jnp.float32 else 1e-3
+        # reduce over dim_out
+        redux = tuple(range(kernel.ndim - 1))
+        mean = jnp.mean(kernel, axis=redux, dtype=self.dtype, keepdims=True)
+        var = jnp.var(kernel, axis=redux, dtype=self.dtype, keepdims=True)
+        standardized_kernel = (kernel - mean)/jnp.sqrt(var + eps)
+
+        bias = self.param('bias',bias_init, x)
+
+        return(conv.apply({'params': {'kernel': standardized_kernel, 'bias': bias}},x))
+
+class PixelShuffle(nn.Module):
+    scale: int
+
+    @nn.compact
+    def __call__(self, x):
+        up = einops.rearrange(
+            x,
+            pattern="b h w (h2 w2 c) -> b (h h2) (w w2) c",
+            h2=self.scale,
+            w2=self.scale,
+        )
+        return up
+
+class TimeEmbedding(nn.Module):
+    features:int
+    nax_positions:int=10000
+
+    def setup(self):
+        half_dim = self.features // 2
+        emb = jnp.log(self.nax_positions) / (half_dim - 1)
+        emb = jnp.exp(-emb * jnp.arange(half_dim, dtype=jnp.float32))
+        self.embeddings = emb
+
+    def __call__(self, x):
+        x = jax.lax.convert_element_type(x, jnp.float32)
+        emb = x[:, None] * self.embeddings[None, :]
+        emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
+        return emb
+
+class FourierEmbedding(nn.Module):
+    features:int
+    scale:int = 16
+
+    def setup(self):
+        self.freqs = jax.random.normal(jax.random.PRNGKey(42), (self.features // 2, ), dtype=jnp.float32) * self.scale
+
+    def __call__(self, x):
+        x = jax.lax.convert_element_type(x, jnp.float32)
+        emb = x[:, None] * (2 * jnp.pi * self.freqs)[None, :]
+        emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
+        return emb
+
+class TimeProjection(nn.Module):
+    features:int
+    activation:Callable=jax.nn.gelu
+
+    @nn.compact
+    def __call__(self, x):
+        x = nn.DenseGeneral(self.features, kernel_init=kernel_init(1.0))(x)
+        x = self.activation(x)
+        x = nn.DenseGeneral(self.features, kernel_init=kernel_init(1.0))(x)
+        x = self.activation(x)
+        return x
+
+class SeparableConv(nn.Module):
+    features:int
+    kernel_size:tuple=(3, 3)
+    strides:tuple=(1, 1)
+    use_bias:bool=False
+    kernel_init:Callable=kernel_init(1.0)
+    padding:str="SAME"
+    dtype: Any = jnp.bfloat16
+    precision: Any = jax.lax.Precision.HIGH
+
+    @nn.compact
+    def __call__(self, x):
+        in_features = x.shape[-1]
+        depthwise = nn.Conv(
+            features=in_features, kernel_size=self.kernel_size,
+            strides=self.strides, kernel_init=self.kernel_init,
+            feature_group_count=in_features, use_bias=self.use_bias,
+            padding=self.padding,
+            dtype=self.dtype,
+            precision=self.precision
+        )(x)
+        pointwise = nn.Conv(
+            features=self.features, kernel_size=(1, 1),
+            strides=(1, 1), kernel_init=self.kernel_init,
+            use_bias=self.use_bias,
+            dtype=self.dtype,
+            precision=self.precision
+        )(depthwise)
+        return pointwise
+
+class ConvLayer(nn.Module):
+    conv_type:str
+    features:int
+    kernel_size:tuple=(3, 3)
+    strides:tuple=(1, 1)
+    kernel_init:Callable=kernel_init(1.0)
+    dtype: Any = jnp.bfloat16
+    precision: Any = jax.lax.Precision.HIGH
+
+    def setup(self):
+        # conv_type can be "conv", "separable", "conv_transpose"
+        if self.conv_type == "conv":
+            self.conv = nn.Conv(
+                features=self.features,
+                kernel_size=self.kernel_size,
+                strides=self.strides,
+                kernel_init=self.kernel_init,
+                dtype=self.dtype,
+                precision=self.precision
+            )
+        elif self.conv_type == "w_conv":
+            self.conv = WeightStandardizedConv(
+                features=self.features,
+                kernel_size=self.kernel_size,
+                strides=self.strides,
+                padding="SAME",
+                param_dtype=self.dtype,
+                dtype=self.dtype,
+                precision=self.precision
+            )
+        elif self.conv_type == "separable":
+            self.conv = SeparableConv(
+                features=self.features,
+                kernel_size=self.kernel_size,
+                strides=self.strides,
+                kernel_init=self.kernel_init,
+                dtype=self.dtype,
+                precision=self.precision
+            )
+        elif self.conv_type == "conv_transpose":
+            self.conv = nn.ConvTranspose(
+                features=self.features,
+                kernel_size=self.kernel_size,
+                strides=self.strides,
+                kernel_init=self.kernel_init,
+                dtype=self.dtype,
+                precision=self.precision
+            )
+
+    def __call__(self, x):
+        return self.conv(x)
+
+class Upsample(nn.Module):
+    features:int
+    scale:int
+    activation:Callable=jax.nn.swish
+    dtype: Any = jnp.bfloat16
+    precision: Any = jax.lax.Precision.HIGH
+
+    @nn.compact
+    def __call__(self, x, residual=None):
+        out = x
+        # out = PixelShuffle(scale=self.scale)(out)
+        B, H, W, C = x.shape
+        out = jax.image.resize(x, (B, H * self.scale, W * self.scale, C), method="nearest")
+        out = ConvLayer(
+            "conv",
+            features=self.features,
+            kernel_size=(3, 3),
+            strides=(1, 1),
+            dtype=self.dtype,
+            precision=self.precision
+        )(out)
+        if residual is not None:
+            out = jnp.concatenate([out, residual], axis=-1)
+        return out
+
+class Downsample(nn.Module):
+    features:int
+    scale:int
+    activation:Callable=jax.nn.swish
+    dtype: Any = jnp.bfloat16
+    precision: Any = jax.lax.Precision.HIGH
+
+    @nn.compact
+    def __call__(self, x, residual=None):
+        out = ConvLayer(
+            "conv",
+            features=self.features,
+            kernel_size=(3, 3),
+            strides=(2, 2),
+            dtype=self.dtype,
+            precision=self.precision
+        )(x)
+        if residual is not None:
+            if residual.shape[1] > out.shape[1]:
+                residual = nn.avg_pool(residual, window_shape=(2, 2), strides=(2, 2), padding="SAME")
+            out = jnp.concatenate([out, residual], axis=-1)
+        return out
+
+
+def l2norm(t, axis=1, eps=1e-12):
+    denom = jnp.clip(jnp.linalg.norm(t, ord=2, axis=axis, keepdims=True), eps)
+    out = t/denom
+    return (out)
