@@ -5,6 +5,8 @@ import jax.experimental.multihost_utils
 import orbax
 import orbax.checkpoint
 import flax.jax_utils
+import wandb.util
+import wandb.wandb_run
 from flaxdiff.models.simple_unet import Unet
 import jax.experimental.pallas.ops.tpu.flash_attention
 from flaxdiff.predictors import VPredictionTransform, EpsilonPredictionTransform, DiffusionPredictionTransform, DirectPredictionTransform, KarrasPredictionTransform
@@ -192,15 +194,37 @@ def tfds_augmenters(image_scale, method):
 # CC12m and other GCS data sources -------------------------------------------------------------#
 # -----------------------------------------------------------------------------------------------#
 
-def data_source_gcs():
-    def data_source(source="/mnt/gcs_mount/arrayrecord/cc12m/"):
-        records_path = source
+def data_source_gcs(source='arrayrecord/laion-aesthetics-12m+mscoco-2017'):
+    def data_source(base="/home/mrwhite0racle/gcs_mount"):
+        records_path = os.path.join(base, source)
         records = [os.path.join(records_path, i) for i in os.listdir(
             records_path) if 'array_record' in i]
-        ds = pygrain.ArrayRecordDataSource(records[:-1])
+        ds = pygrain.ArrayRecordDataSource(records)
         return ds
     return data_source
 
+def data_source_combined_aesthetics_gcs(
+    sources=[
+        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+        'arrayrecord/laion-aesthetics-12m+mscoco-2017',
+        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+        'arrayrecord/cc12m',
+    ]):
+    def data_source(base="/home/mrwhite0racle/gcs_mount"):
+        records_paths = [os.path.join(base, source) for source in sources]
+        records = []
+        for records_path in records_paths:
+            records += [os.path.join(records_path, i) for i in os.listdir(
+                records_path) if 'array_record' in i]
+        ds = pygrain.ArrayRecordDataSource(records)
+        return ds
+    return data_source
 
 def labelizer_gcs(sample):
     return sample['txt']
@@ -266,6 +290,10 @@ datasetMap = {
         "source": data_source_gcs(),
         "augmenter": gcs_augmenters,
     },
+    "combined_aesthetic": {
+        "source": data_source_combined_aesthetics_gcs(),
+        "augmenter": gcs_augmenters,
+    }
 }
 
 
@@ -387,6 +415,7 @@ class SimpleTrainer:
                  name: str = "Simple",
                  load_from_checkpoint: bool = False,
                  checkpoint_suffix: str = "",
+                 checkpoint_id: str = None,
                  loss_fn=optax.l2_loss,
                  param_transforms: Callable = None,
                  wandb_config: Dict[str, Any] = None,
@@ -405,10 +434,12 @@ class SimpleTrainer:
         self.loss_fn = loss_fn
         self.input_shapes = input_shapes
         self.checkpoint_base_path = checkpoint_base_path
-
+        
+        
         if wandb_config is not None and jax.process_index() == 0:
             run = wandb.init(**wandb_config)
             self.wandb = run
+            
             # define our custom x axis metric
             self.wandb.define_metric("train/step")
             self.wandb.define_metric("train/epoch")
@@ -420,6 +451,11 @@ class SimpleTrainer:
             self.wandb.define_metric("train/avg_loss", step_metric="train/epoch")
             self.wandb.define_metric("train/best_loss", step_metric="train/epoch")
 
+        if checkpoint_id is None:
+            self.checkpoint_id = name.replace(' ', '_').replace('-', '_').lower()
+        else:
+            self.checkpoint_id = checkpoint_id
+            
         # checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         async_checkpointer = orbax.checkpoint.AsyncCheckpointer(orbax.checkpoint.PyTreeCheckpointHandler(), timeout_secs=60)
 
@@ -436,10 +472,11 @@ class SimpleTrainer:
         self.latest_epoch = latest_epoch
         
         if rngstate:
-            self.rngstate = rngstate
+            self.rngstate = RandomMarkovState(**rngstate)
         else:
-            rngs, subkey = jax.random.split(rngs)
             self.rngstate = RandomMarkovState(rngs)
+            
+        self.rngstate, subkey = self.rngstate.get_random_key()
 
         if train_state == None:
             state, best_state = self.generate_states(
@@ -509,8 +546,7 @@ class SimpleTrainer:
         return jax.tree_util.tree_map(lambda x : np.array(x), self.rngstate)
 
     def checkpoint_path(self):
-        experiment_name = self.name
-        path = os.path.join(self.checkpoint_base_path, experiment_name)
+        path = os.path.join(self.checkpoint_base_path, self.checkpoint_id)
         if not os.path.exists(path):
             os.makedirs(path)
         return path
@@ -941,6 +977,8 @@ parser.add_argument('--learning_rate_peak', type=float, default=3e-4, help='Lear
 parser.add_argument('--learning_rate_end', type=float, default=2e-4, help='Learning rate end')
 parser.add_argument('--learning_rate_warmup_steps', type=int, default=10000, help='Learning rate warmup steps')
 
+parser.add_argument('--checkpoint_id', type=str, default=None, help='Checkpoint ID to be used for saving/loading checkpoints')
+
 def main(args):
     resource.setrlimit(
         resource.RLIMIT_CORE,
@@ -1076,6 +1114,8 @@ def main(args):
             name="Diffusion_SDE_VE_TEXT", date=datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
         )
         
+    experiment_name = experiment_name.format(**CONFIG['arguments'])
+        
     print("Experiment_Name:", experiment_name)
 
     model_config = CONFIG['model']
@@ -1098,6 +1138,8 @@ def main(args):
         "name": experiment_name,
     }
     
+    start_time = time.time()
+    
     trainer = DiffusionTrainer(
         unet, optimizer=solver,
         input_shapes=CONFIG['input_shapes'],
@@ -1109,7 +1151,8 @@ def main(args):
         load_from_checkpoint=args.load_from_checkpoint,
         wandb_config=wandb_config,
         distributed_training=args.distributed_training,  
-        checkpoint_base_path=CHECKPOINT_DIR,         
+        checkpoint_base_path=CHECKPOINT_DIR,
+        checkpoint_id=args.checkpoint_id,  
     )
 
     if trainer.distributed_training:
@@ -1125,12 +1168,42 @@ if __name__ == '__main__':
     main(args)
 
 """
-python3 training.py --dataset=laiona_coco --dataset_path='/home/mrwhite0racle/gcs_mount/arrayrecord/laion-aesthetics-12m+mscoco-2017'\
-            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=1024 \
-            --learning_rate=1e-4 --num_res_blocks=4 \
+for tpu-v4-64
+
+python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=512 --image_size=256 \
+            --learning_rate=1e-4 --num_res_blocks=3 \
             --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
-            --experiment_name='batch 1024 v4-64 host laiona_coco'\
-            --learning_rate_schedule=cosine --learning_rate_peak=2e-4 --learning_rate_end=1e-5 --learning_rate_warmup_steps=1000\
+            --experiment_name='batch {batch_size} v4-64 host-{dataset} imagesize-{image_size}'\
+            --learning_rate_schedule=cosine --learning_rate_peak=2.2e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=1000\
             --optimizer=adamw
+            
+for tpu-v4-32
+
+python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=256 \
+            --learning_rate=2.7e-4 --num_res_blocks=4 \
+            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
+            --experiment_name='v4-32 batch {batch_size} dataset {dataset}'\
+            --optimizer=adamw
+
+from old checkpoint:
+
+python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/' \
+        --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs' --epochs=40 --batch_size=256 \
+        --learning_rate=2.7e-4 --num_res_blocks=3 --use_self_and_cross=False\
+        --dtype=bfloat16 --precision=high --attention_heads=16 --experiment_name='batch 256 v4-32 host laiona_coco' \
+        --learning_rate_peak=4e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=5000 --optimizer=adamw \
+        --load_from_checkpoint=True --checkpoint_id='batch 256 v4-16 host laiona_coco'
+            
+for tpu-v4-16
+
+python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/' \
+        --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs' --epochs=40 --batch_size=64 \
+        --learning_rate=2.7e-4 --num_res_blocks=3 --use_self_and_cross=False --image_size=256 \
+        --dtype=bfloat16 --precision=low --attention_heads=16 --experiment_name='batch {batch_size} v4-32 host-{dataset} imagesize-{image_size}' \
+        --learning_rate_peak=4e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=5000 --optimizer=adamw \
+        --load_from_checkpoint=True --checkpoint_id='batch 256 laiona_coco 2'
 """
