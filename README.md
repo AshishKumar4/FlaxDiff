@@ -14,7 +14,7 @@ The `Diffusion_flax_linen.ipynb` notebook is my main workspace for experiments. 
 
 In the `example notebooks` folder, you will find comprehensive notebooks for various diffusion techniques, written entirely from scratch and are independent of the FlaxDiff library. Each notebook includes detailed explanations of the underlying mathematics and concepts, making them invaluable resources for learning and understanding diffusion models.
 
-### Available Notebooks
+### Available Notebooks and Resources
 
 - **[Diffusion explained (nbviewer link)](https://nbviewer.org/github/AshishKumar4/FlaxDiff/blob/main/tutorial%20notebooks/simple%20diffusion%20flax.ipynb) [(local link)](tutorial%20notebooks/simple%20diffusion%20flax.ipynb)** 
 
@@ -32,6 +32,14 @@ In the `example notebooks` folder, you will find comprehensive notebooks for var
 </a>
 
 These notebooks aim to provide a very easy to understand and step-by-step guide to the various diffusion models and techniques. They are designed to be beginner-friendly, and thus although they may not adhere to the exact formulations and implementations of the original papers to make them more understandable and generalizable, I have tried my best to keep them as accurate as possible. If you find any mistakes or have any suggestions, please feel free to open an issue or a pull request.
+
+#### Other resources
+
+- **[Multi-host Data parallel training script in JAX](./training.py)**
+  - Training script for multi-host data parallel training in JAX, to serve as a reference for training large models on multiple GPUs/TPUs across multiple hosts. A full-fledged tutorial notebook is in the works.
+
+- **[TPU utilities for making life easier](./tpu-tools/)**
+  - A collection of utilities and scripts to make working with TPUs easier, such as cli to create/start/stop/setup TPUs, script to setup TPU VMs (install everything you need), mounting gcs datasets etc.
 
 ## Disclaimer (and About Me)
 
