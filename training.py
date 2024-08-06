@@ -1,6 +1,7 @@
 from typing import Any, Tuple, Mapping, Callable, List, Dict
 from functools import partial
-from flax.metrics import tensorboard
+import flax.jax_utils
+import jax.experimental.multihost_utils
 import orbax
 import orbax.checkpoint
 import flax.jax_utils
@@ -43,6 +44,8 @@ import resource
 from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental import mesh_utils
 from jax.experimental.shard_map import shard_map
+from orbax.checkpoint.utils import fully_replicated_host_local_array_to_global_array
+from termcolor import colored
 
 #####################################################################################################################
 ################################################# Initialization ####################################################
@@ -74,6 +77,17 @@ class RandomMarkovState(MarkovState):
     def get_random_key(self):
         rng, subkey = jax.random.split(self.rng)
         return RandomMarkovState(rng), subkey
+
+PROCESS_COLOR_MAP = {
+    0: "green",
+    1: "yellow",
+    2: "magenta",
+    3: "cyan", 
+    4: "white",
+    5: "light_blue",
+    6: "light_red",
+    7: "light_cyan"
+}
 
 #####################################################################################################################
 ################################################## Data Pipeline ####################################################
@@ -244,6 +258,14 @@ datasetMap = {
         "source": data_source_gcs(),
         "augmenter": gcs_augmenters,
     },
+    "laiona_coco": {
+        "source": data_source_gcs(),
+        "augmenter": gcs_augmenters,
+    },
+    "aesthetic_coyo": {
+        "source": data_source_gcs(),
+        "augmenter": gcs_augmenters,
+    },
 }
 
 
@@ -278,7 +300,7 @@ def get_dataset_grain(
         shuffle=True,
         seed=seed,
         num_epochs=num_epochs,
-        shard_options=pygrain.NoSharding(),
+        shard_options=pygrain.ShardByJaxProcess(),
     )
 
     transformations = [
@@ -316,6 +338,30 @@ def get_dataset_grain(
 ############################################### Training Pipeline ###################################################
 #####################################################################################################################
 
+def _build_global_shape_and_sharding(
+    local_shape: tuple[int, ...], global_mesh: Mesh
+) -> tuple[tuple[int, ...], jax.sharding.NamedSharding]:
+  sharding = jax.sharding.NamedSharding(global_mesh, P(global_mesh.axis_names))
+  global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
+  return global_shape, sharding
+
+
+def form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
+  """Put local sharded array into local devices"""
+  global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
+  try:
+    local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
+  except ValueError as array_split_error:
+    raise ValueError(
+        f"Unable to put to devices shape {array.shape} with "
+        f"local device count {len(global_mesh.local_devices)} "
+    ) from array_split_error
+  local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
+  return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
+
+def convert_to_global_tree(global_mesh, pytree):
+    return jax.tree_util.tree_map_with_path(partial(form_global_array, global_mesh=global_mesh), pytree)
+
 @struct.dataclass
 class Metrics(metrics.Collection):
     accuracy: metrics.Accuracy
@@ -345,17 +391,20 @@ class SimpleTrainer:
                  param_transforms: Callable = None,
                  wandb_config: Dict[str, Any] = None,
                  distributed_training: bool = None,
+                 checkpoint_base_path: str = "./checkpoints",
                  ):
         if distributed_training is None or distributed_training is True:
             # Auto-detect if we are running on multiple devices
             distributed_training = jax.device_count() > 1
             self.mesh = jax.sharding.Mesh(jax.devices(), 'data')
+            # self.sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec('data'))
 
         self.distributed_training = distributed_training
         self.model = model
         self.name = name
         self.loss_fn = loss_fn
         self.input_shapes = input_shapes
+        self.checkpoint_base_path = checkpoint_base_path
 
         if wandb_config is not None and jax.process_index() == 0:
             run = wandb.init(**wandb_config)
@@ -371,11 +420,13 @@ class SimpleTrainer:
             self.wandb.define_metric("train/avg_loss", step_metric="train/epoch")
             self.wandb.define_metric("train/best_loss", step_metric="train/epoch")
 
-        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        # checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        async_checkpointer = orbax.checkpoint.AsyncCheckpointer(orbax.checkpoint.PyTreeCheckpointHandler(), timeout_secs=60)
+
         options = orbax.checkpoint.CheckpointManagerOptions(
             max_to_keep=4, create=True)
         self.checkpointer = orbax.checkpoint.CheckpointManager(
-            self.checkpoint_path() + checkpoint_suffix, checkpointer, options)
+            self.checkpoint_path() + checkpoint_suffix, async_checkpointer, options)
 
         if load_from_checkpoint:
             latest_epoch, old_state, old_best_state, rngstate = self.load()
@@ -442,40 +493,24 @@ class SimpleTrainer:
     ):
         self.best_loss = 1e9
 
-        if self.distributed_training:
-            devices = jax.local_devices()
-            if len(devices) > 1:
-                print("Replicating state across devices ", devices)
-                state = flax.jax_utils.replicate(state, devices)
-                best_state = flax.jax_utils.replicate(best_state, devices)
-                self.rngstate = flax.jax_utils.replicate(self.rngstate, devices)
-            else:
-                print("Not replicating any state, Only single device connected to the process")
-
         self.state = state
         self.best_state = best_state
 
     def get_state(self):
-        if self.distributed_training and jax.process_index() == 0:
-            return flax.jax_utils.unreplicate(self.state)
-        else:
-            return self.state
+        # return fully_replicated_host_local_array_to_global_array()
+        return jax.tree_util.tree_map(lambda x : np.array(x), self.state)
 
     def get_best_state(self):
-        if self.distributed_training and jax.process_index() == 0:
-            return flax.jax_utils.unreplicate(self.best_state)
-        else:
-            return self.best_state
+        # return convert_to_global_tree(self.mesh, flax.jax_utils.replicate(self.best_state, jax.local_devices()))
+        return jax.tree_util.tree_map(lambda x : np.array(x), self.best_state)
         
     def get_rngstate(self):
-        if self.distributed_training and jax.process_index() == 0:
-            return flax.jax_utils.unreplicate(self.rngstate)
-        else:
-            return self.rngstate
+        # return convert_to_global_tree(self.mesh, flax.jax_utils.replicate(self.rngstate, jax.local_devices()))
+        return jax.tree_util.tree_map(lambda x : np.array(x), self.rngstate)
 
     def checkpoint_path(self):
         experiment_name = self.name
-        path = os.path.join(os.path.abspath('./checkpoints'), experiment_name)
+        path = os.path.join(self.checkpoint_base_path, experiment_name)
         if not os.path.exists(path):
             os.makedirs(path)
         return path
@@ -507,12 +542,13 @@ class SimpleTrainer:
             'rngs': self.get_rngstate(),
             'state': self.get_state(),
             'best_state': self.get_best_state(),
-            'best_loss': self.best_loss
+            'best_loss': np.array(self.best_loss),
         }
         try:
             save_args = orbax_utils.save_args_from_target(ckpt)
             self.checkpointer.save(epoch, ckpt, save_kwargs={
                                    'save_args': save_args}, force=True)
+            self.checkpointer.wait_until_finished()
             pass
         except Exception as e:
             print("Error saving checkpoint", e)
@@ -522,7 +558,7 @@ class SimpleTrainer:
         loss_fn = self.loss_fn
         distributed_training = self.distributed_training
 
-        def train_step(train_state: SimpleTrainState, batch, rng_state: RandomMarkovState, local_device_indexes):
+        def train_step(train_state: SimpleTrainState, rng_state: RandomMarkovState, batch, local_device_indexes):
             """Train for a single step."""
             images = batch['image']
             labels = batch['label']
@@ -540,11 +576,8 @@ class SimpleTrainer:
             return train_state, loss, rng_state
         
         if distributed_training:
-            train_step = jax.pmap(train_step, axis_name="data")
-            # train_step = shard_map(train_step, mesh=self.mesh, in_specs=P('data'), out_specs=P())
-        else:
-            train_step = jax.jit(train_step)
-            
+            train_step = shard_map(train_step, mesh=self.mesh, in_specs=(P(), P(), P('data'), P('data')), out_specs=(P(), P('data'), P()))
+            train_step = jax.pmap(train_step)
         return train_step
 
     def _define_compute_metrics(self):
@@ -577,6 +610,7 @@ class SimpleTrainer:
         }
 
     def init_tensorboard(self, batch_size, steps_per_epoch, epochs):
+        from flax.metrics import tensorboard
         summary_writer = tensorboard.SummaryWriter(self.tensorboard_path())
         summary_writer.hparams({
             **self.config(),
@@ -596,34 +630,31 @@ class SimpleTrainer:
         compute_metrics = self._define_compute_metrics()
         train_state = self.state
         rng_state = self.rngstate
-        device_count = jax.local_device_count()
-        # train_ds = flax.jax_utils.prefetch_to_device(train_ds, jax.devices())
+        global_device_count = jax.device_count()
+        local_device_count = jax.local_device_count()
+        process_index = jax.process_index()
         if self.distributed_training:
-            local_device_indexes = jnp.arange(device_count)
+            global_device_indexes = jnp.arange(global_device_count)
         else:
-            local_device_indexes = 0
+            global_device_indexes = 0
 
-        while self.latest_epoch < epochs:
-            self.latest_epoch += 1
-            current_epoch = self.latest_epoch
-            print(f"\nEpoch {current_epoch}/{epochs}")
-            start_time = time.time()
+        def train_loop(current_epoch, pbar: tqdm.tqdm, train_state, rng_state):
             epoch_loss = 0
+            current_step = 0
+            for i in range(steps_per_epoch):
+                batch = next(train_ds)
+                if self.distributed_training and global_device_count > 1:
+                    # Convert the local device batches to a unified global jax.Array 
+                    batch = convert_to_global_tree(self.mesh, batch)
+                train_state, loss, rng_state = train_step(train_state, rng_state, batch, global_device_indexes)
 
-            with tqdm.tqdm(total=steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step') as pbar:
-                for i in range(steps_per_epoch):
-                    batch = next(train_ds)
-                    if self.distributed_training and device_count > 1:
-                        batch = jax.tree.map(lambda x: x.reshape(
-                            (device_count, -1, *x.shape[1:])), batch)
-                        
-                    train_state, loss, rng_state = train_step(train_state, batch, rng_state, local_device_indexes)
+                if self.distributed_training:
+                    loss = jax.experimental.multihost_utils.process_allgather(loss)
+                    loss = jnp.mean(loss) # Just to make sure its a scaler value
+                            
+                epoch_loss += loss
                     
-                    if self.distributed_training:
-                        loss = jax.experimental.multihost_utils.process_allgather(loss)
-                        loss = jnp.mean(loss)
-                    
-                    epoch_loss += loss
+                if pbar is not None:
                     if i % 100 == 0:
                         pbar.set_postfix(loss=f'{loss:.4f}')
                         pbar.update(100)
@@ -633,8 +664,23 @@ class SimpleTrainer:
                                 "train/step" : current_step,
                                 "train/loss": loss,
                             }, step=current_step)
+            print(colored(f"Epoch done on index {process_index} => {current_epoch} Loss: {epoch_loss/steps_per_epoch}", 'green'))
+            return epoch_loss, current_step, train_state, rng_state
 
-            print(f"\n\tEpoch done")
+        while self.latest_epoch < epochs:
+            current_epoch = self.latest_epoch
+            self.latest_epoch += 1
+            print(f"\nEpoch {current_epoch}/{epochs}")
+            start_time = time.time()
+            epoch_loss = 0
+
+            if process_index == 0:
+                with tqdm.tqdm(total=steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step') as pbar:
+                    epoch_loss, current_step, train_state, rng_state = train_loop(current_epoch, pbar, train_state, rng_state)
+            else:
+                epoch_loss, current_step, train_state, rng_state = train_loop(current_epoch, None, train_state, rng_state)
+                print(colored(f"Epoch done on process index {process_index}", PROCESS_COLOR_MAP[process_index]))
+                
             end_time = time.time()
             self.state = train_state
             self.rngstate = rng_state
@@ -645,21 +691,17 @@ class SimpleTrainer:
                 self.best_loss = avg_loss
                 self.best_state = train_state
                 self.save(current_epoch)
-            if self.wandb is not None:
-                self.wandb.log({
-                    "train/epoch_time": total_time,
-                    "train/avg_time_per_step": avg_time_per_step,
-                    "train/avg_loss": avg_loss,
-                    "train/best_loss": self.best_loss,
-                    "train/epoch": current_epoch,
-                }, step=current_step)
-
-            # Compute Metrics
-            metrics_str = ''
-
-            print(
-                f"\n\tEpoch {current_epoch} completed. Avg Loss: {avg_loss}, Time: {total_time:.2f}s, Best Loss: {self.best_loss} {metrics_str}")
-
+                
+            if process_index == 0:
+                if self.wandb is not None:
+                    self.wandb.log({
+                        "train/epoch_time": total_time,
+                        "train/avg_time_per_step": avg_time_per_step,
+                        "train/avg_loss": avg_loss,
+                        "train/best_loss": self.best_loss,
+                        "train/epoch": current_epoch,
+                    }, step=current_step)
+                print(colored(f"\n\tEpoch {current_epoch} completed. Avg Loss: {avg_loss}, Time: {total_time:.2f}s, Best Loss: {self.best_loss}", 'green'))
         self.save(epochs)
         return self.state
 
@@ -746,7 +788,7 @@ class DiffusionTrainer(SimpleTrainer):
         return state, best_state
 
     def _define_train_step(self, batch_size, null_labels_seq, text_embedder):
-        noise_schedule = self.noise_schedule
+        noise_schedule: NoiseScheduler = self.noise_schedule
         model = self.model
         model_output_transform = self.model_output_transform
         loss_fn = self.loss_fn
@@ -762,8 +804,12 @@ class DiffusionTrainer(SimpleTrainer):
         distributed_training = self.distributed_training
 
         # @jax.jit
-        def train_step(train_state: TrainState, batch, rng_state: RandomMarkovState, local_device_index):
+        def train_step(train_state: TrainState, rng_state: RandomMarkovState, batch, local_device_index):
             """Train for a single step."""
+            rng_state, subkey = rng_state.get_random_key()
+            subkey = jax.random.fold_in(subkey, local_device_index.reshape())
+            local_rng_state = RandomMarkovState(subkey)
+            
             images = batch['image']
             # normalize image
             images = (images - 127.5) / 127.5
@@ -776,11 +822,6 @@ class DiffusionTrainer(SimpleTrainer):
 
             label_seq = jnp.concat(
                 [null_labels_seq[:num_unconditional], label_seq[num_unconditional:]], axis=0)
-
-            rng_state, subkey = rng_state.get_random_key()
-            subkey = jax.random.fold_in(subkey, local_device_index)
-            subkey = jax.random.fold_in(subkey, jax.process_index())
-            local_rng_state = RandomMarkovState(subkey)
 
             noise_level, local_rng_state = noise_schedule.generate_timesteps(images.shape[0], local_rng_state)
             
@@ -806,14 +847,14 @@ class DiffusionTrainer(SimpleTrainer):
             loss, grads = jax.value_and_grad(model_loss)(train_state.params)
             if distributed_training:
                 grads = jax.lax.pmean(grads, "data")
+                loss = jax.lax.pmean(loss, "data")
             train_state = train_state.apply_gradients(grads=grads)
             train_state = train_state.apply_ema(self.ema_decay)
             return train_state, loss, rng_state
-        
+
         if distributed_training:
-            train_step = jax.pmap(train_step, axis_name="data")
-            # train_step = shard_map(train_step, mesh=self.mesh, in_specs=P('data'), out_specs=P())
-        else:
+            train_step = shard_map(train_step, mesh=self.mesh, in_specs=(P(), P(), P('data'), P('data')), 
+                                   out_specs=(P(), P(), P()))
             train_step = jax.jit(train_step)
             
         return train_step
@@ -862,8 +903,6 @@ parser.add_argument('--dataset', type=str,
 parser.add_argument('--dataset_path', type=str,
                     default='/home/mrwhite0racle/gcs_mount/arrayrecord/cc12m', help="Dataset location path")
 
-parser.add_argument('--learning_rate', type=float,
-                    default=2e-4, help='Learning rate')
 parser.add_argument('--noise_schedule', type=str, default='edm',
                     choices=['cosine', 'karras', 'edm'], help='Noise schedule')
 
@@ -889,6 +928,19 @@ parser.add_argument('--dataset_seed', type=int, default=0, help='Dataset startin
 parser.add_argument('--dataset_test', type=boolean_string,
                     default=False, help='Run the dataset iterator for 3000 steps for testintg/benchmarking')
 
+parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', help='Checkpoint directory')
+parser.add_argument('--checkpoint_fs', type=str, default='local', choices=['local', 'gcs'], help='Checkpoint filesystem')
+
+parser.add_argument('--optimizer', type=str, default='adamw',
+                    choices=['adam', 'adamw', 'lamb'], help='Optimizer to use')
+parser.add_argument('--optimizer_opts', type=str, default='{}', help='Optimizer options as a dictionary')
+parser.add_argument('--learning_rate_schedule', type=str, default=None, choices=[None, 'cosine'], help='Learning rate schedule')
+parser.add_argument('--learning_rate', type=float,
+                    default=2.7e-4, help='Initial Learning rate')
+parser.add_argument('--learning_rate_peak', type=float, default=3e-4, help='Learning rate peak')
+parser.add_argument('--learning_rate_end', type=float, default=2e-4, help='Learning rate end')
+parser.add_argument('--learning_rate_warmup_steps', type=int, default=10000, help='Learning rate warmup steps')
+
 def main(args):
     resource.setrlimit(
         resource.RLIMIT_CORE,
@@ -903,6 +955,7 @@ def main(args):
 
     jax.distributed.initialize()
 
+    jax.config.update('jax_threefry_partitionable', True)
     print(f"Number of devices: {jax.device_count()}")
     print(f"Local devices: {jax.local_devices()}")
 
@@ -921,6 +974,16 @@ def main(args):
         'swish': jax.nn.swish,
         'mish': jax.nn.mish,
     }
+    
+    OPTIMIZER_MAP = {
+        'adam' : optax.adam,
+        'adamw' : optax.adamw,
+        'lamb' : optax.lamb,
+    }
+    
+    CHECKPOINT_DIR = args.checkpoint_dir
+    if args.checkpoint_fs == 'gcs':
+        CHECKPOINT_DIR = f"gs://{CHECKPOINT_DIR}"
 
     DTYPE = DTYPE_MAP[args.dtype]
     PRECISION = PRECISION_MAP[args.precision]
@@ -1020,7 +1083,14 @@ def main(args):
     unet = Unet(**model_config)
 
     learning_rate = CONFIG['learning_rate']
-    solver = optax.adam(learning_rate)
+    optimizer = OPTIMIZER_MAP[args.optimizer]
+    optimizer_opts = json.loads(args.optimizer_opts)
+    if args.learning_rate_schedule == 'cosine':
+        learning_rate = optax.warmup_cosine_decay_schedule(
+            init_value=learning_rate, peak_value=args.learning_rate_peak, warmup_steps=args.learning_rate_warmup_steps,
+            decay_steps=batches, end_value=args.learning_rate_end,
+        )
+    solver = optimizer(learning_rate, **optimizer_opts)
 
     wandb_config = {
         "project": "flaxdiff",
@@ -1038,7 +1108,8 @@ def main(args):
         sigma_data=edm_schedule.sigma_data),
         load_from_checkpoint=args.load_from_checkpoint,
         wandb_config=wandb_config,
-        distributed_training=args.distributed_training,           
+        distributed_training=args.distributed_training,  
+        checkpoint_base_path=CHECKPOINT_DIR,         
     )
 
     if trainer.distributed_training:
@@ -1048,7 +1119,18 @@ def main(args):
     print(f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
     
     final_state = trainer.fit(data, batches, epochs=CONFIG['epochs'])
-
+    
 if __name__ == '__main__':
     args = parser.parse_args()
     main(args)
+
+"""
+python3 training.py --dataset=laiona_coco --dataset_path='/home/mrwhite0racle/gcs_mount/arrayrecord/laion-aesthetics-12m+mscoco-2017'\
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=1024 \
+            --learning_rate=1e-4 --num_res_blocks=4 \
+            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
+            --experiment_name='batch 1024 v4-64 host laiona_coco'\
+            --learning_rate_schedule=cosine --learning_rate_peak=2e-4 --learning_rate_end=1e-5 --learning_rate_warmup_steps=1000\
+            --optimizer=adamw
+"""
