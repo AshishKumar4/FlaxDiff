@@ -5,7 +5,8 @@ Some Code ported from https://github.com/huggingface/diffusers/blob/main/src/dif
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from typing import Dict, Callable, Sequence, Any, Union
+from typing import Dict, Callable, Sequence, Any, Union, Tuple, Optional
+from flax.typing import Dtype, PrecisionLike
 import einops
 import functools
 import math
@@ -18,8 +19,8 @@ class EfficientAttention(nn.Module):
     query_dim: int
     heads: int = 4
     dim_head: int = 64
-    dtype: Any = jnp.float32
-    precision: Any = jax.lax.Precision.HIGHEST
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
     use_bias: bool = True
     kernel_init: Callable = lambda : kernel_init(1.0)
 
@@ -109,8 +110,8 @@ class NormalAttention(nn.Module):
     query_dim: int
     heads: int = 4
     dim_head: int = 64
-    dtype: Any = jnp.float32
-    precision: Any = jax.lax.Precision.HIGHEST
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
     use_bias: bool = True
     kernel_init: Callable = lambda : kernel_init(1.0)
 
@@ -166,8 +167,8 @@ class BasicTransformerBlock(nn.Module):
     query_dim: int
     heads: int = 4
     dim_head: int = 64
-    dtype: Any = jnp.float32
-    precision: Any = jax.lax.Precision.HIGHEST
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
     use_bias: bool = True
     kernel_init: Callable = lambda : kernel_init(1.0)
     use_flash_attention:bool = False
@@ -286,8 +287,8 @@ class BasicTransformerBlock(nn.Module):
     query_dim: int
     heads: int = 4
     dim_head: int = 64
-    dtype: Any = jnp.float32
-    precision: Any = jax.lax.Precision.HIGHEST
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
     use_bias: bool = True
     kernel_init: Callable = lambda : kernel_init(1.0)
     use_flash_attention:bool = False
@@ -346,8 +347,8 @@ class TransformerBlock(nn.Module):
     heads: int = 4
     dim_head: int = 32
     use_linear_attention: bool = True
-    dtype: Any = jnp.float32
-    precision: Any = jax.lax.Precision.HIGH
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
     use_projection: bool = False
     use_flash_attention:bool = True
     use_self_and_cross:bool = False

@@ -1,7 +1,8 @@
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from typing import Dict, Callable, Sequence, Any, Union
+from flax.typing import Dtype, PrecisionLike
+from typing import Dict, Callable, Sequence, Any, Union, Optional
 import einops
 from .common import kernel_init, ConvLayer, Downsample, Upsample, FourierEmbedding, TimeProjection
 from .attention import TransformerBlock
@@ -17,13 +18,14 @@ class ResidualBlock(nn.Module):
     res:int=2
     norm_groups:int=8
     kernel_init:Callable=kernel_init(1.0)
-    dtype: Any = jnp.float32
-    precision: Any = jax.lax.Precision.HIGHEST
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
 
     @nn.compact
     def __call__(self, x:jax.Array, temb:jax.Array, textemb:jax.Array=None, extra_features:jax.Array=None):
         residual = x
-        out = nn.GroupNorm(self.norm_groups)(x)
+        # out = nn.GroupNorm(self.norm_groups)(x)
+        out = nn.RMSNorm()(x)
         out = self.activation(out)
 
         out = ConvLayer(
@@ -47,7 +49,8 @@ class ResidualBlock(nn.Module):
         # out = out * (1 + scale) + shift
         out = out + temb
 
-        out = nn.GroupNorm(self.norm_groups)(out)
+        # out = nn.GroupNorm(self.norm_groups)(out)
+        out = nn.RMSNorm()(out)
         out = self.activation(out)
 
         out = ConvLayer(
@@ -87,8 +90,8 @@ class Unet(nn.Module):
     num_middle_res_blocks:int=1,
     activation:Callable = jax.nn.swish
     norm_groups:int=8
-    dtype: Any = jnp.bfloat16
-    precision: Any = jax.lax.Precision.HIGH
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
 
     @nn.compact
     def __call__(self, x, temb, textcontext):
