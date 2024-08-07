@@ -964,7 +964,7 @@ parser.add_argument('--num_middle_res_blocks', type=int,  default=1, help='Numbe
 parser.add_argument('--activation', type=str, default='swish', help='activation to use')
 
 parser.add_argument('--dtype', type=str, default='bfloat16', help='dtype to use')
-parser.add_argument('--precision', type=str, default='high', help='precision to use')
+parser.add_argument('--precision', type=str, default=None, help='precision to use', choices=['high', 'default', 'highest', 'None', None])
 
 parser.add_argument('--distributed_training', type=boolean_string, default=True, help='Should use distributed training or not')
 parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
@@ -981,17 +981,18 @@ parser.add_argument('--checkpoint_fs', type=str, default='local', choices=['loca
 parser.add_argument('--optimizer', type=str, default='adamw',
                     choices=['adam', 'adamw', 'lamb'], help='Optimizer to use')
 parser.add_argument('--optimizer_opts', type=str, default='{}', help='Optimizer options as a dictionary')
-parser.add_argument('--learning_rate_schedule', type=str, default=None, choices=[None, 'cosine'], help='Learning rate schedule')
+parser.add_argument('--learning_rate_schedule', type=str, default=None, choices=[None, 'None', 'cosine'], help='Learning rate schedule')
 parser.add_argument('--learning_rate', type=float,
                     default=2.7e-4, help='Initial Learning rate')
 parser.add_argument('--learning_rate_peak', type=float, default=3e-4, help='Learning rate peak')
 parser.add_argument('--learning_rate_end', type=float, default=2e-4, help='Learning rate end')
 parser.add_argument('--learning_rate_warmup_steps', type=int, default=10000, help='Learning rate warmup steps')
+parser.add_argument('--learning_rate_decay_epochs', type=int, default=1, help='Learning rate decay epochs')
 
 parser.add_argument('--checkpoint_id', type=str, default=None, help='Checkpoint ID to be used for saving/loading checkpoints')
 
 parser.add_argument('--autoencoder', type=str, default=None, help='Autoencoder model for Latend Diffusion technique',
-                    choices=[None, 'stable_diffusion'])
+                    choices=[None, 'None', 'stable_diffusion'])
 parser.add_argument('--autoencoder_opts', type=str, 
                     default='{"modelname":"CompVis/stable-diffusion-v1-4"}', help='Autoencoder options as a dictionary')
 
@@ -1015,13 +1016,15 @@ def main(args):
 
     DTYPE_MAP = {
         'bfloat16': jnp.bfloat16,
-        'float32': jnp.float32
+        'float32': jnp.float32,
+        'None': None,
     }
 
     PRECISION_MAP = {
         'high': jax.lax.Precision.HIGH,
         'default': jax.lax.Precision.DEFAULT,
-        'highes': jax.lax.Precision.HIGHEST
+        'highes': jax.lax.Precision.HIGHEST,
+        'None': None,
     }
 
     ACTIVATION_MAP = {
@@ -1159,7 +1162,7 @@ def main(args):
     if args.learning_rate_schedule == 'cosine':
         learning_rate = optax.warmup_cosine_decay_schedule(
             init_value=learning_rate, peak_value=args.learning_rate_peak, warmup_steps=args.learning_rate_warmup_steps,
-            decay_steps=batches, end_value=args.learning_rate_end,
+            decay_steps=batches * args.learning_rate_decay_epochs, end_value=args.learning_rate_end,
         )
     solver = optimizer(learning_rate, **optimizer_opts)
 
@@ -1215,12 +1218,12 @@ Laten Diffusion:
 
 python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=64 --image_size=256 \
-            --learning_rate=2.7e-4 --num_res_blocks=3 \
+            --epochs=40 --batch_size=512 --image_size=512 \
+            --learning_rate=8e-5 --num_res_blocks=3 \
             --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
-            --experiment_name='batch {batch_size} v4-8 host-{dataset} imagesize-{image_size} latent diffusion'\
+            --experiment_name='batch {batch_size} v4-64 host-{dataset} imagesize-{image_size} latent diffusion'\
             --learning_rate_peak=2.2e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=1000\
-            --optimizer=adamw --autoencoder=stable_diffusion
+            --optimizer=adamw --autoencoder=stable_diffusion --feature_depths 128 256 512 512
             
 for tpu-v4-32
 
@@ -1231,7 +1234,19 @@ python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0r
             --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
             --experiment_name='v4-32 batch {batch_size} dataset {dataset}'\
             --optimizer=adamw
+            
+Laten Diffusion:
 
+python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=256 --image_size=256 \
+            --learning_rate=1e-4 --num_res_blocks=3 \
+            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
+            --experiment_name='batch {batch_size} v4-32 host-{dataset} imagesize-{image_size} latent diffusion'\
+            --learning_rate_peak=2e-4 --learning_rate_end=5e-5 --learning_rate_warmup_steps=1000\
+            --learning_rate_decay_epochs=2\
+            --optimizer=adamw --autoencoder=stable_diffusion --feature_depths 128 256 512 512
+            
 from old checkpoint:
 
 python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/' \
