@@ -251,3 +251,79 @@ def l2norm(t, axis=1, eps=1e-12):
     denom = jnp.clip(jnp.linalg.norm(t, ord=2, axis=axis, keepdims=True), eps)
     out = t/denom
     return (out)
+
+
+class ResidualBlock(nn.Module):
+    conv_type:str
+    features:int
+    kernel_size:tuple=(3, 3)
+    strides:tuple=(1, 1)
+    padding:str="SAME"
+    activation:Callable=jax.nn.swish
+    direction:str=None
+    res:int=2
+    norm_groups:int=8
+    kernel_init:Callable=kernel_init(1.0)
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
+
+    @nn.compact
+    def __call__(self, x:jax.Array, temb:jax.Array, textemb:jax.Array=None, extra_features:jax.Array=None):
+        residual = x
+        # out = nn.GroupNorm(self.norm_groups)(x)
+        out = nn.RMSNorm()(x)
+        out = self.activation(out)
+
+        out = ConvLayer(
+            self.conv_type,
+            features=self.features,
+            kernel_size=self.kernel_size,
+            strides=self.strides,
+            kernel_init=self.kernel_init,
+            name="conv1",
+            dtype=self.dtype,
+            precision=self.precision
+        )(out)
+
+        temb = nn.DenseGeneral(
+            features=self.features, 
+            name="temb_projection",
+            dtype=self.dtype,
+            precision=self.precision)(temb)
+        temb = jnp.expand_dims(jnp.expand_dims(temb, 1), 1)
+        # scale, shift = jnp.split(temb, 2, axis=-1)
+        # out = out * (1 + scale) + shift
+        out = out + temb
+
+        # out = nn.GroupNorm(self.norm_groups)(out)
+        out = nn.RMSNorm()(out)
+        out = self.activation(out)
+
+        out = ConvLayer(
+            self.conv_type,
+            features=self.features,
+            kernel_size=self.kernel_size,
+            strides=self.strides,
+            kernel_init=self.kernel_init,
+            name="conv2",
+            dtype=self.dtype,
+            precision=self.precision
+        )(out)
+
+        if residual.shape != out.shape:
+            residual = ConvLayer(
+                self.conv_type,
+                features=self.features,
+                kernel_size=(1, 1),
+                strides=1,
+                kernel_init=self.kernel_init,
+                name="residual_conv",
+                dtype=self.dtype,
+                precision=self.precision
+            )(residual)
+        out = out + residual
+
+        out = jnp.concatenate([out, extra_features], axis=-1) if extra_features is not None else out
+
+        return out
+    
