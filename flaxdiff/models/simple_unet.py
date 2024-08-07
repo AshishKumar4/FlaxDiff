@@ -4,7 +4,7 @@ from flax import linen as nn
 from flax.typing import Dtype, PrecisionLike
 from typing import Dict, Callable, Sequence, Any, Union, Optional
 import einops
-from .common import kernel_init, ConvLayer, Downsample, Upsample, FourierEmbedding, TimeProjection
+from .common import kernel_init, ConvLayer, Downsample, Upsample, FourierEmbedding, TimeProjection, ResidualBlock
 from .attention import TransformerBlock
 
 class Unet(nn.Module):
