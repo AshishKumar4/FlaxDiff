@@ -96,6 +96,7 @@ class SimpleTrainer:
                  wandb_config: Dict[str, Any] = None,
                  distributed_training: bool = None,
                  checkpoint_base_path: str = "./checkpoints",
+                 checkpoint_epoch: int = None,
                  ):
         if distributed_training is None or distributed_training is True:
             # Auto-detect if we are running on multiple devices
@@ -141,7 +142,7 @@ class SimpleTrainer:
             self.checkpoint_path() + checkpoint_suffix, async_checkpointer, options)
 
         if load_from_checkpoint:
-            latest_epoch, old_state, old_best_state, rngstate = self.load()
+            latest_epoch, old_state, old_best_state, rngstate = self.load(checkpoint_epoch)
         else:
             latest_epoch, old_state, old_best_state, rngstate = 0, None, None, None
 
@@ -234,8 +235,11 @@ class SimpleTrainer:
             os.makedirs(path)
         return path
 
-    def load(self):
-        epoch = self.checkpointer.latest_step()
+    def load(self, checkpoint_epoch):
+        if checkpoint_epoch is not None:
+            epoch = checkpoint_epoch
+        else:
+            epoch = self.checkpointer.latest_step()
         print("Loading model from checkpoint", epoch)
         ckpt = self.checkpointer.restore(epoch)
         state = ckpt['state']
@@ -245,7 +249,7 @@ class SimpleTrainer:
         self.best_loss = ckpt['best_loss']
         print(
             f"Loaded model from checkpoint at epoch {epoch}", ckpt['best_loss'])
-        return epoch, state, best_state, rngstate
+        return epoch + 1, state, best_state, rngstate
 
     def save(self, epoch=0):
         print(f"Saving model at epoch {epoch}")
