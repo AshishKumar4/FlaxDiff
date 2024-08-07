@@ -162,65 +162,6 @@ class NormalAttention(nn.Module):
         proj = proj.reshape(orig_x_shape)
         return proj
 
-class BasicTransformerBlock(nn.Module):
-    # Has self and cross attention
-    query_dim: int
-    heads: int = 4
-    dim_head: int = 64
-    dtype: Optional[Dtype] = None
-    precision: PrecisionLike = None
-    use_bias: bool = True
-    kernel_init: Callable = lambda : kernel_init(1.0)
-    use_flash_attention:bool = False
-    use_cross_only:bool = False
-    
-    def setup(self):
-        if self.use_flash_attention:
-            attenBlock = EfficientAttention
-        else:
-            attenBlock = NormalAttention
-            
-        self.attention1 = attenBlock(
-         query_dim=self.query_dim,
-            heads=self.heads,
-            dim_head=self.dim_head,
-            name=f'Attention1',
-            precision=self.precision,
-            use_bias=self.use_bias,
-            dtype=self.dtype,
-            kernel_init=self.kernel_init
-        )
-        self.attention2 = attenBlock(
-            query_dim=self.query_dim,
-            heads=self.heads,
-            dim_head=self.dim_head,
-            name=f'Attention2',
-            precision=self.precision,
-            use_bias=self.use_bias,
-            dtype=self.dtype,
-            kernel_init=self.kernel_init
-        )
-        
-        self.ff = FlaxFeedForward(dim=self.query_dim)
-        self.norm1 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
-        self.norm2 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
-        self.norm3 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
-        
-    @nn.compact
-    def __call__(self, hidden_states, context=None):
-        # self attention
-        if not self.use_cross_only:
-            print("Using self attention")
-            hidden_states = hidden_states + self.attention1(self.norm1(hidden_states))
-
-        # cross attention
-        hidden_states = hidden_states + self.attention2(self.norm2(hidden_states), context)
-
-        # feed forward
-        hidden_states = hidden_states + self.ff(self.norm3(hidden_states))
-        
-        return hidden_states
-
 class FlaxGEGLU(nn.Module):
     r"""
     Flax implementation of a Linear layer followed by the variant of the gated linear unit activation function from
@@ -330,7 +271,7 @@ class BasicTransformerBlock(nn.Module):
     @nn.compact
     def __call__(self, hidden_states, context=None):
         if self.only_pure_attention:
-            return self.attention2(self.norm2(hidden_states), context)
+            return self.attention2(hidden_states, context)
         
         # self attention
         if not self.use_cross_only:

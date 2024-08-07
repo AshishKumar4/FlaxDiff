@@ -206,14 +206,7 @@ def data_source_gcs(source='arrayrecord/laion-aesthetics-12m+mscoco-2017'):
 def data_source_combined_aesthetics_gcs(
     sources=[
         'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
-        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
-        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
         'arrayrecord/laion-aesthetics-12m+mscoco-2017',
-        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
-        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
-        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
-        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
-        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
         'arrayrecord/cc12m',
     ]):
     def data_source(base="/home/mrwhite0racle/gcs_mount"):
@@ -279,15 +272,15 @@ datasetMap = {
         "augmenter": tfds_augmenters,
     },
     "cc12m": {
-        "source": data_source_gcs(),
+        "source": data_source_gcs('arrayrecord/cc12m'),
         "augmenter": gcs_augmenters,
     },
     "laiona_coco": {
-        "source": data_source_gcs(),
+        "source": data_source_gcs('arrayrecord/laion-aesthetics-12m+mscoco-2017'),
         "augmenter": gcs_augmenters,
     },
     "aesthetic_coyo": {
-        "source": data_source_gcs(),
+        "source": data_source_gcs('arrayrecords/aestheticCoyo_0.25clip_6aesthetic'),
         "augmenter": gcs_augmenters,
     },
     "combined_aesthetic": {
@@ -452,7 +445,7 @@ class SimpleTrainer:
             self.wandb.define_metric("train/best_loss", step_metric="train/epoch")
 
         if checkpoint_id is None:
-            self.checkpoint_id = name.replace(' ', '_').replace('-', '_').lower()
+            self.checkpoint_id = name.replace(' ', '_').lower()
         else:
             self.checkpoint_id = checkpoint_id
             
@@ -854,13 +847,12 @@ class DiffusionTrainer(SimpleTrainer):
             
             images = batch['image']
             
+            # normalize image
+            images = (images - 127.5) / 127.5
             if autoencoder is not None:
                 # Convert the images to latent space
-                local_rng_state, rngs = local_rng_state.get_random_key()
-                images = autoencoder.encode(images, rngs)
-            else:
-                # normalize image
-                images = (images - 127.5) / 127.5
+                # local_rng_state, rngs = local_rng_state.get_random_key()
+                images = autoencoder.encode(images)#, rngs)
 
             output = text_embedder(
                 input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
@@ -963,7 +955,7 @@ parser.add_argument('--num_res_blocks', type=int, default=2, help='Number of res
 parser.add_argument('--num_middle_res_blocks', type=int,  default=1, help='Number of middle residual blocks')
 parser.add_argument('--activation', type=str, default='swish', help='activation to use')
 
-parser.add_argument('--dtype', type=str, default='bfloat16', help='dtype to use')
+parser.add_argument('--dtype', type=str, default=None, help='dtype to use')
 parser.add_argument('--precision', type=str, default=None, help='precision to use', choices=['high', 'default', 'highest', 'None', None])
 
 parser.add_argument('--distributed_training', type=boolean_string, default=True, help='Should use distributed training or not')
@@ -981,7 +973,7 @@ parser.add_argument('--checkpoint_fs', type=str, default='local', choices=['loca
 parser.add_argument('--optimizer', type=str, default='adamw',
                     choices=['adam', 'adamw', 'lamb'], help='Optimizer to use')
 parser.add_argument('--optimizer_opts', type=str, default='{}', help='Optimizer options as a dictionary')
-parser.add_argument('--learning_rate_schedule', type=str, default=None, choices=[None, 'None', 'cosine'], help='Learning rate schedule')
+parser.add_argument('--learning_rate_schedule', type=str, default=None, choices=[None, 'cosine'], help='Learning rate schedule')
 parser.add_argument('--learning_rate', type=float,
                     default=2.7e-4, help='Initial Learning rate')
 parser.add_argument('--learning_rate_peak', type=float, default=3e-4, help='Learning rate peak')
@@ -992,7 +984,7 @@ parser.add_argument('--learning_rate_decay_epochs', type=int, default=1, help='L
 parser.add_argument('--checkpoint_id', type=str, default=None, help='Checkpoint ID to be used for saving/loading checkpoints')
 
 parser.add_argument('--autoencoder', type=str, default=None, help='Autoencoder model for Latend Diffusion technique',
-                    choices=[None, 'None', 'stable_diffusion'])
+                    choices=[None, 'stable_diffusion'])
 parser.add_argument('--autoencoder_opts', type=str, 
                     default='{"modelname":"CompVis/stable-diffusion-v1-4"}', help='Autoencoder options as a dictionary')
 
@@ -1018,6 +1010,7 @@ def main(args):
         'bfloat16': jnp.bfloat16,
         'float32': jnp.float32,
         'None': None,
+        None: None,
     }
 
     PRECISION_MAP = {
@@ -1025,6 +1018,7 @@ def main(args):
         'default': jax.lax.Precision.DEFAULT,
         'highes': jax.lax.Precision.HIGHEST,
         'None': None,
+        None: None,
     }
 
     ACTIVATION_MAP = {
@@ -1203,78 +1197,32 @@ if __name__ == '__main__':
     main(args)
 
 """
+
+python3 training.py --dataset=laiona_coco --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=256 --image_size=256 \
+            --learning_rate=1e-4 --num_res_blocks=3 \
+            --use_self_and_cross=False --precision=default --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_flaxdiff-0-1-7_LDM'\
+            --optimizer=adamw --autoencoder=stable_diffusion --feature_depths 128 256 512 512
+            
 for tpu-v4-64
 
 python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=512 --image_size=256 \
-            --learning_rate=1e-4 --num_res_blocks=3 \
-            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
-            --experiment_name='batch {batch_size} v4-64 host-{dataset} imagesize-{image_size}'\
-            --learning_rate_schedule=cosine --learning_rate_peak=2.2e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=1000\
-            --optimizer=adamw
-            
-Laten Diffusion:
-
-python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
-            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
             --epochs=40 --batch_size=512 --image_size=512 \
-            --learning_rate=8e-5 --num_res_blocks=3 \
-            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
-            --experiment_name='batch {batch_size} v4-64 host-{dataset} imagesize-{image_size} latent diffusion'\
-            --learning_rate_peak=2.2e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=1000\
-            --optimizer=adamw --autoencoder=stable_diffusion --feature_depths 128 256 512 512
-            
-for tpu-v4-32
-
-python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
-            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=256 \
-            --learning_rate=2.7e-4 --num_res_blocks=4 \
-            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
-            --experiment_name='v4-32 batch {batch_size} dataset {dataset}'\
+            --learning_rate=9e-5 --num_res_blocks=3 \
+            --use_self_and_cross=False --dtype=bfloat16 --precision=default --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_flaxdiff-0-1-7'\
             --optimizer=adamw
-            
-Laten Diffusion:
-
-python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
-            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=256 --image_size=256 \
-            --learning_rate=1e-4 --num_res_blocks=3 \
-            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
-            --experiment_name='batch {batch_size} v4-32 host-{dataset} imagesize-{image_size} latent diffusion'\
-            --learning_rate_peak=2e-4 --learning_rate_end=5e-5 --learning_rate_warmup_steps=1000\
-            --learning_rate_decay_epochs=2\
-            --optimizer=adamw --autoencoder=stable_diffusion --feature_depths 128 256 512 512
-            
-from old checkpoint:
-
-python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/' \
-        --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs' --epochs=40 --batch_size=256 \
-        --learning_rate=2.7e-4 --num_res_blocks=3 --use_self_and_cross=False\
-        --dtype=bfloat16 --precision=high --attention_heads=16 --experiment_name='batch 256 v4-32 host laiona_coco' \
-        --learning_rate_peak=4e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=5000 --optimizer=adamw \
-        --load_from_checkpoint=True --checkpoint_id='batch 256 v4-16 host laiona_coco'
             
 for tpu-v4-16
 
-python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/' \
-        --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs' --epochs=40 --batch_size=64 \
-        --learning_rate=2.7e-4 --num_res_blocks=3 --use_self_and_cross=False --image_size=256 \
-        --dtype=bfloat16 --precision=low --attention_heads=16 --experiment_name='batch {batch_size} v4-32 host-{dataset} imagesize-{image_size}' \
-        --learning_rate_peak=4e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=5000 --optimizer=adamw \
-        --load_from_checkpoint=True --checkpoint_id='batch 256 laiona_coco 2'
-        
-for tpu-v4-8
-
-Laten Diffusion:
-
-python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+python3 training.py --dataset=aesthetic_coyo --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=64 --image_size=256 \
-            --learning_rate=2.7e-4 --num_res_blocks=3 \
-            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
-            --experiment_name='batch {batch_size} v4-8 host-{dataset} imagesize-{image_size} latent diffusion'\
-            --learning_rate_peak=2.2e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=1000\
-            --optimizer=adamw --autoencoder=stable_diffusion
+            --epochs=40 --batch_size=64 --image_size=128 \
+            --learning_rate=1e-4 --num_res_blocks=3 \
+            --use_self_and_cross=False --precision=default --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-16_flaxdiff-0-1-7'\
+            --optimizer=adamw
 """

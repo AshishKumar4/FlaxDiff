@@ -270,8 +270,8 @@ class ResidualBlock(nn.Module):
     @nn.compact
     def __call__(self, x:jax.Array, temb:jax.Array, textemb:jax.Array=None, extra_features:jax.Array=None):
         residual = x
-        # out = nn.GroupNorm(self.norm_groups)(x)
-        out = nn.RMSNorm()(x)
+        out = nn.GroupNorm(self.norm_groups)(x)
+        # out = nn.RMSNorm()(x)
         out = self.activation(out)
 
         out = ConvLayer(
@@ -295,8 +295,8 @@ class ResidualBlock(nn.Module):
         # out = out * (1 + scale) + shift
         out = out + temb
 
-        # out = nn.GroupNorm(self.norm_groups)(out)
-        out = nn.RMSNorm()(out)
+        out = nn.GroupNorm(self.norm_groups)(out)
+        # out = nn.RMSNorm()(out)
         out = self.activation(out)
 
         out = ConvLayer(
