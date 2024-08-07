@@ -414,6 +414,7 @@ class SimpleTrainer:
                  wandb_config: Dict[str, Any] = None,
                  distributed_training: bool = None,
                  checkpoint_base_path: str = "./checkpoints",
+                 checkpoint_epoch: int = None,
                  ):
         if distributed_training is None or distributed_training is True:
             # Auto-detect if we are running on multiple devices
@@ -430,6 +431,7 @@ class SimpleTrainer:
         
         
         if wandb_config is not None and jax.process_index() == 0:
+            import wandb
             run = wandb.init(**wandb_config)
             self.wandb = run
             
@@ -445,7 +447,7 @@ class SimpleTrainer:
             self.wandb.define_metric("train/best_loss", step_metric="train/epoch")
 
         if checkpoint_id is None:
-            self.checkpoint_id = name.replace(' ', '_').lower()
+            self.checkpoint_id = name.replace(' ', '_').replace('-', '_').lower()
         else:
             self.checkpoint_id = checkpoint_id
             
@@ -458,7 +460,7 @@ class SimpleTrainer:
             self.checkpoint_path() + checkpoint_suffix, async_checkpointer, options)
 
         if load_from_checkpoint:
-            latest_epoch, old_state, old_best_state, rngstate = self.load()
+            latest_epoch, old_state, old_best_state, rngstate = self.load(checkpoint_epoch)
         else:
             latest_epoch, old_state, old_best_state, rngstate = 0, None, None, None
 
@@ -551,8 +553,11 @@ class SimpleTrainer:
             os.makedirs(path)
         return path
 
-    def load(self):
-        epoch = self.checkpointer.latest_step()
+    def load(self, checkpoint_epoch):
+        if checkpoint_epoch is not None:
+            epoch = checkpoint_epoch
+        else:
+            epoch = self.checkpointer.latest_step()
         print("Loading model from checkpoint", epoch)
         ckpt = self.checkpointer.restore(epoch)
         state = ckpt['state']
@@ -562,7 +567,7 @@ class SimpleTrainer:
         self.best_loss = ckpt['best_loss']
         print(
             f"Loaded model from checkpoint at epoch {epoch}", ckpt['best_loss'])
-        return epoch, state, best_state, rngstate
+        return epoch + 1, state, best_state, rngstate
 
     def save(self, epoch=0):
         print(f"Saving model at epoch {epoch}")
@@ -846,9 +851,10 @@ class DiffusionTrainer(SimpleTrainer):
             local_rng_state = RandomMarkovState(subkey)
             
             images = batch['image']
-            
+            images = jnp.array(images, dtype=jnp.float32)
             # normalize image
             images = (images - 127.5) / 127.5
+            
             if autoencoder is not None:
                 # Convert the images to latent space
                 # local_rng_state, rngs = local_rng_state.get_random_key()
@@ -1002,7 +1008,7 @@ def main(args):
 
     jax.distributed.initialize()
 
-    jax.config.update('jax_threefry_partitionable', True)
+    # jax.config.update('jax_threefry_partitionable', True)
     print(f"Number of devices: {jax.device_count()}")
     print(f"Local devices: {jax.local_devices()}")
 
@@ -1200,29 +1206,29 @@ if __name__ == '__main__':
 
 python3 training.py --dataset=laiona_coco --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=256 --image_size=256 \
-            --learning_rate=1e-4 --num_res_blocks=3 \
-            --use_self_and_cross=False --precision=default --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_flaxdiff-0-1-7_LDM'\
-            --optimizer=adamw --autoencoder=stable_diffusion --feature_depths 128 256 512 512
+            --epochs=40 --batch_size=256 --image_size=128 \
+            --learning_rate=2.7e-4 --num_res_blocks=3 \
+            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_flaxdiff-0-1-8_lr-{learning_rate}_prec-{precision}_dtype-{dtype}_res-{num_res_blocks}'\
+            --optimizer=adamw --learning_rate_peak=4e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=5000
             
 for tpu-v4-64
 
-python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+python3 training.py --dataset=laiona_coco --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=512 --image_size=512 \
-            --learning_rate=9e-5 --num_res_blocks=3 \
-            --use_self_and_cross=False --dtype=bfloat16 --precision=default --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_flaxdiff-0-1-7'\
-            --optimizer=adamw
+            --epochs=40 --batch_size=512 --image_size=128 \
+            --learning_rate=2e-4 --num_res_blocks=3 \
+            --use_self_and_cross=False --dtype=float32 --precision=high --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_flaxdiff-0-1-8_lr-{learning_rate}_prec-{precision}_dtype-{dtype}_res-{num_res_blocks}'\
+            --optimizer=adamw --learning_rate_peak=4e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=5000
             
 for tpu-v4-16
 
 python3 training.py --dataset=aesthetic_coyo --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=64 --image_size=128 \
-            --learning_rate=1e-4 --num_res_blocks=3 \
-            --use_self_and_cross=False --precision=default --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-16_flaxdiff-0-1-7'\
-            --optimizer=adamw
+            --epochs=40 --batch_size=128 --image_size=128 \
+            --learning_rate=2e-4 --num_res_blocks=3 \
+            --use_self_and_cross=False --dtype=float32 --precision=high --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-16_flaxdiff-0-1-8_lr-{learning_rate}_prec-{precision}_dtype-{dtype}_res-{num_res_blocks}'\
+            --optimizer=adamw --learning_rate_peak=4e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=5000
 """

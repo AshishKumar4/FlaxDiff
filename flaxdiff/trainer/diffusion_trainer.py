@@ -125,14 +125,14 @@ class DiffusionTrainer(SimpleTrainer):
             local_rng_state = RandomMarkovState(subkey)
             
             images = batch['image']
+            images = jnp.array(images, dtype=jnp.bfloat16)
+            # normalize image
+            images = (images - 127.5) / 127.5
             
             if autoencoder is not None:
                 # Convert the images to latent space
-                local_rng_state, rngs = local_rng_state.get_random_key()
-                images = autoencoder.encode(images, rngs)
-            else:
-                # normalize image
-                images = (images - 127.5) / 127.5
+                # local_rng_state, rngs = local_rng_state.get_random_key()
+                images = autoencoder.encode(images)#, rngs)
 
             output = text_embedder(
                 input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
@@ -199,4 +199,3 @@ def boolean_string(s):
     if type(s) == bool:
         return s
     return s == 'True'
-
