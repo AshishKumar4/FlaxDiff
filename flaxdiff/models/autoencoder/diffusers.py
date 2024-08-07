@@ -5,6 +5,9 @@ from .autoencoder import AutoEncoder
 
 """
 This module contains an Autoencoder implementation which uses the Stable Diffusion VAE model from the HuggingFace Diffusers library.
+The actual model was not trained by me, but was taken from the HuggingFace model hub.
+I have only implemented the wrapper around the diffusers pipeline to make it compatible with our library
+All credits for the model go to the developers of Stable Diffusion VAE and all credits for the pipeline go to the developers of the Diffusers library.
 """
 
 class StableDiffusionVAE(AutoEncoder):

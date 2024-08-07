@@ -1,6 +1,8 @@
 import jax.numpy as jnp
 import jax
 from flax import linen as nn
+from typing import Optional, Any, Callable, Sequence, Union
+from flax.typing import Dtype, PrecisionLike
 from typing import Dict, Callable, Sequence, Any, Union
 import einops
 
@@ -18,8 +20,9 @@ class WeightStandardizedConv(nn.Module):
     kernel_size: Sequence[int] = 3
     strides: Union[None, int, Sequence[int]] = 1
     padding: Any = 1
-    dtype: Any = jnp.float32
-    param_dtype: Any = jnp.float32
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
+    param_dtype: Optional[Dtype] = None
 
     @nn.compact
     def __call__(self, x):
@@ -120,8 +123,8 @@ class SeparableConv(nn.Module):
     use_bias:bool=False
     kernel_init:Callable=kernel_init(1.0)
     padding:str="SAME"
-    dtype: Any = jnp.bfloat16
-    precision: Any = jax.lax.Precision.HIGH
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
 
     @nn.compact
     def __call__(self, x):
@@ -149,8 +152,8 @@ class ConvLayer(nn.Module):
     kernel_size:tuple=(3, 3)
     strides:tuple=(1, 1)
     kernel_init:Callable=kernel_init(1.0)
-    dtype: Any = jnp.bfloat16
-    precision: Any = jax.lax.Precision.HIGH
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
 
     def setup(self):
         # conv_type can be "conv", "separable", "conv_transpose"
@@ -199,8 +202,8 @@ class Upsample(nn.Module):
     features:int
     scale:int
     activation:Callable=jax.nn.swish
-    dtype: Any = jnp.bfloat16
-    precision: Any = jax.lax.Precision.HIGH
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
 
     @nn.compact
     def __call__(self, x, residual=None):
@@ -224,8 +227,8 @@ class Downsample(nn.Module):
     features:int
     scale:int
     activation:Callable=jax.nn.swish
-    dtype: Any = jnp.bfloat16
-    precision: Any = jax.lax.Precision.HIGH
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
 
     @nn.compact
     def __call__(self, x, residual=None):
