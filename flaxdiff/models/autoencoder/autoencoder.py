@@ -6,13 +6,14 @@ import einops
 from ..common import kernel_init, ConvLayer, Upsample, Downsample, PixelShuffle
 
 
-class AutoEncoder(nn.Module):
+class AutoEncoder():
     def encode(self, x: jnp.ndarray, **kwargs) -> jnp.ndarray:
         raise NotImplementedError
     
     def decode(self, z: jnp.ndarray, **kwargs) -> jnp.ndarray:
         raise NotImplementedError
     
-    @nn.compact
-    def __call__(self, *args, **kwargs) -> Any:
-        raise NotImplementedError
+    def __call__(self, x: jnp.ndarray):
+        latents = self.encode(x)
+        reconstructions = self.decode(latents)
+        return reconstructions
