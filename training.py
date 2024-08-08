@@ -1,6 +1,8 @@
 from typing import Any, Tuple, Mapping, Callable, List, Dict
 from functools import partial
 import flax.jax_utils
+import flax.training
+import flax.training.dynamic_scale
 import jax.experimental.multihost_utils
 import orbax
 import orbax.checkpoint
@@ -205,9 +207,26 @@ def data_source_gcs(source='arrayrecord/laion-aesthetics-12m+mscoco-2017'):
 
 def data_source_combined_aesthetics_gcs(
     sources=[
+        'arrayrecord2/laion-aesthetics-12m+mscoco-2017',
         'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
-        'arrayrecord/laion-aesthetics-12m+mscoco-2017',
         'arrayrecord/cc12m',
+        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+    ]):
+    def data_source(base="/home/mrwhite0racle/gcs_mount"):
+        records_paths = [os.path.join(base, source) for source in sources]
+        records = []
+        for records_path in records_paths:
+            records += [os.path.join(records_path, i) for i in os.listdir(
+                records_path) if 'array_record' in i]
+        ds = pygrain.ArrayRecordDataSource(records)
+        return ds
+    return data_source
+
+def data_source_laiona_coco_coyo_gcs(
+    sources=[
+        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+        'arrayrecord2/laion-aesthetics-12m+mscoco-2017',
+        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
     ]):
     def data_source(base="/home/mrwhite0racle/gcs_mount"):
         records_paths = [os.path.join(base, source) for source in sources]
@@ -276,7 +295,7 @@ datasetMap = {
         "augmenter": gcs_augmenters,
     },
     "laiona_coco": {
-        "source": data_source_gcs('arrayrecord/laion-aesthetics-12m+mscoco-2017'),
+        "source": data_source_gcs('arrayrecord2/laion-aesthetics-12m+mscoco-2017'),
         "augmenter": gcs_augmenters,
     },
     "aesthetic_coyo": {
@@ -285,6 +304,10 @@ datasetMap = {
     },
     "combined_aesthetic": {
         "source": data_source_combined_aesthetics_gcs(),
+        "augmenter": gcs_augmenters,
+    },
+    "laiona_coco_coyo": {
+        "source": data_source_laiona_coco_coyo_gcs(),
         "augmenter": gcs_augmenters,
     }
 }
@@ -391,6 +414,7 @@ class Metrics(metrics.Collection):
 # Define the TrainState
 class SimpleTrainState(train_state.TrainState):
     metrics: Metrics
+    dynamic_scale: flax.training.dynamic_scale.DynamicScale
 
 class SimpleTrainer:
     state: SimpleTrainState
@@ -406,21 +430,22 @@ class SimpleTrainer:
                  rngs: jax.random.PRNGKey,
                  train_state: SimpleTrainState = None,
                  name: str = "Simple",
-                 load_from_checkpoint: bool = False,
+                 load_from_checkpoint: str = None,
                  checkpoint_suffix: str = "",
-                 checkpoint_id: str = None,
                  loss_fn=optax.l2_loss,
                  param_transforms: Callable = None,
                  wandb_config: Dict[str, Any] = None,
                  distributed_training: bool = None,
                  checkpoint_base_path: str = "./checkpoints",
-                 checkpoint_epoch: int = None,
+                 checkpoint_step: int = None,
+                 use_dynamic_scale: bool = False,
                  ):
         if distributed_training is None or distributed_training is True:
             # Auto-detect if we are running on multiple devices
             distributed_training = jax.device_count() > 1
             self.mesh = jax.sharding.Mesh(jax.devices(), 'data')
-            # self.sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec('data'))
+        else:
+            self.mesh = None
 
         self.distributed_training = distributed_training
         self.model = model
@@ -431,7 +456,6 @@ class SimpleTrainer:
         
         
         if wandb_config is not None and jax.process_index() == 0:
-            import wandb
             run = wandb.init(**wandb_config)
             self.wandb = run
             
@@ -445,11 +469,6 @@ class SimpleTrainer:
             self.wandb.define_metric("train/avg_time_per_step", step_metric="train/epoch")
             self.wandb.define_metric("train/avg_loss", step_metric="train/epoch")
             self.wandb.define_metric("train/best_loss", step_metric="train/epoch")
-
-        if checkpoint_id is None:
-            self.checkpoint_id = name.replace(' ', '_').replace('-', '_').lower()
-        else:
-            self.checkpoint_id = checkpoint_id
             
         # checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         async_checkpointer = orbax.checkpoint.AsyncCheckpointer(orbax.checkpoint.PyTreeCheckpointHandler(), timeout_secs=60)
@@ -459,12 +478,12 @@ class SimpleTrainer:
         self.checkpointer = orbax.checkpoint.CheckpointManager(
             self.checkpoint_path() + checkpoint_suffix, async_checkpointer, options)
 
-        if load_from_checkpoint:
-            latest_epoch, old_state, old_best_state, rngstate = self.load(checkpoint_epoch)
+        if load_from_checkpoint is not None:
+            latest_epoch, latest_step, old_state, old_best_state, rngstate = self.load(load_from_checkpoint, checkpoint_step)
         else:
-            latest_epoch, old_state, old_best_state, rngstate = 0, None, None, None
+            latest_epoch, latest_step, old_state, old_best_state, rngstate = 0, 0, None, None, None
 
-        self.latest_epoch = latest_epoch
+        self.latest_step = latest_step
         
         if rngstate:
             self.rngstate = RandomMarkovState(**rngstate)
@@ -475,7 +494,7 @@ class SimpleTrainer:
 
         if train_state == None:
             state, best_state = self.generate_states(
-                optimizer, subkey, old_state, old_best_state, model, param_transforms
+                optimizer, subkey, old_state, old_best_state, model, param_transforms, use_dynamic_scale
             )
             self.init_state(state, best_state)
         else:
@@ -493,7 +512,8 @@ class SimpleTrainer:
         existing_state: dict = None,
         existing_best_state: dict = None,
         model: nn.Module = None,
-        param_transforms: Callable = None
+        param_transforms: Callable = None,
+        use_dynamic_scale: bool = False
     ) -> Tuple[SimpleTrainState, SimpleTrainState]:
         print("Generating states for SimpleTrainer")
         rngs, subkey = jax.random.split(rngs)
@@ -508,7 +528,8 @@ class SimpleTrainer:
             apply_fn=model.apply,
             params=params,
             tx=optimizer,
-            metrics=Metrics.empty()
+            metrics=Metrics.empty(),
+            dynamic_scale = flax.training.dynamic_scale.DynamicScale() if use_dynamic_scale else None
         )
         if existing_best_state is not None:
             best_state = state.replace(
@@ -541,7 +562,7 @@ class SimpleTrainer:
         return jax.tree_util.tree_map(lambda x : np.array(x), self.rngstate)
 
     def checkpoint_path(self):
-        path = os.path.join(self.checkpoint_base_path, self.checkpoint_id)
+        path = os.path.join(self.checkpoint_base_path, self.name.replace(' ', '_').lower())
         if not os.path.exists(path):
             os.makedirs(path)
         return path
@@ -553,34 +574,46 @@ class SimpleTrainer:
             os.makedirs(path)
         return path
 
-    def load(self, checkpoint_epoch):
-        if checkpoint_epoch is not None:
-            epoch = checkpoint_epoch
+    def load(self, checkpoint_path=None, checkpoint_step=None):
+        if checkpoint_path is None:
+            checkpointer = self.checkpointer
         else:
-            epoch = self.checkpointer.latest_step()
-        print("Loading model from checkpoint", epoch)
-        ckpt = self.checkpointer.restore(epoch)
+            checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+            options = orbax.checkpoint.CheckpointManagerOptions(
+                max_to_keep=4, create=False)
+            checkpointer = orbax.checkpoint.CheckpointManager(
+                checkpoint_path, checkpointer, options)    
+        
+        if checkpoint_step is None:
+            step = checkpointer.latest_step()
+        else:
+            step = checkpoint_step
+        
+        print("Loading model from checkpoint at step ", step)
+        ckpt = checkpointer.restore(step)
         state = ckpt['state']
         best_state = ckpt['best_state']
         rngstate = ckpt['rngs']
         # Convert the state to a TrainState
         self.best_loss = ckpt['best_loss']
+        current_epoch = ckpt.get('epoch', step) # Must be a checkpoint from an older version which used epochs instead of steps
         print(
-            f"Loaded model from checkpoint at epoch {epoch}", ckpt['best_loss'])
-        return epoch + 1, state, best_state, rngstate
+            f"Loaded model from checkpoint at epoch {current_epoch} step {step}", ckpt['best_loss'])
+        return current_epoch, step, state, best_state, rngstate
 
-    def save(self, epoch=0):
-        print(f"Saving model at epoch {epoch}")
+    def save(self, epoch=0, step=0):
+        print(f"Saving model at epoch {epoch} step {step}")
         ckpt = {
             # 'model': self.model,
             'rngs': self.get_rngstate(),
             'state': self.get_state(),
             'best_state': self.get_best_state(),
             'best_loss': np.array(self.best_loss),
+            'epoch': epoch,
         }
         try:
             save_args = orbax_utils.save_args_from_target(ckpt)
-            self.checkpointer.save(epoch, ckpt, save_kwargs={
+            self.checkpointer.save(step, ckpt, save_kwargs={
                                    'save_args': save_args}, force=True)
             self.checkpointer.wait_until_finished()
             pass
@@ -671,10 +704,12 @@ class SimpleTrainer:
             global_device_indexes = jnp.arange(global_device_count)
         else:
             global_device_indexes = 0
+            
+        last_save_time = time.time()
 
-        def train_loop(current_epoch, pbar: tqdm.tqdm, train_state, rng_state):
+        def train_loop(current_step, pbar: tqdm.tqdm, train_state, rng_state):
             epoch_loss = 0
-            current_step = 0
+            current_epoch = current_step // steps_per_epoch
             for i in range(steps_per_epoch):
                 batch = next(train_ds)
                 if self.distributed_training and global_device_count > 1:
@@ -687,34 +722,38 @@ class SimpleTrainer:
                     loss = jnp.mean(loss) # Just to make sure its a scaler value
                             
                 epoch_loss += loss
-                    
+                current_step += 1
                 if pbar is not None:
                     if i % 100 == 0:
                         pbar.set_postfix(loss=f'{loss:.4f}')
                         pbar.update(100)
-                        current_step = current_epoch*steps_per_epoch + i
                         if self.wandb is not None:
                             self.wandb.log({
                                 "train/step" : current_step,
                                 "train/loss": loss,
                             }, step=current_step)
+                    # Save the model every 40 minutes
+                    if time.time() - last_save_time > 40 * 60:
+                        print(f"Saving model after 40 minutes at step {current_step}")
+                        self.save(current_epoch, current_step)
+                        last_save_time = time.time()
             print(colored(f"Epoch done on index {process_index} => {current_epoch} Loss: {epoch_loss/steps_per_epoch}", 'green'))
             return epoch_loss, current_step, train_state, rng_state
 
-        while self.latest_epoch < epochs:
-            current_epoch = self.latest_epoch
-            self.latest_epoch += 1
+        while self.latest_step < epochs * steps_per_epoch:
+            current_epoch = self.latest_step // steps_per_epoch
             print(f"\nEpoch {current_epoch}/{epochs}")
             start_time = time.time()
             epoch_loss = 0
 
             if process_index == 0:
                 with tqdm.tqdm(total=steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step') as pbar:
-                    epoch_loss, current_step, train_state, rng_state = train_loop(current_epoch, pbar, train_state, rng_state)
+                    epoch_loss, current_step, train_state, rng_state = train_loop(current_step, pbar, train_state, rng_state)
             else:
-                epoch_loss, current_step, train_state, rng_state = train_loop(current_epoch, None, train_state, rng_state)
+                epoch_loss, current_step, train_state, rng_state = train_loop(current_step, None, train_state, rng_state)
                 print(colored(f"Epoch done on process index {process_index}", PROCESS_COLOR_MAP[process_index]))
-                
+            
+            self.latest_step = current_step
             end_time = time.time()
             self.state = train_state
             self.rngstate = rng_state
@@ -724,7 +763,7 @@ class SimpleTrainer:
             if avg_loss < self.best_loss:
                 self.best_loss = avg_loss
                 self.best_state = train_state
-                self.save(current_epoch)
+                self.save(current_epoch, current_step)
                 
             if process_index == 0:
                 if self.wandb is not None:
@@ -766,7 +805,7 @@ class DiffusionTrainer(SimpleTrainer):
                  optimizer: optax.GradientTransformation,
                  noise_schedule: NoiseScheduler,
                  rngs: jax.random.PRNGKey,
-                 unconditional_prob: float = 0.2,
+                 unconditional_prob: float = 0.12,
                  name: str = "Diffusion",
                  model_output_transform: DiffusionPredictionTransform = EpsilonPredictionTransform(),
                  autoencoder: AutoEncoder = None,
@@ -793,7 +832,8 @@ class DiffusionTrainer(SimpleTrainer):
         existing_state: dict = None,
         existing_best_state: dict = None,
         model: nn.Module = None,
-        param_transforms: Callable = None
+        param_transforms: Callable = None,
+        use_dynamic_scale: bool = False
     ) -> Tuple[TrainState, TrainState]:
         print("Generating states for DiffusionTrainer")
         rngs, subkey = jax.random.split(rngs)
@@ -814,7 +854,8 @@ class DiffusionTrainer(SimpleTrainer):
             ema_params=new_state['ema_params'],
             tx=optimizer,
             rngs=rngs,
-            metrics=Metrics.empty()
+            metrics=Metrics.empty(),
+            dynamic_scale = flax.training.dynamic_scale.DynamicScale() if use_dynamic_scale else None
         )
             
         if existing_best_state is not None:
@@ -857,8 +898,8 @@ class DiffusionTrainer(SimpleTrainer):
             
             if autoencoder is not None:
                 # Convert the images to latent space
-                # local_rng_state, rngs = local_rng_state.get_random_key()
-                images = autoencoder.encode(images)#, rngs)
+                local_rng_state, rngs = local_rng_state.get_random_key()
+                images = autoencoder.encode(images, rngs)
 
             output = text_embedder(
                 input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
@@ -889,12 +930,39 @@ class DiffusionTrainer(SimpleTrainer):
                 loss = nloss
                 return loss
             
-            loss, grads = jax.value_and_grad(model_loss)(train_state.params)
+            
+            if train_state.dynamic_scale is not None:
+                # dynamic scale takes care of averaging gradients across replicas
+                grad_fn = train_state.dynamic_scale.value_and_grad(
+                    model_loss, axis_name="data"
+                )
+                dynamic_scale, is_fin, loss, grads = grad_fn(train_state.params)
+                train_state = train_state.replace(dynamic_scale=dynamic_scale)
+            else:
+                grad_fn = jax.value_and_grad(model_loss)
+                loss, grads = grad_fn(train_state.params)
+                if distributed_training:
+                    grads = jax.lax.pmean(grads, "data")
+            
+            new_state = train_state.apply_gradients(grads=grads)
+            
+            if train_state.dynamic_scale:
+                # if is_fin == False the gradients contain Inf/NaNs and optimizer state and
+                # params should be restored (= skip this step).
+                select_fn = functools.partial(jnp.where, is_fin)
+                new_state = train_state.replace(
+                    opt_state=jax.tree_util.tree_map(
+                        select_fn, new_state.opt_state, train_state.opt_state
+                    ),
+                    params=jax.tree_util.tree_map(
+                        select_fn, new_state.params, train_state.params
+                    ),
+                )
+    
+            train_state = new_state.apply_ema(self.ema_decay)
+            
             if distributed_training:
-                grads = jax.lax.pmean(grads, "data")
                 loss = jax.lax.pmean(loss, "data")
-            train_state = train_state.apply_gradients(grads=grads)
-            train_state = train_state.apply_ema(self.ema_decay)
             return train_state, loss, rng_state
 
         if distributed_training:
@@ -966,8 +1034,8 @@ parser.add_argument('--precision', type=str, default=None, help='precision to us
 
 parser.add_argument('--distributed_training', type=boolean_string, default=True, help='Should use distributed training or not')
 parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
-parser.add_argument('--load_from_checkpoint', type=boolean_string,
-                    default=False, help='Load from the best previously stored checkpoint. Experiment name needs to be provided')
+parser.add_argument('--load_from_checkpoint', type=str,
+                    default=None, help='Load from the best previously stored checkpoint. The checkpoint path should be provided')
 parser.add_argument('--dataset_seed', type=int, default=0, help='Dataset starting seed')
 
 parser.add_argument('--dataset_test', type=boolean_string,
@@ -987,12 +1055,12 @@ parser.add_argument('--learning_rate_end', type=float, default=2e-4, help='Learn
 parser.add_argument('--learning_rate_warmup_steps', type=int, default=10000, help='Learning rate warmup steps')
 parser.add_argument('--learning_rate_decay_epochs', type=int, default=1, help='Learning rate decay epochs')
 
-parser.add_argument('--checkpoint_id', type=str, default=None, help='Checkpoint ID to be used for saving/loading checkpoints')
-
 parser.add_argument('--autoencoder', type=str, default=None, help='Autoencoder model for Latend Diffusion technique',
                     choices=[None, 'stable_diffusion'])
 parser.add_argument('--autoencoder_opts', type=str, 
                     default='{"modelname":"CompVis/stable-diffusion-v1-4"}', help='Autoencoder options as a dictionary')
+
+parser.add_argument('--use_dynamic_scale', type=boolean_string, default=False, help='Use dynamic scale for training')
 
 def main(args):
     resource.setrlimit(
@@ -1002,9 +1070,6 @@ def main(args):
     resource.setrlimit(
         resource.RLIMIT_OFILE,
         (65535, 65535))
-
-    if args.load_from_checkpoint:
-        assert args.experiment_name is not None and args.experiment_name != "", "Experiment name needs to be given if load_from_checkpoint is True"
 
     jax.distributed.initialize()
 
@@ -1186,8 +1251,8 @@ def main(args):
         wandb_config=wandb_config,
         distributed_training=args.distributed_training,  
         checkpoint_base_path=CHECKPOINT_DIR,
-        checkpoint_id=args.checkpoint_id,  
         autoencoder=autoencoder,
+        use_dynamic_scale=args.use_dynamic_scale,
     )
     
     if trainer.distributed_training:
@@ -1204,31 +1269,34 @@ if __name__ == '__main__':
 
 """
 
-python3 training.py --dataset=laiona_coco --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
             --epochs=40 --batch_size=256 --image_size=128 \
-            --learning_rate=2.7e-4 --num_res_blocks=3 \
-            --use_self_and_cross=False --dtype=bfloat16 --precision=high --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_flaxdiff-0-1-8_lr-{learning_rate}_prec-{precision}_dtype-{dtype}_res-{num_res_blocks}'\
-            --optimizer=adamw --learning_rate_peak=4e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=5000
+            --learning_rate=1e-4 --num_res_blocks=3 \
+            --use_self_and_cross=False --precision=default --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_flaxdiff-0-1-8__3'\
+            --optimizer=adamw --feature_depths 128 256 512 512
             
 for tpu-v4-64
 
-python3 training.py --dataset=laiona_coco --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=512 --image_size=128 \
-            --learning_rate=2e-4 --num_res_blocks=3 \
-            --use_self_and_cross=False --dtype=float32 --precision=high --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_flaxdiff-0-1-8_lr-{learning_rate}_prec-{precision}_dtype-{dtype}_res-{num_res_blocks}'\
-            --optimizer=adamw --learning_rate_peak=4e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=5000
+            --epochs=40 --batch_size=512 --image_size=512 \
+            --learning_rate=2e-5 --num_res_blocks=4 \
+            --use_self_and_cross=False --dtype=bfloat16 --precision=default --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_flaxdiff-0-1-8_ldm_dyn_scale_1'\
+            --optimizer=adamw --learning_rate_peak=5e-5 --learning_rate_end=9e-6 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=1\
+            --learning_rate_schedule=cosine --autoencoder=stable_diffusion --use_dynamic_scale=True --feature_depths 128 256 512 512\
+            --emb_features 512
             
 for tpu-v4-16
 
-python3 training.py --dataset=aesthetic_coyo --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=128 --image_size=128 \
-            --learning_rate=2e-4 --num_res_blocks=3 \
-            --use_self_and_cross=False --dtype=float32 --precision=high --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-16_flaxdiff-0-1-8_lr-{learning_rate}_prec-{precision}_dtype-{dtype}_res-{num_res_blocks}'\
-            --optimizer=adamw --learning_rate_peak=4e-4 --learning_rate_end=1e-4 --learning_rate_warmup_steps=5000
+            --epochs=40 --batch_size=128 --image_size=512 \
+            --learning_rate=8e-5 --num_res_blocks=3 \
+            --use_self_and_cross=False --precision=default --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-16_flaxdiff-0-1-8__ldm_1'\
+            --optimizer=adamw --learning_rate_peak=1e-4 --learning_rate_end=4e-5 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=1\
+            --learning_rate_schedule=cosine --autoencoder=stable_diffusion
 """
