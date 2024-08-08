@@ -78,7 +78,7 @@ class StableDiffusionVAE(AutoEncoder):
             log_std = jnp.clip(log_std, -30, 20)
             std = jnp.exp(0.5 * log_std)
             latents = mean + std * jax.random.normal(rngkey, mean.shape, dtype=mean.dtype)
-            print("Sampled")
+            # print("Sampled")
         else:
             # return the mean
             latents, _ = jnp.split(latents, 2, axis=-1)
