@@ -11,6 +11,7 @@ good models
 .env
 tensorboard
 wandb
+gs:
 gcs_mount
 datacache
 *.deb
