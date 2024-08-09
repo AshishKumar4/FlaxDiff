@@ -39,23 +39,23 @@ PROCESS_COLOR_MAP = {
 def _build_global_shape_and_sharding(
     local_shape: tuple[int, ...], global_mesh: Mesh
 ) -> tuple[tuple[int, ...], jax.sharding.NamedSharding]:
-    sharding = jax.sharding.NamedSharding(global_mesh, P(global_mesh.axis_names))
-    global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
-    return global_shape, sharding
+  sharding = jax.sharding.NamedSharding(global_mesh, P(global_mesh.axis_names))
+  global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
+  return global_shape, sharding
 
 
 def form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
-    """Put local sharded array into local devices"""
-    global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
-    try:
-        local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
-    except ValueError as array_split_error:
-        raise ValueError(
-            f"Unable to put to devices shape {array.shape} with "
-            f"local device count {len(global_mesh.local_devices)} "
-        ) from array_split_error
-    local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
-    return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
+  """Put local sharded array into local devices"""
+  global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
+  try:
+    local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
+  except ValueError as array_split_error:
+    raise ValueError(
+        f"Unable to put to devices shape {array.shape} with "
+        f"local device count {len(global_mesh.local_devices)} "
+    ) from array_split_error
+  local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
+  return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
 
 def convert_to_global_tree(global_mesh, pytree):
     return jax.tree_util.tree_map_with_path(partial(form_global_array, global_mesh=global_mesh), pytree)
@@ -67,12 +67,8 @@ class Metrics(metrics.Collection):
 
 # Define the TrainState
 class SimpleTrainState(train_state.TrainState):
-    rngs: jax.random.PRNGKey
     metrics: Metrics
-
-    def get_random_key(self):
-        rngs, subkey = jax.random.split(self.rngs)
-        return self.replace(rngs=rngs), subkey
+    dynamic_scale: flax.training.dynamic_scale.DynamicScale
 
 class SimpleTrainer:
     state: SimpleTrainState
@@ -88,21 +84,22 @@ class SimpleTrainer:
                  rngs: jax.random.PRNGKey,
                  train_state: SimpleTrainState = None,
                  name: str = "Simple",
-                 load_from_checkpoint: bool = False,
+                 load_from_checkpoint: str = None,
                  checkpoint_suffix: str = "",
-                 checkpoint_id: str = None,
                  loss_fn=optax.l2_loss,
                  param_transforms: Callable = None,
                  wandb_config: Dict[str, Any] = None,
                  distributed_training: bool = None,
                  checkpoint_base_path: str = "./checkpoints",
-                 checkpoint_epoch: int = None,
+                 checkpoint_step: int = None,
+                 use_dynamic_scale: bool = False,
                  ):
         if distributed_training is None or distributed_training is True:
             # Auto-detect if we are running on multiple devices
             distributed_training = jax.device_count() > 1
             self.mesh = jax.sharding.Mesh(jax.devices(), 'data')
-            # self.sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec('data'))
+        else:
+            self.mesh = None
 
         self.distributed_training = distributed_training
         self.model = model
@@ -113,7 +110,6 @@ class SimpleTrainer:
         
         
         if wandb_config is not None and jax.process_index() == 0:
-            import wandb
             run = wandb.init(**wandb_config)
             self.wandb = run
             
@@ -127,11 +123,6 @@ class SimpleTrainer:
             self.wandb.define_metric("train/avg_time_per_step", step_metric="train/epoch")
             self.wandb.define_metric("train/avg_loss", step_metric="train/epoch")
             self.wandb.define_metric("train/best_loss", step_metric="train/epoch")
-
-        if checkpoint_id is None:
-            self.checkpoint_id = name.replace(' ', '_').replace('-', '_').lower()
-        else:
-            self.checkpoint_id = checkpoint_id
             
         # checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         async_checkpointer = orbax.checkpoint.AsyncCheckpointer(orbax.checkpoint.PyTreeCheckpointHandler(), timeout_secs=60)
@@ -141,12 +132,12 @@ class SimpleTrainer:
         self.checkpointer = orbax.checkpoint.CheckpointManager(
             self.checkpoint_path() + checkpoint_suffix, async_checkpointer, options)
 
-        if load_from_checkpoint:
-            latest_epoch, old_state, old_best_state, rngstate = self.load(checkpoint_epoch)
+        if load_from_checkpoint is not None:
+            latest_epoch, latest_step, old_state, old_best_state, rngstate = self.load(load_from_checkpoint, checkpoint_step)
         else:
-            latest_epoch, old_state, old_best_state, rngstate = 0, None, None, None
+            latest_epoch, latest_step, old_state, old_best_state, rngstate = 0, 0, None, None, None
 
-        self.latest_epoch = latest_epoch
+        self.latest_step = latest_step
         
         if rngstate:
             self.rngstate = RandomMarkovState(**rngstate)
@@ -157,7 +148,7 @@ class SimpleTrainer:
 
         if train_state == None:
             state, best_state = self.generate_states(
-                optimizer, subkey, old_state, old_best_state, model, param_transforms
+                optimizer, subkey, old_state, old_best_state, model, param_transforms, use_dynamic_scale
             )
             self.init_state(state, best_state)
         else:
@@ -175,7 +166,8 @@ class SimpleTrainer:
         existing_state: dict = None,
         existing_best_state: dict = None,
         model: nn.Module = None,
-        param_transforms: Callable = None
+        param_transforms: Callable = None,
+        use_dynamic_scale: bool = False
     ) -> Tuple[SimpleTrainState, SimpleTrainState]:
         print("Generating states for SimpleTrainer")
         rngs, subkey = jax.random.split(rngs)
@@ -190,7 +182,8 @@ class SimpleTrainer:
             apply_fn=model.apply,
             params=params,
             tx=optimizer,
-            metrics=Metrics.empty()
+            metrics=Metrics.empty(),
+            dynamic_scale = flax.training.dynamic_scale.DynamicScale() if use_dynamic_scale else None
         )
         if existing_best_state is not None:
             best_state = state.replace(
@@ -223,7 +216,7 @@ class SimpleTrainer:
         return jax.tree_util.tree_map(lambda x : np.array(x), self.rngstate)
 
     def checkpoint_path(self):
-        path = os.path.join(self.checkpoint_base_path, self.checkpoint_id)
+        path = os.path.join(self.checkpoint_base_path, self.name.replace(' ', '_').lower())
         if not os.path.exists(path):
             os.makedirs(path)
         return path
@@ -235,34 +228,46 @@ class SimpleTrainer:
             os.makedirs(path)
         return path
 
-    def load(self, checkpoint_epoch):
-        if checkpoint_epoch is not None:
-            epoch = checkpoint_epoch
+    def load(self, checkpoint_path=None, checkpoint_step=None):
+        if checkpoint_path is None:
+            checkpointer = self.checkpointer
         else:
-            epoch = self.checkpointer.latest_step()
-        print("Loading model from checkpoint", epoch)
-        ckpt = self.checkpointer.restore(epoch)
+            checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+            options = orbax.checkpoint.CheckpointManagerOptions(
+                max_to_keep=4, create=False)
+            checkpointer = orbax.checkpoint.CheckpointManager(
+                checkpoint_path, checkpointer, options)    
+        
+        if checkpoint_step is None:
+            step = checkpointer.latest_step()
+        else:
+            step = checkpoint_step
+        
+        print("Loading model from checkpoint at step ", step)
+        ckpt = checkpointer.restore(step)
         state = ckpt['state']
         best_state = ckpt['best_state']
         rngstate = ckpt['rngs']
         # Convert the state to a TrainState
         self.best_loss = ckpt['best_loss']
+        current_epoch = ckpt.get('epoch', step) # Must be a checkpoint from an older version which used epochs instead of steps
         print(
-            f"Loaded model from checkpoint at epoch {epoch}", ckpt['best_loss'])
-        return epoch + 1, state, best_state, rngstate
+            f"Loaded model from checkpoint at epoch {current_epoch} step {step}", ckpt['best_loss'])
+        return current_epoch, step, state, best_state, rngstate
 
-    def save(self, epoch=0):
-        print(f"Saving model at epoch {epoch}")
+    def save(self, epoch=0, step=0):
+        print(f"Saving model at epoch {epoch} step {step}")
         ckpt = {
             # 'model': self.model,
             'rngs': self.get_rngstate(),
             'state': self.get_state(),
             'best_state': self.get_best_state(),
             'best_loss': np.array(self.best_loss),
+            'epoch': epoch,
         }
         try:
             save_args = orbax_utils.save_args_from_target(ckpt)
-            self.checkpointer.save(epoch, ckpt, save_kwargs={
+            self.checkpointer.save(step, ckpt, save_kwargs={
                                    'save_args': save_args}, force=True)
             self.checkpointer.wait_until_finished()
             pass
@@ -354,9 +359,10 @@ class SimpleTrainer:
         else:
             global_device_indexes = 0
 
-        def train_loop(current_epoch, pbar: tqdm.tqdm, train_state, rng_state):
+        def train_loop(current_step, pbar: tqdm.tqdm, train_state, rng_state):
             epoch_loss = 0
-            current_step = 0
+            current_epoch = current_step // steps_per_epoch
+            last_save_time = time.time()
             for i in range(steps_per_epoch):
                 batch = next(train_ds)
                 if self.distributed_training and global_device_count > 1:
@@ -367,36 +373,46 @@ class SimpleTrainer:
                 if self.distributed_training:
                     loss = jax.experimental.multihost_utils.process_allgather(loss)
                     loss = jnp.mean(loss) # Just to make sure its a scaler value
+                    
+                if loss <= 1e-6:
+                    # If the loss is too low, we can assume the model has diverged
+                    print(colored(f"Loss too low at step {current_step} => {loss}", 'red'))
+                    # Exit the training loop
+                    exit(1)
                             
                 epoch_loss += loss
-                    
-                if pbar is not None:
-                    if i % 100 == 0:
+                current_step += 1
+                if i % 100 == 0:
+                    if pbar is not None:
                         pbar.set_postfix(loss=f'{loss:.4f}')
                         pbar.update(100)
-                        current_step = current_epoch*steps_per_epoch + i
                         if self.wandb is not None:
                             self.wandb.log({
                                 "train/step" : current_step,
                                 "train/loss": loss,
                             }, step=current_step)
+                    # Save the model every 40 minutes
+                    if time.time() - last_save_time > 40 * 60:
+                        print(f"Saving model after 40 minutes at step {current_step}")
+                        self.save(current_epoch, current_step)
+                        last_save_time = time.time()
             print(colored(f"Epoch done on index {process_index} => {current_epoch} Loss: {epoch_loss/steps_per_epoch}", 'green'))
             return epoch_loss, current_step, train_state, rng_state
 
-        while self.latest_epoch < epochs:
-            current_epoch = self.latest_epoch
-            self.latest_epoch += 1
+        while self.latest_step < epochs * steps_per_epoch:
+            current_epoch = self.latest_step // steps_per_epoch
             print(f"\nEpoch {current_epoch}/{epochs}")
             start_time = time.time()
             epoch_loss = 0
 
             if process_index == 0:
                 with tqdm.tqdm(total=steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step') as pbar:
-                    epoch_loss, current_step, train_state, rng_state = train_loop(current_epoch, pbar, train_state, rng_state)
+                    epoch_loss, current_step, train_state, rng_state = train_loop(self.latest_step, pbar, train_state, rng_state)
             else:
-                epoch_loss, current_step, train_state, rng_state = train_loop(current_epoch, None, train_state, rng_state)
-                print(colored(f"Epoch done on process index {process_index}", PROCESS_COLOR_MAP.get(process_index, 'white')))
-                
+                epoch_loss, current_step, train_state, rng_state = train_loop(self.latest_step, None, train_state, rng_state)
+                print(colored(f"Epoch done on process index {process_index}", PROCESS_COLOR_MAP[process_index]))
+            
+            self.latest_step = current_step
             end_time = time.time()
             self.state = train_state
             self.rngstate = rng_state
@@ -406,7 +422,7 @@ class SimpleTrainer:
             if avg_loss < self.best_loss:
                 self.best_loss = avg_loss
                 self.best_state = train_state
-                self.save(current_epoch)
+                self.save(current_epoch, current_step)
                 
             if process_index == 0:
                 if self.wandb is not None:

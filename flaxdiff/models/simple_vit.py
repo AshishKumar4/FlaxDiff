@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from typing import Callable, Any
-from .simply_unet import FourierEmbedding, TimeProjection, ConvLayer, kernel_init
+from .simple_unet import FourierEmbedding, TimeProjection, ConvLayer, kernel_init
 from .attention import TransformerBlock
 
 class PatchEmbedding(nn.Module):
@@ -40,22 +40,23 @@ class PositionalEncoding(nn.Module):
 class TransformerEncoder(nn.Module):
     num_layers: int
     num_heads: int
-    mlp_dim: int
     dropout_rate: float = 0.1
     dtype: Any = jnp.float32
     precision: Any = jax.lax.Precision.HIGH
+    use_projection: bool = False
 
     @nn.compact
-    def __call__(self, x, training=True):
+    def __call__(self, x, context=None):
         for _ in range(self.num_layers):
             x = TransformerBlock(
                 heads=self.num_heads,
                 dim_head=x.shape[-1] // self.num_heads,
-                mlp_dim=self.mlp_dim,
                 dropout_rate=self.dropout_rate,
                 dtype=self.dtype,
-                precision=self.precision
-            )(x)
+                precision=self.precision,
+                use_self_and_cross=True,
+                use_projection=self.use_projection,
+            )(x, context)
         return x
 
 class VisionTransformer(nn.Module):
@@ -63,11 +64,11 @@ class VisionTransformer(nn.Module):
     embedding_dim: int = 768
     num_layers: int = 12
     num_heads: int = 12
-    mlp_dim: int = 3072
     emb_features: int = 256
     dropout_rate: float = 0.1
     dtype: Any = jnp.float32
     precision: Any = jax.lax.Precision.HIGH
+    use_projection: bool = False
 
     @nn.compact
     def __call__(self, x, temb, textcontext=None):
@@ -81,27 +82,23 @@ class VisionTransformer(nn.Module):
         
         # Add positional encoding
         x = PositionalEncoding(max_len=x.shape[1], embedding_dim=self.embedding_dim)(x)
+        
+        num_patches = x.shape[1]
 
         # Add time embedding
         temb = jnp.expand_dims(temb, axis=1)
         x = jnp.concatenate([x, temb], axis=1)
 
-        # Add text context
-        if textcontext is not None:
-            x = jnp.concatenate([x, textcontext], axis=1)
-
         # Transformer encoder
         x = TransformerEncoder(
             num_layers=self.num_layers,
             num_heads=self.num_heads,
-            mlp_dim=self.mlp_dim,
             dropout_rate=self.dropout_rate,
             dtype=self.dtype,
-            precision=self.precision
-        )(x)
+            precision=self.precision,
+            use_projection=self.use_projection
+        )(x, textcontext)
 
-        # Extract the image tokens (exclude time and text embeddings)
-        num_patches = (x.shape[1] - 1 - (0 if textcontext is None else textcontext.shape[1]))
         x = x[:, :num_patches, :]
 
         # Reshape to image dimensions

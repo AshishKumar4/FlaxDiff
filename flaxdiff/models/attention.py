@@ -156,7 +156,9 @@ class NormalAttention(nn.Module):
         value = self.value(context)
         
         hidden_states = nn.dot_product_attention(
-            query, key, value, dtype=self.dtype, broadcast_dropout=False, dropout_rng=None, precision=self.precision
+            query, key, value, dtype=self.dtype, broadcast_dropout=False, 
+            dropout_rng=None, precision=self.precision, force_fp32_for_softmax=True,
+            deterministic=True
         )
         proj = self.proj_attn(hidden_states)
         proj = proj.reshape(orig_x_shape)
@@ -187,7 +189,7 @@ class FlaxGEGLU(nn.Module):
 
     def __call__(self, hidden_states):
         hidden_states = self.proj(hidden_states)
-        hidden_linear, hidden_gelu = jnp.split(hidden_states, 2, axis=3)
+        hidden_linear, hidden_gelu = jnp.split(hidden_states, 2, axis=-1)
         return hidden_linear * nn.gelu(hidden_gelu)
     
 class FlaxFeedForward(nn.Module):
@@ -291,14 +293,14 @@ class TransformerBlock(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     use_projection: bool = False
-    use_flash_attention:bool = True
-    use_self_and_cross:bool = False
+    use_flash_attention:bool = False
+    use_self_and_cross:bool = True
     only_pure_attention:bool = False
 
     @nn.compact
     def __call__(self, x, context=None):
         inner_dim = self.heads * self.dim_head
-        B, H, W, C = x.shape
+        C = x.shape[-1]
         normed_x = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)(x)
         if self.use_projection == True:
             if self.use_linear_attention:
