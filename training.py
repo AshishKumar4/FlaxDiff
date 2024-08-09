@@ -173,6 +173,10 @@ def labelizer_oxford_flowers102(path):
 
 def tfds_augmenters(image_scale, method):
     labelizer = labelizer_oxford_flowers102("/home/mrwhite0racle/tensorflow_datasets/oxford_flowers102/2.1.1/label.labels.txt")
+    if image_scale > 256:
+        interpolation = cv2.INTER_CUBIC
+    else:
+        interpolation = cv2.INTER_AREA
     class augmenters(pygrain.MapTransform):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
@@ -181,7 +185,7 @@ def tfds_augmenters(image_scale, method):
         def map(self, element) -> Dict[str, jnp.array]:
             image = element['image']
             image = cv2.resize(image, (image_scale, image_scale),
-                            interpolation=cv2.INTER_AREA)
+                            interpolation=interpolation)
             # image = (image - 127.5) / 127.5
             caption = labelizer(element)
             results = self.caption_processor(caption)
@@ -205,29 +209,8 @@ def data_source_gcs(source='arrayrecord/laion-aesthetics-12m+mscoco-2017'):
         return ds
     return data_source
 
-def data_source_combined_aesthetics_gcs(
-    sources=[
-        'arrayrecord2/laion-aesthetics-12m+mscoco-2017',
-        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
-        'arrayrecord/cc12m',
-        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
-    ]):
-    def data_source(base="/home/mrwhite0racle/gcs_mount"):
-        records_paths = [os.path.join(base, source) for source in sources]
-        records = []
-        for records_path in records_paths:
-            records += [os.path.join(records_path, i) for i in os.listdir(
-                records_path) if 'array_record' in i]
-        ds = pygrain.ArrayRecordDataSource(records)
-        return ds
-    return data_source
-
-def data_source_laiona_coco_coyo_gcs(
-    sources=[
-        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
-        'arrayrecord2/laion-aesthetics-12m+mscoco-2017',
-        'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
-    ]):
+def data_source_combined_gcs(
+    sources=[]):
     def data_source(base="/home/mrwhite0racle/gcs_mount"):
         records_paths = [os.path.join(base, source) for source in sources]
         records = []
@@ -291,7 +274,7 @@ datasetMap = {
         "augmenter": tfds_augmenters,
     },
     "cc12m": {
-        "source": data_source_gcs('arrayrecord/cc12m'),
+        "source": data_source_gcs('arrayrecord2/cc12m'),
         "augmenter": gcs_augmenters,
     },
     "laiona_coco": {
@@ -303,11 +286,28 @@ datasetMap = {
         "augmenter": gcs_augmenters,
     },
     "combined_aesthetic": {
-        "source": data_source_combined_aesthetics_gcs(),
+        "source": data_source_combined_gcs([
+                'arrayrecord2/laion-aesthetics-12m+mscoco-2017',
+                'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+                'arrayrecord2/cc12m',
+                'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+            ]),
         "augmenter": gcs_augmenters,
     },
     "laiona_coco_coyo": {
-        "source": data_source_laiona_coco_coyo_gcs(),
+        "source": data_source_combined_gcs([
+                'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+                'arrayrecord2/laion-aesthetics-12m+mscoco-2017',
+                'arrayrecords/aestheticCoyo_0.25clip_6aesthetic',
+            ]),
+        "augmenter": gcs_augmenters,
+    },
+    "combined_30m": {
+        "source": data_source_combined_gcs([
+                'arrayrecord2/laion-aesthetics-12m+mscoco-2017',
+                'arrayrecord2/cc12m',
+                'arrayrecord2/aestheticCoyo_0.26_clip_5.5aesthetic_256plus',
+            ]),
         "augmenter": gcs_augmenters,
     }
 }
@@ -326,7 +326,7 @@ def get_dataset_grain(
     grain_read_buffer_size=50,
     grain_worker_buffer_size=20,
     seed=0,
-    dataset_source="/mnt/gcs_mount/arrayrecord/cc12m/",
+    dataset_source="/mnt/gcs_mount/arrayrecord2/cc12m/",
 ):
     dataset = datasetMap[data_name]
     data_source = dataset["source"](dataset_source)
@@ -704,12 +704,11 @@ class SimpleTrainer:
             global_device_indexes = jnp.arange(global_device_count)
         else:
             global_device_indexes = 0
-            
-        last_save_time = time.time()
 
         def train_loop(current_step, pbar: tqdm.tqdm, train_state, rng_state):
             epoch_loss = 0
             current_epoch = current_step // steps_per_epoch
+            last_save_time = time.time()
             for i in range(steps_per_epoch):
                 batch = next(train_ds)
                 if self.distributed_training and global_device_count > 1:
@@ -720,11 +719,17 @@ class SimpleTrainer:
                 if self.distributed_training:
                     loss = jax.experimental.multihost_utils.process_allgather(loss)
                     loss = jnp.mean(loss) # Just to make sure its a scaler value
+                    
+                if loss <= 1e-6:
+                    # If the loss is too low, we can assume the model has diverged
+                    print(colored(f"Loss too low at step {current_step} => {loss}", 'red'))
+                    # Exit the training loop
+                    exit(1)
                             
                 epoch_loss += loss
                 current_step += 1
-                if pbar is not None:
-                    if i % 100 == 0:
+                if i % 100 == 0:
+                    if pbar is not None:
                         pbar.set_postfix(loss=f'{loss:.4f}')
                         pbar.update(100)
                         if self.wandb is not None:
@@ -748,9 +753,9 @@ class SimpleTrainer:
 
             if process_index == 0:
                 with tqdm.tqdm(total=steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step') as pbar:
-                    epoch_loss, current_step, train_state, rng_state = train_loop(current_step, pbar, train_state, rng_state)
+                    epoch_loss, current_step, train_state, rng_state = train_loop(self.latest_step, pbar, train_state, rng_state)
             else:
-                epoch_loss, current_step, train_state, rng_state = train_loop(current_step, None, train_state, rng_state)
+                epoch_loss, current_step, train_state, rng_state = train_loop(self.latest_step, None, train_state, rng_state)
                 print(colored(f"Epoch done on process index {process_index}", PROCESS_COLOR_MAP[process_index]))
             
             self.latest_step = current_step
@@ -1268,27 +1273,60 @@ if __name__ == '__main__':
     main(args)
 
 """
+New -->
 
-python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+for tpu-v4-32
+
+python3 training.py --dataset=combined_30m --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
             --epochs=40 --batch_size=256 --image_size=128 \
-            --learning_rate=1e-4 --num_res_blocks=3 \
+            --learning_rate=9e-5 --num_res_blocks=3 --emb_features 512 \
+            --use_self_and_cross=False --precision=default --dtype=bfloat16 --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_NEW_combined_30m_1'\
+            --optimizer=adamw --feature_depths 128 256 512 512 --use_dynamic_scale=True \
+             --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-128/batch-256-v4-32_flaxdiff-0-1-8__new-combined_1'
+
+for tpu-v4-16
+
+python3 training.py --dataset=combined_30m --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=128 --image_size=512 \
+            --learning_rate=8e-5 --num_res_blocks=3 \
             --use_self_and_cross=False --precision=default --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_flaxdiff-0-1-8__3'\
-            --optimizer=adamw --feature_depths 128 256 512 512
-            
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-16_flaxdiff-0-1-8__combined_30m_ldm_1'\
+            --learning_rate_schedule=cosine --learning_rate_peak=1e-4 --learning_rate_end=4e-5 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=1\
+            --optimizer=adamw  --autoencoder=stable_diffusion --use_dynamic_scale=True\
+            --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-512/batch-128-v4-16_flaxdiff-0-1-8_new-combined_ldm_1'
+
+----------------------------------------------------------------------------------------------------------------------------
+Old -->
+
 for tpu-v4-64
 
 python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
             --epochs=40 --batch_size=512 --image_size=512 \
-            --learning_rate=2e-5 --num_res_blocks=4 \
+            --learning_rate=9e-6 --num_res_blocks=4 \
             --use_self_and_cross=False --dtype=bfloat16 --precision=default --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_flaxdiff-0-1-8_ldm_dyn_scale_1'\
-            --optimizer=adamw --learning_rate_peak=5e-5 --learning_rate_end=9e-6 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=1\
-            --learning_rate_schedule=cosine --autoencoder=stable_diffusion --use_dynamic_scale=True --feature_depths 128 256 512 512\
-            --emb_features 512
-            
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_flaxdiff-0-1-8_ldm_dyn_scale__new-combined_1'\
+            --learning_rate_schedule=cosine --learning_rate_peak=4e-5 --learning_rate_end=9e-6 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=2\
+            --optimizer=adamw --autoencoder=stable_diffusion --use_dynamic_scale=True --feature_depths 128 256 512 512\
+            --emb_features 512 --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-512/batch-512-v4-64_flaxdiff-0-1-8_ldm_dyn_scale_1'
+
+
+            --learning_rate_schedule=cosine --learning_rate_peak=4e-5 --learning_rate_end=9e-6 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=2\
+
+for tpu-v4-32
+
+python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=256 --image_size=128 \
+            --learning_rate=8e-5 --num_res_blocks=3 \
+            --use_self_and_cross=False --precision=default --dtype=bfloat16 --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_flaxdiff-0-1-8__new-combined_1'\
+            --optimizer=adamw --feature_depths 128 256 512 512 --use_dynamic_scale=True\
+            --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-128/batch-256-v4-32_flaxdiff-0-1-8__3'
+
 for tpu-v4-16
 
 python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
@@ -1296,7 +1334,8 @@ python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0r
             --epochs=40 --batch_size=128 --image_size=512 \
             --learning_rate=8e-5 --num_res_blocks=3 \
             --use_self_and_cross=False --precision=default --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-16_flaxdiff-0-1-8__ldm_1'\
-            --optimizer=adamw --learning_rate_peak=1e-4 --learning_rate_end=4e-5 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=1\
-            --learning_rate_schedule=cosine --autoencoder=stable_diffusion
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-16_flaxdiff-0-1-8_new-combined_ldm_1'\
+            --learning_rate_schedule=cosine --learning_rate_peak=1e-4 --learning_rate_end=4e-5 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=1\
+            --optimizer=adamw  --autoencoder=stable_diffusion --use_dynamic_scale=True\
+            --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-512/batch-128-v4-16_flaxdiff-0-1-8__ldm_1'
 """

@@ -29,6 +29,8 @@ class TrainState(SimpleTrainState):
         )
         return self.replace(ema_params=new_ema_params)
 
+from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
+
 class DiffusionTrainer(SimpleTrainer):
     noise_schedule: NoiseScheduler
     model_output_transform: DiffusionPredictionTransform
@@ -40,7 +42,7 @@ class DiffusionTrainer(SimpleTrainer):
                  optimizer: optax.GradientTransformation,
                  noise_schedule: NoiseScheduler,
                  rngs: jax.random.PRNGKey,
-                 unconditional_prob: float = 0.2,
+                 unconditional_prob: float = 0.12,
                  name: str = "Diffusion",
                  model_output_transform: DiffusionPredictionTransform = EpsilonPredictionTransform(),
                  autoencoder: AutoEncoder = None,
@@ -67,7 +69,8 @@ class DiffusionTrainer(SimpleTrainer):
         existing_state: dict = None,
         existing_best_state: dict = None,
         model: nn.Module = None,
-        param_transforms: Callable = None
+        param_transforms: Callable = None,
+        use_dynamic_scale: bool = False
     ) -> Tuple[TrainState, TrainState]:
         print("Generating states for DiffusionTrainer")
         rngs, subkey = jax.random.split(rngs)
@@ -88,7 +91,8 @@ class DiffusionTrainer(SimpleTrainer):
             ema_params=new_state['ema_params'],
             tx=optimizer,
             rngs=rngs,
-            metrics=Metrics.empty()
+            metrics=Metrics.empty(),
+            dynamic_scale = flax.training.dynamic_scale.DynamicScale() if use_dynamic_scale else None
         )
             
         if existing_best_state is not None:
@@ -125,14 +129,14 @@ class DiffusionTrainer(SimpleTrainer):
             local_rng_state = RandomMarkovState(subkey)
             
             images = batch['image']
-            images = jnp.array(images, dtype=jnp.bfloat16)
+            images = jnp.array(images, dtype=jnp.float32)
             # normalize image
             images = (images - 127.5) / 127.5
             
             if autoencoder is not None:
                 # Convert the images to latent space
-                # local_rng_state, rngs = local_rng_state.get_random_key()
-                images = autoencoder.encode(images)#, rngs)
+                local_rng_state, rngs = local_rng_state.get_random_key()
+                images = autoencoder.encode(images, rngs)
 
             output = text_embedder(
                 input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
@@ -163,12 +167,39 @@ class DiffusionTrainer(SimpleTrainer):
                 loss = nloss
                 return loss
             
-            loss, grads = jax.value_and_grad(model_loss)(train_state.params)
+            
+            if train_state.dynamic_scale is not None:
+                # dynamic scale takes care of averaging gradients across replicas
+                grad_fn = train_state.dynamic_scale.value_and_grad(
+                    model_loss, axis_name="data"
+                )
+                dynamic_scale, is_fin, loss, grads = grad_fn(train_state.params)
+                train_state = train_state.replace(dynamic_scale=dynamic_scale)
+            else:
+                grad_fn = jax.value_and_grad(model_loss)
+                loss, grads = grad_fn(train_state.params)
+                if distributed_training:
+                    grads = jax.lax.pmean(grads, "data")
+            
+            new_state = train_state.apply_gradients(grads=grads)
+            
+            if train_state.dynamic_scale:
+                # if is_fin == False the gradients contain Inf/NaNs and optimizer state and
+                # params should be restored (= skip this step).
+                select_fn = functools.partial(jnp.where, is_fin)
+                new_state = train_state.replace(
+                    opt_state=jax.tree_util.tree_map(
+                        select_fn, new_state.opt_state, train_state.opt_state
+                    ),
+                    params=jax.tree_util.tree_map(
+                        select_fn, new_state.params, train_state.params
+                    ),
+                )
+    
+            train_state = new_state.apply_ema(self.ema_decay)
+            
             if distributed_training:
-                grads = jax.lax.pmean(grads, "data")
                 loss = jax.lax.pmean(loss, "data")
-            train_state = train_state.apply_gradients(grads=grads)
-            train_state = train_state.apply_ema(self.ema_decay)
             return train_state, loss, rng_state
 
         if distributed_training:
