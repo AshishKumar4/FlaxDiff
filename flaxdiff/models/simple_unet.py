@@ -6,6 +6,7 @@ from typing import Dict, Callable, Sequence, Any, Union, Optional
 import einops
 from .common import kernel_init, ConvLayer, Downsample, Upsample, FourierEmbedding, TimeProjection, ResidualBlock
 from .attention import TransformerBlock
+from functools import partial
 
 class Unet(nn.Module):
     output_channels:int=3
@@ -19,6 +20,15 @@ class Unet(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
 
+    def setup(self):
+        if self.norm_groups > 0:
+            norm = partial(nn.GroupNorm, self.norm_groups)
+        else:
+            norm = partial(nn.RMSNorm, 1e-5)
+        
+        # self.last_up_norm = norm()
+        self.conv_out_norm = norm()
+        
     @nn.compact
     def __call__(self, x, temb, textcontext):
         # print("embedding features", self.emb_features)
@@ -69,7 +79,7 @@ class Unet(nn.Module):
                                         use_projection=attention_config.get("use_projection", False),
                                         use_self_and_cross=attention_config.get("use_self_and_cross", True),
                                         precision=attention_config.get("precision", self.precision),
-                                        only_pure_attention=True,
+                                        only_pure_attention=attention_config.get("only_pure_attention", True),
                                         name=f"down_{i}_attention_{j}")(x, textcontext)
                 # print("down residual for feature level", i, "is of shape", x.shape, "features", dim_in)
                 downs.append(x)
@@ -107,8 +117,8 @@ class Unet(nn.Module):
                                     use_linear_attention=False,
                                     use_projection=middle_attention.get("use_projection", False),
                                     use_self_and_cross=False,
-                                    precision=attention_config.get("precision", self.precision),
-                                    only_pure_attention=True,
+                                    precision=middle_attention.get("precision", self.precision),
+                                    only_pure_attention=middle_attention.get("only_pure_attention", True),
                                     name=f"middle_attention_{j}")(x, textcontext)
             x = ResidualBlock(
                 middle_conv_type,
@@ -150,7 +160,7 @@ class Unet(nn.Module):
                                         use_projection=attention_config.get("use_projection", False),
                                         use_self_and_cross=attention_config.get("use_self_and_cross", True),
                                         precision=attention_config.get("precision", self.precision),
-                                        only_pure_attention=True,
+                                        only_pure_attention=attention_config.get("only_pure_attention", True),
                                         name=f"up_{i}_attention_{j}")(x, textcontext)
             # print("Upscaling ", i, x.shape)
             if i != len(feature_depths) - 1:
@@ -163,13 +173,13 @@ class Unet(nn.Module):
                     precision=self.precision
                 )(x)
 
-        # x = nn.GroupNorm(8)(x)
+        # x = self.last_up_norm(x)
         x = ConvLayer(
             conv_type,
             features=self.feature_depths[0],
             kernel_size=(3, 3),
             strides=(1, 1),
-            kernel_init=kernel_init(0.0),
+            kernel_init=kernel_init(1.0),
             dtype=self.dtype,
             precision=self.precision
         )(x)
@@ -189,7 +199,7 @@ class Unet(nn.Module):
             precision=self.precision
         )(x, temb)
 
-        x = nn.GroupNorm(self.norm_groups)(x)
+        x = self.conv_out_norm(x)
         x = self.activation(x)
 
         noise_out = ConvLayer(
