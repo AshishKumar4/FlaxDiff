@@ -22,7 +22,7 @@ from jax.experimental.shard_map import shard_map
 from orbax.checkpoint.utils import fully_replicated_host_local_array_to_global_array
 from termcolor import colored
 from typing import Dict, Callable, Sequence, Any, Union, Tuple
-
+from flax.training.dynamic_scale import DynamicScale
 from flaxdiff.utils import RandomMarkovState
 
 PROCESS_COLOR_MAP = {
@@ -68,7 +68,7 @@ class Metrics(metrics.Collection):
 # Define the TrainState
 class SimpleTrainState(train_state.TrainState):
     metrics: Metrics
-    dynamic_scale: flax.training.dynamic_scale.DynamicScale
+    dynamic_scale: DynamicScale
 
 class SimpleTrainer:
     state: SimpleTrainState
@@ -177,13 +177,16 @@ class SimpleTrainer:
             params = model.init(subkey, **input_vars)
         else:
             params = existing_state['params']
+            
+        if param_transforms is not None:
+            params = param_transforms(params)
 
         state = SimpleTrainState.create(
             apply_fn=model.apply,
             params=params,
             tx=optimizer,
             metrics=Metrics.empty(),
-            dynamic_scale = flax.training.dynamic_scale.DynamicScale() if use_dynamic_scale else None
+            dynamic_scale = DynamicScale() if use_dynamic_scale else None
         )
         if existing_best_state is not None:
             best_state = state.replace(
