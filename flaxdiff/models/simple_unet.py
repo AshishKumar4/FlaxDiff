@@ -20,6 +20,7 @@ class Unet(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     named_norms: bool = False # This is for backward compatibility reasons; older checkpoints have named norms
+    kernel_init: Callable = partial(kernel_init, dtype=jnp.float32)
 
     def setup(self):
         if self.norm_groups > 0:
@@ -49,7 +50,7 @@ class Unet(nn.Module):
             features=self.feature_depths[0],
             kernel_size=(3, 3),
             strides=(1, 1),
-            kernel_init=kernel_init(1.0),
+            kernel_init=self.kernel_init(1.0),
             dtype=self.dtype,
             precision=self.precision
         )(x)
@@ -64,7 +65,7 @@ class Unet(nn.Module):
                     down_conv_type,
                     name=f"down_{i}_residual_{j}",
                     features=dim_in,
-                    kernel_init=kernel_init(1.0),
+                    kernel_init=self.kernel_init(1.0),
                     kernel_size=(3, 3),
                     strides=(1, 1),
                     activation=self.activation,
@@ -81,6 +82,8 @@ class Unet(nn.Module):
                                         use_self_and_cross=attention_config.get("use_self_and_cross", True),
                                         precision=attention_config.get("precision", self.precision),
                                         only_pure_attention=attention_config.get("only_pure_attention", True),
+                                        force_fp32_for_softmax=attention_config.get("force_fp32_for_softmax", False),
+                                        kernel_init=self.kernel_init(1.0),
                                         name=f"down_{i}_attention_{j}")(x, textcontext)
                 # print("down residual for feature level", i, "is of shape", x.shape, "features", dim_in)
                 downs.append(x)
@@ -103,7 +106,7 @@ class Unet(nn.Module):
                 middle_conv_type,
                 name=f"middle_res1_{j}",
                 features=middle_dim_out,
-                kernel_init=kernel_init(1.0),
+                kernel_init=self.kernel_init(1.0),
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 activation=self.activation,
@@ -121,12 +124,14 @@ class Unet(nn.Module):
                                     use_self_and_cross=False,
                                     precision=middle_attention.get("precision", self.precision),
                                     only_pure_attention=middle_attention.get("only_pure_attention", True),
+                                    force_fp32_for_softmax=middle_attention.get("force_fp32_for_softmax", False),
+                                    kernel_init=self.kernel_init(1.0),
                                     name=f"middle_attention_{j}")(x, textcontext)
             x = ResidualBlock(
                 middle_conv_type,
                 name=f"middle_res2_{j}",
                 features=middle_dim_out,
-                kernel_init=kernel_init(1.0),
+                kernel_init=self.kernel_init(1.0),
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 activation=self.activation,
@@ -148,7 +153,7 @@ class Unet(nn.Module):
                     up_conv_type,# if j == 0 else "separable",
                     name=f"up_{i}_residual_{j}",
                     features=dim_out,
-                    kernel_init=kernel_init(1.0),
+                    kernel_init=self.kernel_init(1.0),
                     kernel_size=kernel_size,
                     strides=(1, 1),
                     activation=self.activation,
@@ -165,6 +170,8 @@ class Unet(nn.Module):
                                         use_self_and_cross=attention_config.get("use_self_and_cross", True),
                                         precision=attention_config.get("precision", self.precision),
                                         only_pure_attention=attention_config.get("only_pure_attention", True),
+                                        force_fp32_for_softmax=middle_attention.get("force_fp32_for_softmax", False),
+                                        kernel_init=self.kernel_init(1.0),
                                         name=f"up_{i}_attention_{j}")(x, textcontext)
             # print("Upscaling ", i, x.shape)
             if i != len(feature_depths) - 1:
@@ -183,7 +190,7 @@ class Unet(nn.Module):
             features=self.feature_depths[0],
             kernel_size=(3, 3),
             strides=(1, 1),
-            kernel_init=kernel_init(1.0),
+            kernel_init=self.kernel_init(1.0),
             dtype=self.dtype,
             precision=self.precision
         )(x)
@@ -194,7 +201,7 @@ class Unet(nn.Module):
             conv_type,
             name="final_residual",
             features=self.feature_depths[0],
-            kernel_init=kernel_init(1.0),
+            kernel_init=self.kernel_init(1.0),
             kernel_size=(3,3),
             strides=(1, 1),
             activation=self.activation,
@@ -213,7 +220,7 @@ class Unet(nn.Module):
             kernel_size=(3, 3),
             strides=(1, 1),
             # activation=jax.nn.mish
-            kernel_init=kernel_init(0.0),
+            kernel_init=self.kernel_init(0.0),
             dtype=self.dtype,
             precision=self.precision
         )(x)
