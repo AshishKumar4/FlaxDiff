@@ -5,6 +5,7 @@ from typing import Optional, Any, Callable, Sequence, Union
 from flax.typing import Dtype, PrecisionLike
 from typing import Dict, Callable, Sequence, Any, Union
 import einops
+from functools import partial
 
 # Kernel initializer to use
 def kernel_init(scale, dtype=jnp.float32):
@@ -266,11 +267,20 @@ class ResidualBlock(nn.Module):
     kernel_init:Callable=kernel_init(1.0)
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
+    
+    def setup(self):
+        if self.norm_groups > 0:
+            norm = partial(nn.GroupNorm, self.norm_groups)
+        else:
+            norm = partial(nn.RMSNorm, 1e-5)
+        
+        self.norm1 = norm()
+        self.norm2 = norm()
 
     @nn.compact
     def __call__(self, x:jax.Array, temb:jax.Array, textemb:jax.Array=None, extra_features:jax.Array=None):
         residual = x
-        out = nn.GroupNorm(self.norm_groups)(x)
+        out = self.norm1(x)
         # out = nn.RMSNorm()(x)
         out = self.activation(out)
 
@@ -295,7 +305,7 @@ class ResidualBlock(nn.Module):
         # out = out * (1 + scale) + shift
         out = out + temb
 
-        out = nn.GroupNorm(self.norm_groups)(out)
+        out = self.norm2(out)
         # out = nn.RMSNorm()(out)
         out = self.activation(out)
 
