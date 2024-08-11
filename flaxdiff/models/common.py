@@ -267,15 +267,17 @@ class ResidualBlock(nn.Module):
     kernel_init:Callable=kernel_init(1.0)
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
+    named_norms:bool=False
     
     def setup(self):
         if self.norm_groups > 0:
             norm = partial(nn.GroupNorm, self.norm_groups)
+            self.norm1 = norm(name="GroupNorm_0") if self.named_norms else norm()
+            self.norm2 = norm(name="GroupNorm_1") if self.named_norms else norm()
         else:
             norm = partial(nn.RMSNorm, 1e-5)
-        
-        self.norm1 = norm()
-        self.norm2 = norm()
+            self.norm1 = norm()
+            self.norm2 = norm()
 
     @nn.compact
     def __call__(self, x:jax.Array, temb:jax.Array, textemb:jax.Array=None, extra_features:jax.Array=None):

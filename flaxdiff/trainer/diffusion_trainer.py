@@ -16,6 +16,7 @@ from flaxdiff.utils import RandomMarkovState
 from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics
 
 from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
+from flax.training.dynamic_scale import DynamicScale
 
 class TrainState(SimpleTrainState):
     rngs: jax.random.PRNGKey
@@ -83,7 +84,8 @@ class DiffusionTrainer(SimpleTrainer):
             new_state = existing_state
 
         if param_transforms is not None:
-            params = param_transforms(params)
+            new_state['params'] = param_transforms(new_state['params'])
+            new_state['ema_params'] = param_transforms(new_state['ema_params'])
 
         state = TrainState.create(
             apply_fn=model.apply,
@@ -92,7 +94,7 @@ class DiffusionTrainer(SimpleTrainer):
             tx=optimizer,
             rngs=rngs,
             metrics=Metrics.empty(),
-            dynamic_scale = flax.training.dynamic_scale.DynamicScale() if use_dynamic_scale else None
+            dynamic_scale = DynamicScale() if use_dynamic_scale else None
         )
             
         if existing_best_state is not None:
