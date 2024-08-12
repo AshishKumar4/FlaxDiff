@@ -79,7 +79,9 @@ def map_sample(
         data_queue.put({
             "url": url,
             "caption": caption,
-            "image": image
+            "image": image,
+            "original_height": original_height,
+            "original_width": original_width,
         })
     except Exception as e:
         error_queue.put({
