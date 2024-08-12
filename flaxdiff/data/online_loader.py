@@ -27,7 +27,6 @@ USER_AGENT = get_datasets_user_agent()
 data_queue = Queue(16*2000)
 error_queue = Queue(16*2000)
 
-
 def fetch_single_image(image_url, timeout=None, retries=0):
     for _ in range(retries + 1):
         try:
@@ -46,11 +45,13 @@ def fetch_single_image(image_url, timeout=None, retries=0):
 def map_sample(
     url, caption, 
     image_shape=(256, 256),
+    timeout=15,
+    retries=3,
     upscale_interpolation=cv2.INTER_LANCZOS4,
     downscale_interpolation=cv2.INTER_AREA,
 ):
     try:
-        image = fetch_single_image(url, timeout=15, retries=3)  # Assuming fetch_single_image is defined elsewhere
+        image = fetch_single_image(url, timeout=timeout, retries=retries)  # Assuming fetch_single_image is defined elsewhere
         if image is None:
             return
         
@@ -84,15 +85,24 @@ def map_sample(
             "original_width": original_width,
         })
     except Exception as e:
+        print(f"Error in map_sample: {str(e)}")
         error_queue.put({
             "url": url,
             "caption": caption,
             "error": str(e)
         })
-        
-def map_batch(batch, num_threads=256, image_shape=(256, 256), timeout=None, retries=0):
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        executor.map(map_sample, batch["url"], batch['caption'], image_shape=image_shape, timeout=timeout, retries=retries)
+
+def map_batch(batch, num_threads=256, image_shape=(256, 256), timeout=15, retries=3):
+    try:
+        map_sample_fn = partial(map_sample, image_shape=image_shape, timeout=timeout, retries=retries)
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            executor.map(map_sample_fn, batch["url"], batch['caption'])
+    except Exception as e:
+        print(f"Error in map_batch: {str(e)}")
+        error_queue.put({
+            "batch": batch,
+            "error": str(e)
+        })
     
 def parallel_image_loader(dataset: Dataset, num_workers: int = 8, image_shape=(256, 256), num_threads=256):
     map_batch_fn = partial(map_batch, num_threads=num_threads, image_shape=image_shape)
@@ -102,8 +112,10 @@ def parallel_image_loader(dataset: Dataset, num_workers: int = 8, image_shape=(2
         iteration = 0
         while True:
             # Repeat forever
-            dataset = dataset.shuffle(seed=iteration)
+            print(f"Shuffling dataset with seed {iteration}")
+            # dataset = dataset.shuffle(seed=iteration)
             shards = [dataset[i*shard_len:(i+1)*shard_len] for i in range(num_workers)]
+            print(f"mapping {len(shards)} shards")
             pool.map(map_batch_fn, shards)
             iteration += 1
             
@@ -205,4 +217,3 @@ class OnlineStreamingDataLoader():
         
     def __len__(self):
         return len(self.dataset)
-    
