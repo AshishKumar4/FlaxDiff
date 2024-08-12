@@ -155,6 +155,7 @@ class OnlineStreamingDataLoader():
         self, 
         dataset, 
         batch_size=64, 
+        image_shape=(256, 256),
         num_workers=16, 
         num_threads=512,
         default_split="all",
@@ -182,7 +183,7 @@ class OnlineStreamingDataLoader():
         dataset = dataset.map(pre_map_maker(pre_map_def))
         self.dataset = dataset.shard(num_shards=global_process_count, index=global_process_index)
         print(f"Dataset length: {len(dataset)}")
-        self.iterator = ImageBatchIterator(self.dataset, num_workers=num_workers, batch_size=batch_size, num_threads=num_threads)
+        self.iterator = ImageBatchIterator(self.dataset, image_shape=image_shape, num_workers=num_workers, batch_size=batch_size, num_threads=num_threads)
         self.collate_fn = collate_fn
         
         # Launch a thread to load batches in the background
