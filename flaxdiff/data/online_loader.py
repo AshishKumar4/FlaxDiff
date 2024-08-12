@@ -113,7 +113,7 @@ class ImageBatchIterator:
         self.num_workers = num_workers
         self.batch_size = batch_size
         loader = partial(parallel_image_loader, num_threads=num_threads, image_shape=image_shape, num_workers=num_workers)
-        self.thread = threading.Thread(target=loader, args=(dataset))
+        self.thread = threading.Thread(target=loader, args=(dataset,))
         self.thread.start()
         
     def __iter__(self):
@@ -131,7 +131,7 @@ class ImageBatchIterator:
         
     def __len__(self):
         return len(self.dataset) // self.batch_size
-    
+
 def default_collate(batch):
     urls = [sample["url"] for sample in batch]
     captions = [sample["caption"] for sample in batch]
@@ -177,14 +177,14 @@ class OnlineStreamingDataLoader():
             if isinstance(dataset[0], str):
                 print("Loading multiple datasets from paths")
                 dataset = [load_dataset(dataset_path, split=default_split) for dataset_path in dataset]
-            else:
-                print("Concatenating multiple datasets")
-                dataset = concatenate_datasets(dataset)
-        dataset = dataset.map(pre_map_maker(pre_map_def))
+            print("Concatenating multiple datasets")
+            dataset = concatenate_datasets(dataset)
+        dataset = dataset.map(pre_map_maker(pre_map_def), batched=True, batch_size=10000000)
         self.dataset = dataset.shard(num_shards=global_process_count, index=global_process_index)
         print(f"Dataset length: {len(dataset)}")
         self.iterator = ImageBatchIterator(self.dataset, image_shape=image_shape, num_workers=num_workers, batch_size=batch_size, num_threads=num_threads)
         self.collate_fn = collate_fn
+        self.batch_size = batch_size
         
         # Launch a thread to load batches in the background
         self.batch_queue = queue.Queue(prefetch)
@@ -204,5 +204,5 @@ class OnlineStreamingDataLoader():
         # return self.collate_fn(next(self.iterator))
         
     def __len__(self):
-        return len(self.dataset) // self.batch_size
+        return len(self.dataset)
     
