@@ -88,12 +88,12 @@ def map_sample(
             "error": str(e)
         })
         
-def map_batch(batch, num_threads=256, timeout=None, retries=0):
+def map_batch(batch, num_threads=256, image_shape=(256, 256), timeout=None, retries=0):
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        executor.map(map_sample, batch["url"], batch['caption'])
+        executor.map(map_sample, batch["url"], batch['caption'], image_shape=image_shape, timeout=timeout, retries=retries)
     
-def parallel_image_loader(dataset: Dataset, num_workers: int = 8, num_threads=256):
-    map_batch_fn = partial(map_batch, num_threads=num_threads)
+def parallel_image_loader(dataset: Dataset, num_workers: int = 8, image_shape=(256, 256), num_threads=256):
+    map_batch_fn = partial(map_batch, num_threads=num_threads, image_shape=image_shape)
     shard_len = len(dataset) // num_workers
     print(f"Local Shard lengths: {shard_len}")
     with multiprocessing.Pool(num_workers) as pool:
@@ -106,12 +106,12 @@ def parallel_image_loader(dataset: Dataset, num_workers: int = 8, num_threads=25
             iteration += 1
             
 class ImageBatchIterator:
-    def __init__(self, dataset: Dataset, batch_size: int = 64, num_workers: int = 8, num_threads=256):
+    def __init__(self, dataset: Dataset, batch_size: int = 64, image_shape=(256, 256), num_workers: int = 8, num_threads=256):
         self.dataset = dataset
         self.num_workers = num_workers
         self.batch_size = batch_size
-        loader = partial(parallel_image_loader, num_threads=num_threads)
-        self.thread = threading.Thread(target=loader, args=(dataset, num_workers))
+        loader = partial(parallel_image_loader, num_threads=num_threads, image_shape=image_shape, num_workers=num_workers)
+        self.thread = threading.Thread(target=loader, args=(dataset))
         self.thread.start()
         
     def __iter__(self):
