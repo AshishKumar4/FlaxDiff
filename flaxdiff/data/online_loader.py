@@ -25,7 +25,7 @@ import cv2
 USER_AGENT = get_datasets_user_agent()
 
 data_queue = Queue(16*2000)
-error_queue = Queue(16*2000)
+error_queue = Queue()
 
 
 def fetch_single_image(image_url, timeout=None, retries=0):
@@ -98,7 +98,7 @@ def map_sample(
             "original_width": original_width,
         })
     except Exception as e:
-        error_queue.put({
+        error_queue.put_nowait({
             "url": url,
             "caption": caption,
             "error": str(e)
@@ -135,6 +135,9 @@ def parallel_image_loader(dataset: Dataset, num_workers: int = 8, image_shape=(2
             iteration += 1
             print(f"Shuffling dataset with seed {iteration}")
             dataset = dataset.shuffle(seed=iteration)
+            # Clear the error queue
+            while not error_queue.empty():
+                error_queue.get_nowait()
 
 
 class ImageBatchIterator:
@@ -230,7 +233,6 @@ class OnlineStreamingDataLoader():
         self.iterator = ImageBatchIterator(self.dataset, image_shape=image_shape,
                                            num_workers=num_workers, batch_size=batch_size, num_threads=num_threads,
                                              timeout=timeout, retries=retries, image_processor=image_processor)
-        self.collate_fn = collate_fn
         self.batch_size = batch_size
 
         # Launch a thread to load batches in the background
@@ -238,7 +240,10 @@ class OnlineStreamingDataLoader():
 
         def batch_loader():
             for batch in self.iterator:
-                self.batch_queue.put(batch)
+                try:
+                    self.batch_queue.put(collate_fn(batch))
+                except Exception as e:
+                    print("Error processing batch", e)
 
         self.loader_thread = threading.Thread(target=batch_loader)
         self.loader_thread.start()
@@ -247,7 +252,7 @@ class OnlineStreamingDataLoader():
         return self
 
     def __next__(self):
-        return self.collate_fn(self.batch_queue.get())
+        return self.batch_queue.get()
         # return self.collate_fn(next(self.iterator))
 
     def __len__(self):
