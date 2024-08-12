@@ -11,15 +11,15 @@ All credits for the model go to the developers of Stable Diffusion VAE and all c
 """
 
 class StableDiffusionVAE(AutoEncoder):
-    def __init__(self, modelname = "CompVis/stable-diffusion-v1-4"):
+    def __init__(self, modelname = "CompVis/stable-diffusion-v1-4", revision="bf16", dtype=jnp.bfloat16):
         
         from diffusers.models.vae_flax import FlaxEncoder, FlaxDecoder
         from diffusers import FlaxStableDiffusionPipeline
         
         pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
             modelname,
-            revision="bf16",
-            dtype=jnp.bfloat16,
+            revision=revision,
+            dtype=dtype,
         )
         
         vae = pipeline.vae
