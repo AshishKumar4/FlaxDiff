@@ -21,6 +21,7 @@ import urllib
 
 import PIL.Image
 import cv2
+import traceback 
 
 USER_AGENT = get_datasets_user_agent()
 
@@ -43,7 +44,27 @@ def fetch_single_image(image_url, timeout=None, retries=0):
     return image
 
 
-def default_image_processor(image, image_shape, interpolation=cv2.INTER_CUBIC):
+def default_image_processor(
+    image, image_shape, 
+    min_image_shape=(128, 128),
+    upscale_interpolation=cv2.INTER_CUBIC,
+    downscale_interpolation=cv2.INTER_AREA,
+):
+    image = np.array(image)
+    original_height, original_width = image.shape[:2]
+    # check if the image is too small
+    if min(original_height, original_width) < min(min_image_shape):
+        return None, original_height, original_width
+    # check if wrong aspect ratio
+    if max(original_height, original_width) / min(original_height, original_width) > 2.4:
+        return None, original_height, original_width
+    # check if the variance is too low
+    if np.std(image) < 1e-5:
+        return None, original_height, original_width
+    # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    downscale = max(original_width, original_height) > max(image_shape)
+    interpolation = downscale_interpolation if downscale else upscale_interpolation
+
     image = A.longest_max_size(image, max(
         image_shape), interpolation=interpolation)
     image = A.pad(
@@ -53,7 +74,7 @@ def default_image_processor(image, image_shape, interpolation=cv2.INTER_CUBIC):
         border_mode=cv2.BORDER_CONSTANT,
         value=[255, 255, 255],
     )
-    return image
+    return image, original_height, original_width
 
 
 def map_sample(
@@ -72,23 +93,13 @@ def map_sample(
         if image is None:
             return
 
-        image = np.array(image)
-        original_height, original_width = image.shape[:2]
-        # check if the image is too small
-        if min(original_height, original_width) < min(min_image_shape):
+        image, original_height, original_width = image_processor(
+            image, image_shape, min_image_shape=min_image_shape,
+            upscale_interpolation=upscale_interpolation,
+            downscale_interpolation=downscale_interpolation,)
+        
+        if image is None:
             return
-        # check if wrong aspect ratio
-        if max(original_height, original_width) / min(original_height, original_width) > 2.4:
-            return
-        # check if the variance is too low
-        if np.std(image) < 1e-4:
-            return
-        # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        downscale = max(original_width, original_height) > max(image_shape)
-        interpolation = downscale_interpolation if downscale else upscale_interpolation
-
-        image = image_processor(
-            image, image_shape, interpolation=interpolation)
         
         data_queue.put({
             "url": url,
@@ -98,7 +109,8 @@ def map_sample(
             "original_width": original_width,
         })
     except Exception as e:
-        print(f"Error processing {url}", e)
+        print(f"Error maping sample {url}", e)
+        traceback.print_exc() 
         # error_queue.put_nowait({
         #     "url": url,
         #     "caption": caption,
@@ -122,7 +134,8 @@ def map_batch(
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             executor.map(map_sample_fn, batch["url"], batch['caption'])
     except Exception as e:
-        print(f"Error processing batch", e)
+        print(f"Error maping batch", e)
+        traceback.print_exc() 
         # error_queue.put_nowait({
         #     "batch": batch,
         #     "error": str(e)
