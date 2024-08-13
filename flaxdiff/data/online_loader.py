@@ -105,10 +105,17 @@ def map_sample(
         })
 
 
-def map_batch(batch, num_threads=256, image_shape=(256, 256), timeout=15, retries=3, image_processor=default_image_processor):
+def map_batch(
+    batch, num_threads=256, image_shape=(256, 256), 
+    timeout=15, retries=3, image_processor=default_image_processor,
+    upscale_interpolation=cv2.INTER_LANCZOS4,
+    downscale_interpolation=cv2.INTER_AREA,
+):
     try:
         map_sample_fn = partial(map_sample, image_shape=image_shape,
-                                timeout=timeout, retries=retries, image_processor=image_processor)
+                                timeout=timeout, retries=retries, image_processor=image_processor,
+                                upscale_interpolation=upscale_interpolation,
+                                downscale_interpolation=downscale_interpolation)
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             executor.map(map_sample_fn, batch["url"], batch['caption'])
     except Exception as e:
@@ -118,10 +125,16 @@ def map_batch(batch, num_threads=256, image_shape=(256, 256), timeout=15, retrie
         })
 
 
-def parallel_image_loader(dataset: Dataset, num_workers: int = 8, image_shape=(256, 256), 
-                          num_threads=256, timeout=15, retries=3, image_processor=default_image_processor):
+def parallel_image_loader(
+    dataset: Dataset, num_workers: int = 8, image_shape=(256, 256), 
+    num_threads=256, timeout=15, retries=3, image_processor=default_image_processor,
+    upscale_interpolation=cv2.INTER_LANCZOS4,
+    downscale_interpolation=cv2.INTER_AREA,
+):
     map_batch_fn = partial(map_batch, num_threads=num_threads, image_shape=image_shape,
-                           timeout=timeout, retries=retries, image_processor=image_processor)
+                           timeout=timeout, retries=retries, image_processor=image_processor,
+                           upscale_interpolation=upscale_interpolation,
+                           downscale_interpolation=downscale_interpolation)
     shard_len = len(dataset) // num_workers
     print(f"Local Shard lengths: {shard_len}")
     with multiprocessing.Pool(num_workers) as pool:
@@ -141,14 +154,21 @@ def parallel_image_loader(dataset: Dataset, num_workers: int = 8, image_shape=(2
 
 
 class ImageBatchIterator:
-    def __init__(self, dataset: Dataset, batch_size: int = 64, image_shape=(256, 256), 
-                 num_workers: int = 8, num_threads=256, timeout=15, retries=3, image_processor=default_image_processor):
+    def __init__(
+        self, dataset: Dataset, batch_size: int = 64, image_shape=(256, 256), 
+        num_workers: int = 8, num_threads=256, timeout=15, retries=3, 
+        image_processor=default_image_processor,
+        upscale_interpolation=cv2.INTER_LANCZOS4,
+        downscale_interpolation=cv2.INTER_AREA,
+    ):
         self.dataset = dataset
         self.num_workers = num_workers
         self.batch_size = batch_size
         loader = partial(parallel_image_loader, num_threads=num_threads,
                          image_shape=image_shape, num_workers=num_workers, 
-                         timeout=timeout, retries=retries, image_processor=image_processor)
+                         timeout=timeout, retries=retries, image_processor=image_processor,
+                         upscale_interpolation=upscale_interpolation,
+                         downscale_interpolation=downscale_interpolation)
         self.thread = threading.Thread(target=loader, args=(dataset,))
         self.thread.start()
 
@@ -210,6 +230,8 @@ class OnlineStreamingDataLoader():
         timeout=15,
         retries=3,
         image_processor=default_image_processor,
+        upscale_interpolation=cv2.INTER_LANCZOS4,
+        downscale_interpolation=cv2.INTER_AREA,
     ):
         if isinstance(dataset, str):
             dataset_path = dataset
@@ -232,7 +254,9 @@ class OnlineStreamingDataLoader():
         print(f"Dataset length: {len(dataset)}")
         self.iterator = ImageBatchIterator(self.dataset, image_shape=image_shape,
                                            num_workers=num_workers, batch_size=batch_size, num_threads=num_threads,
-                                             timeout=timeout, retries=retries, image_processor=image_processor)
+                                             timeout=timeout, retries=retries, image_processor=image_processor,
+                                             upscale_interpolation=upscale_interpolation,
+                                             downscale_interpolation=downscale_interpolation)
         self.batch_size = batch_size
 
         # Launch a thread to load batches in the background
