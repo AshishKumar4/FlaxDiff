@@ -83,13 +83,13 @@ def map_sample(
         # check if the variance is too low
         if np.std(image) < 1e-4:
             return
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         downscale = max(original_width, original_height) > max(image_shape)
         interpolation = downscale_interpolation if downscale else upscale_interpolation
 
         image = image_processor(
             image, image_shape, interpolation=interpolation)
-
+        
         data_queue.put({
             "url": url,
             "caption": caption,
@@ -98,6 +98,7 @@ def map_sample(
             "original_width": original_width,
         })
     except Exception as e:
+        print(f"Error processing {url}", e)
         # error_queue.put_nowait({
         #     "url": url,
         #     "caption": caption,
@@ -121,6 +122,7 @@ def map_batch(
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             executor.map(map_sample_fn, batch["url"], batch['caption'])
     except Exception as e:
+        print(f"Error processing batch", e)
         # error_queue.put_nowait({
         #     "batch": batch,
         #     "error": str(e)
