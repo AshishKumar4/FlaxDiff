@@ -44,7 +44,7 @@ def fetch_single_image(image_url, timeout=None, retries=0):
     return image
 
 
-def default_image_processor(image, image_shape, interpolation=cv2.INTER_LANCZOS4):
+def default_image_processor(image, image_shape, interpolation=cv2.INTER_CUBIC):
     image = A.longest_max_size(image, max(
         image_shape), interpolation=interpolation)
     image = A.pad(
@@ -62,7 +62,7 @@ def map_sample(
     image_shape=(256, 256),
     timeout=15,
     retries=3,
-    upscale_interpolation=cv2.INTER_LANCZOS4,
+    upscale_interpolation=cv2.INTER_CUBIC,
     downscale_interpolation=cv2.INTER_AREA,
     image_processor=default_image_processor,
 ):
@@ -108,7 +108,7 @@ def map_sample(
 def map_batch(
     batch, num_threads=256, image_shape=(256, 256), 
     timeout=15, retries=3, image_processor=default_image_processor,
-    upscale_interpolation=cv2.INTER_LANCZOS4,
+    upscale_interpolation=cv2.INTER_CUBIC,
     downscale_interpolation=cv2.INTER_AREA,
 ):
     try:
@@ -128,7 +128,7 @@ def map_batch(
 def parallel_image_loader(
     dataset: Dataset, num_workers: int = 8, image_shape=(256, 256), 
     num_threads=256, timeout=15, retries=3, image_processor=default_image_processor,
-    upscale_interpolation=cv2.INTER_LANCZOS4,
+    upscale_interpolation=cv2.INTER_CUBIC,
     downscale_interpolation=cv2.INTER_AREA,
 ):
     map_batch_fn = partial(map_batch, num_threads=num_threads, image_shape=image_shape,
@@ -158,7 +158,7 @@ class ImageBatchIterator:
         self, dataset: Dataset, batch_size: int = 64, image_shape=(256, 256), 
         num_workers: int = 8, num_threads=256, timeout=15, retries=3, 
         image_processor=default_image_processor,
-        upscale_interpolation=cv2.INTER_LANCZOS4,
+        upscale_interpolation=cv2.INTER_CUBIC,
         downscale_interpolation=cv2.INTER_AREA,
     ):
         self.dataset = dataset
@@ -230,7 +230,7 @@ class OnlineStreamingDataLoader():
         timeout=15,
         retries=3,
         image_processor=default_image_processor,
-        upscale_interpolation=cv2.INTER_LANCZOS4,
+        upscale_interpolation=cv2.INTER_CUBIC,
         downscale_interpolation=cv2.INTER_AREA,
     ):
         if isinstance(dataset, str):
