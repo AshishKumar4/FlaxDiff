@@ -1,5 +1,6 @@
 from typing import Any, Tuple, Mapping, Callable, List, Dict
 from functools import partial
+import flax.experimental
 import flax.jax_utils
 import flax.training
 import flax.training.dynamic_scale
@@ -51,9 +52,17 @@ from jax.experimental.shard_map import shard_map
 from orbax.checkpoint.utils import fully_replicated_host_local_array_to_global_array
 from termcolor import colored
 
+import warnings
+import traceback
+
+warnings.filterwarnings("ignore")
+
+
 #####################################################################################################################
 ################################################# Initialization ####################################################
 #####################################################################################################################
+
+os.environ['TOKENIZERS_PARALLELISM'] = "false"
 
 
 class RandomClass():
@@ -93,6 +102,30 @@ PROCESS_COLOR_MAP = {
     7: "light_cyan"
 }
 
+def _build_global_shape_and_sharding(
+    local_shape: tuple[int, ...], global_mesh: Mesh
+) -> tuple[tuple[int, ...], jax.sharding.NamedSharding]:
+  sharding = jax.sharding.NamedSharding(global_mesh, P(global_mesh.axis_names))
+  global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
+  return global_shape, sharding
+
+
+def form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
+  """Put local sharded array into local devices"""
+  global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
+  try:
+    local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
+  except ValueError as array_split_error:
+    raise ValueError(
+        f"Unable to put to devices shape {array.shape} with "
+        f"local device count {len(global_mesh.local_devices)} "
+    ) from array_split_error
+  local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
+  return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
+
+def convert_to_global_tree(global_mesh, pytree):
+    return jax.tree_util.tree_map_with_path(partial(form_global_array, global_mesh=global_mesh), pytree)
+
 #####################################################################################################################
 ################################################## Data Pipeline ####################################################
 #####################################################################################################################
@@ -128,7 +161,6 @@ def encodePrompts(prompts, model, tokenizer=None):
     embed_labels_full = last_hidden_state  # .astype(jnp.float16)
 
     return embed_pooled, embed_labels_full
-
 
 class CaptionProcessor:
     def __init__(self, tensor_type="pt", modelname="openai/clip-vit-large-patch14"):
@@ -197,7 +229,7 @@ def tfds_augmenters(image_scale, method):
     return augmenters
 
 # -----------------------------------------------------------------------------------------------#
-# CC12m and other GCS data sources -------------------------------------------------------------#
+# CC12m and other GCS data sources --------------------------------------------------------------#
 # -----------------------------------------------------------------------------------------------#
 
 def data_source_gcs(source='arrayrecord/laion-aesthetics-12m+mscoco-2017'):
@@ -221,9 +253,6 @@ def data_source_combined_gcs(
         return ds
     return data_source
 
-def labelizer_gcs(sample):
-    return sample['txt']
-
 def unpack_dict_of_byte_arrays(packed_data):
     unpacked_dict = {}
     offset = 0
@@ -243,21 +272,25 @@ def unpack_dict_of_byte_arrays(packed_data):
         unpacked_dict[key] = byte_array
     return unpacked_dict
 
+def image_augmenter(image, image_scale, method=cv2.INTER_AREA):
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image = cv2.resize(image, (image_scale, image_scale),
+                            interpolation=cv2.INTER_AREA)
+    return image
+
 def gcs_augmenters(image_scale, method):
-    labelizer = labelizer_gcs
+    labelizer = lambda sample : sample['txt']
     class augmenters(pygrain.MapTransform):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.caption_processor = CaptionProcessor(tensor_type="np")
+            self.image_augmenter = partial(image_augmenter, image_scale=image_scale, method=method)
 
         def map(self, element) -> Dict[str, jnp.array]:
             element = unpack_dict_of_byte_arrays(element)
             image = np.asarray(bytearray(element['jpg']), dtype="uint8")
             image = cv2.imdecode(image, cv2.IMREAD_UNCHANGED)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            image = cv2.resize(image, (image_scale, image_scale),
-                            interpolation=cv2.INTER_AREA)
-            # image = (image - 127.5) / 127.5
+            image = self.image_augmenter(image)
             caption = labelizer(element).decode('utf-8')
             results = self.caption_processor(caption)
             return {
@@ -307,11 +340,20 @@ datasetMap = {
                 'arrayrecord2/laion-aesthetics-12m+mscoco-2017',
                 'arrayrecord2/cc12m',
                 'arrayrecord2/aestheticCoyo_0.26_clip_5.5aesthetic_256plus',
+                "arrayrecord2/playground+leonardo_x4+cc3m.parquet",
             ]),
         "augmenter": gcs_augmenters,
     }
 }
 
+def batch_mesh_map(mesh):
+    class augmenters(pygrain.MapTransform):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+
+        def map(self, batch) -> Dict[str, jnp.array]:
+            return convert_to_global_tree(mesh, batch)
+    return augmenters
 
 def get_dataset_grain(
     data_name="cc12m",
@@ -319,12 +361,11 @@ def get_dataset_grain(
     image_scale=256,
     count=None,
     num_epochs=None,
-    text_encoders=None,
     method=jax.image.ResizeMethod.LANCZOS3,
-    grain_worker_count=32,
-    grain_read_thread_count=64,
-    grain_read_buffer_size=50,
-    grain_worker_buffer_size=20,
+    worker_count=32,
+    read_thread_count=64,
+    read_buffer_size=50,
+    worker_buffer_size=20,
     seed=0,
     dataset_source="/mnt/gcs_mount/arrayrecord2/cc12m/",
 ):
@@ -333,7 +374,7 @@ def get_dataset_grain(
     augmenter = dataset["augmenter"](image_scale, method)
 
     local_batch_size = batch_size // jax.process_count()
-    model, tokenizer = text_encoders
+    model, tokenizer = defaultTextEncodeModel()
 
     null_labels, null_labels_full = encodePrompts([""], model, tokenizer)
     null_labels = np.array(null_labels[0], dtype=np.float16)
@@ -347,24 +388,27 @@ def get_dataset_grain(
         shard_options=pygrain.ShardByJaxProcess(),
     )
 
-    transformations = [
-        augmenter(),
-        pygrain.Batch(local_batch_size, drop_remainder=True),
-    ]
-
-    loader = pygrain.DataLoader(
-        data_source=data_source,
-        sampler=sampler,
-        operations=transformations,
-        worker_count=grain_worker_count,
-        read_options=pygrain.ReadOptions(
-            grain_read_thread_count, grain_read_buffer_size
-        ),
-        worker_buffer_size=grain_worker_buffer_size,
-    )
-
     def get_trainset():
+        transformations = [
+            augmenter(),
+            pygrain.Batch(local_batch_size, drop_remainder=True),
+        ]
+        
+        # if mesh != None:
+        #     transformations += [batch_mesh_map(mesh)]
+
+        loader = pygrain.DataLoader(
+            data_source=data_source,
+            sampler=sampler,
+            operations=transformations,
+            worker_count=worker_count,
+            read_options=pygrain.ReadOptions(
+                read_thread_count, read_buffer_size
+            ),
+            worker_buffer_size=worker_buffer_size,
+        )
         return loader
+    
 
     return {
         "train": get_trainset,
@@ -377,34 +421,252 @@ def get_dataset_grain(
         "tokenizer": tokenizer,
     }
 
+# -----------------------------------------------------------------------------------------------#
+# Dataloader for directly streaming images from urls --------------------------------------------#
+# -----------------------------------------------------------------------------------------------#
+
+import albumentations as A
+from flaxdiff.data.online_loader import OnlineStreamingDataLoader, dataMapper, \
+        default_collate, load_dataset, concatenate_datasets, \
+        ImageBatchIterator, default_image_processor, load_from_disk
+
+import threading
+import queue
+
+def default_image_processor(
+    image, image_shape, 
+    min_image_shape=(128, 128),
+    upscale_interpolation=cv2.INTER_CUBIC,
+    downscale_interpolation=cv2.INTER_AREA,
+):
+    try:
+        image = np.array(image)
+        if len(image.shape) != 3 or image.shape[2] != 3:
+            return None, 0, 0
+        original_height, original_width = image.shape[:2]
+        # check if the image is too small
+        if min(original_height, original_width) < min(min_image_shape):
+            return None, original_height, original_width
+        # check if wrong aspect ratio
+        if max(original_height, original_width) / min(original_height, original_width) > 2.4:
+            return None, original_height, original_width
+        # check if the variance is too low
+        if np.std(image) < 1e-5:
+            return None, original_height, original_width
+        # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        downscale = max(original_width, original_height) > max(image_shape)
+        interpolation = downscale_interpolation if downscale else upscale_interpolation
+
+        image = A.longest_max_size(image, max(
+            image_shape), interpolation=interpolation)
+        image = A.pad(
+            image,
+            min_height=image_shape[0],
+            min_width=image_shape[1],
+            border_mode=cv2.BORDER_CONSTANT,
+            value=[255, 255, 255],
+        )
+        return image, original_height, original_width
+    except Exception as e:
+        # print("Error processing image", e, image_shape, interpolation)
+        # traceback.print_exc()
+        return None, 0, 0
+
+
+class OnlineStreamingDataLoader():
+    def __init__(
+        self,
+        dataset,
+        batch_size=64,
+        image_shape=(256, 256),
+        min_image_shape=(128, 128),
+        num_workers=16,
+        num_threads=512,
+        default_split="all",
+        pre_map_maker=dataMapper,
+        pre_map_def={
+            "url": "URL",
+            "caption": "TEXT",
+        },
+        global_process_count=1,
+        global_process_index=0,
+        prefetch=1000,
+        collate_fn=default_collate,
+        timeout=15,
+        retries=3,
+        image_processor=default_image_processor,
+        upscale_interpolation=cv2.INTER_CUBIC,
+        downscale_interpolation=cv2.INTER_AREA,
+    ):
+        if isinstance(dataset, str):
+            dataset_path = dataset
+            print("Loading dataset from path")
+            if "gs://" in dataset:
+                dataset = load_from_disk(dataset_path)
+            else:
+                dataset = load_dataset(dataset_path, split=default_split)
+        elif isinstance(dataset, list):
+            if isinstance(dataset[0], str):
+                print("Loading multiple datasets from paths")
+                dataset = [load_from_disk(dataset_path) if "gs://" in dataset_path else load_dataset(
+                    dataset_path, split=default_split) for dataset_path in dataset]
+            print("Concatenating multiple datasets")
+            dataset = concatenate_datasets(dataset)
+            dataset = dataset.shuffle(seed=0)
+        # dataset = dataset.map(pre_map_maker(pre_map_def), batched=True, batch_size=10000000)
+        self.dataset = dataset.shard(
+            num_shards=global_process_count, index=global_process_index)
+        print(f"Dataset length: {len(dataset)}")
+        self.iterator = ImageBatchIterator(self.dataset, image_shape=image_shape,
+                                           min_image_shape=min_image_shape,
+                                           num_workers=num_workers, batch_size=batch_size, num_threads=num_threads,
+                                            timeout=timeout, retries=retries, image_processor=image_processor,
+                                             upscale_interpolation=upscale_interpolation,
+                                             downscale_interpolation=downscale_interpolation)
+        self.batch_size = batch_size
+
+        # Launch a thread to load batches in the background
+        self.batch_queue = queue.Queue(prefetch)
+
+        def batch_loader():
+            for batch in self.iterator:
+                try:
+                    self.batch_queue.put(collate_fn(batch))
+                except Exception as e:
+                    print("Error collating batch", e)
+
+        self.loader_thread = threading.Thread(target=batch_loader)
+        self.loader_thread.start()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.batch_queue.get()
+        # return self.collate_fn(next(self.iterator))
+
+    def __len__(self):
+        return len(self.dataset)
+
+onlineDatasetMap = {
+    "combined_online": {
+        "source": [
+            # "gs://flaxdiff-datasets-regional/datasets/laion-aesthetics-12m+mscoco-2017.parquet"
+            # "ChristophSchuhmann/MS_COCO_2017_URL_TEXT",
+            # "dclure/laion-aesthetics-12m-umap",
+            "gs://flaxdiff-datasets-regional/datasets/laion-aesthetics-12m+mscoco-2017",
+            # "gs://flaxdiff-datasets-regional/datasets/coyo700m-aesthetic-5.4_25M",
+            "gs://flaxdiff-datasets-regional/datasets/leonardo-liked-1.8m",
+            "gs://flaxdiff-datasets-regional/datasets/leonardo-liked-1.8m",
+            "gs://flaxdiff-datasets-regional/datasets/leonardo-liked-1.8m",
+            "gs://flaxdiff-datasets-regional/datasets/cc12m",
+            "gs://flaxdiff-datasets-regional/datasets/cc3m",
+            "gs://flaxdiff-datasets-regional/datasets/playground-liked",
+            "gs://flaxdiff-datasets-regional/datasets/leonardo-liked-1.8m",
+            "gs://flaxdiff-datasets-regional/datasets/leonardo-liked-1.8m",
+            "gs://flaxdiff-datasets-regional/datasets/cc3m",
+            "gs://flaxdiff-datasets-regional/datasets/cc3m",
+        ]
+    }
+}
+
+def generate_collate_fn(tokenizer):
+    caption_processor = CaptionProcessor(tensor_type="np")
+    def default_collate(batch):
+        try:
+            # urls = [sample["url"] for sample in batch]
+            captions = [sample["caption"] for sample in batch]
+            results = caption_processor(captions)
+            images = np.stack([sample["image"] for sample in batch], axis=0)
+            return {
+                "image": images,
+                "input_ids": results['input_ids'],
+                "attention_mask": results['attention_mask'],
+            }
+        except Exception as e:
+            print("Error in collate function", e, [sample["image"].shape for sample in batch])
+            traceback.print_exc()
+            
+    return default_collate
+    
+def get_dataset_online(
+        data_name="combined_online",
+        batch_size=64,
+        image_scale=256,
+        count=None,
+        num_epochs=None,
+        method=jax.image.ResizeMethod.LANCZOS3,
+        worker_count=32,
+        read_thread_count=64,
+        read_buffer_size=50,
+        worker_buffer_size=20,
+        seed=0,
+        dataset_source="/mnt/gcs_mount/arrayrecord2/cc12m/",
+    ):
+    local_batch_size = batch_size // jax.process_count()
+    
+    model, tokenizer = defaultTextEncodeModel()
+
+    null_labels, null_labels_full = encodePrompts([""], model, tokenizer)
+    null_labels = np.array(null_labels[0], dtype=np.float16)
+    null_labels_full = np.array(null_labels_full[0], dtype=np.float16)
+    
+    sources = onlineDatasetMap[data_name]["source"]
+    dataloader = OnlineStreamingDataLoader(
+            sources, 
+            batch_size=local_batch_size,
+            num_workers=worker_count,
+            num_threads=read_thread_count,
+            image_shape=(image_scale, image_scale),
+            global_process_count=jax.process_count(),
+            global_process_index=jax.process_index(),
+            prefetch=worker_buffer_size,
+            collate_fn=generate_collate_fn(tokenizer),
+            default_split="train",
+        )
+    
+    def get_trainset(mesh: Mesh = None):
+        if mesh != None:
+            class dataLoaderWithMesh:
+                def __init__(self, dataloader, mesh):
+                    self.dataloader = dataloader
+                    self.mesh = mesh
+                    self.tmp_queue = queue.Queue(worker_buffer_size)
+                    def batch_loader():
+                        for batch in self.dataloader:
+                            try:
+                                self.tmp_queue.put(convert_to_global_tree(mesh, batch))
+                            except Exception as e:
+                                print("Error processing batch", e)
+                    self.loader_thread = threading.Thread(target=batch_loader)
+                    self.loader_thread.start()
+                    
+                def __iter__(self):
+                    return self
+                
+                def __next__(self):
+                    return self.tmp_queue.get()
+                
+            dataloader_with_mesh = dataLoaderWithMesh(dataloader, mesh)
+                    
+            return dataloader_with_mesh
+        return dataloader
+    
+    return {
+        "train": get_trainset,
+        "train_len": len(dataloader) * jax.process_count(),
+        "local_batch_size": local_batch_size,
+        "global_batch_size": batch_size,
+        "null_labels": null_labels,
+        "null_labels_full": null_labels_full,
+        "model": model,
+        "tokenizer": tokenizer,
+    }
+    
 
 #####################################################################################################################
 ############################################### Training Pipeline ###################################################
 #####################################################################################################################
-
-def _build_global_shape_and_sharding(
-    local_shape: tuple[int, ...], global_mesh: Mesh
-) -> tuple[tuple[int, ...], jax.sharding.NamedSharding]:
-  sharding = jax.sharding.NamedSharding(global_mesh, P(global_mesh.axis_names))
-  global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
-  return global_shape, sharding
-
-
-def form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
-  """Put local sharded array into local devices"""
-  global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
-  try:
-    local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
-  except ValueError as array_split_error:
-    raise ValueError(
-        f"Unable to put to devices shape {array.shape} with "
-        f"local device count {len(global_mesh.local_devices)} "
-    ) from array_split_error
-  local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
-  return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
-
-def convert_to_global_tree(global_mesh, pytree):
-    return jax.tree_util.tree_map_with_path(partial(form_global_array, global_mesh=global_mesh), pytree)
 
 @struct.dataclass
 class Metrics(metrics.Collection):
@@ -550,16 +812,16 @@ class SimpleTrainer:
         self.best_state = best_state
 
     def get_state(self):
-        # return fully_replicated_host_local_array_to_global_array()
-        return jax.tree_util.tree_map(lambda x : np.array(x), self.state)
+        return self.get_np_tree(self.state)
 
     def get_best_state(self):
-        # return convert_to_global_tree(self.mesh, flax.jax_utils.replicate(self.best_state, jax.local_devices()))
-        return jax.tree_util.tree_map(lambda x : np.array(x), self.best_state)
+        return self.get_np_tree(self.best_state)
         
     def get_rngstate(self):
-        # return convert_to_global_tree(self.mesh, flax.jax_utils.replicate(self.rngstate, jax.local_devices()))
-        return jax.tree_util.tree_map(lambda x : np.array(x), self.rngstate)
+        return self.get_np_tree(self.rngstate)
+    
+    def get_np_tree(self, pytree):
+        return jax.tree_util.tree_map(lambda x : np.array(x), pytree)
 
     def checkpoint_path(self):
         path = os.path.join(self.checkpoint_base_path, self.name.replace(' ', '_').lower())
@@ -596,29 +858,35 @@ class SimpleTrainer:
         rngstate = ckpt['rngs']
         # Convert the state to a TrainState
         self.best_loss = ckpt['best_loss']
+        if self.best_loss == 0:
+            # It cant be zero as that must have been some problem
+            self.best_loss = 1e9
         current_epoch = ckpt.get('epoch', step) # Must be a checkpoint from an older version which used epochs instead of steps
         print(
             f"Loaded model from checkpoint at epoch {current_epoch} step {step}", ckpt['best_loss'])
         return current_epoch, step, state, best_state, rngstate
 
-    def save(self, epoch=0, step=0):
+    def save(self, epoch=0, step=0, state=None, rngstate=None):
         print(f"Saving model at epoch {epoch} step {step}")
-        ckpt = {
-            # 'model': self.model,
-            'rngs': self.get_rngstate(),
-            'state': self.get_state(),
-            'best_state': self.get_best_state(),
-            'best_loss': np.array(self.best_loss),
-            'epoch': epoch,
-        }
         try:
-            save_args = orbax_utils.save_args_from_target(ckpt)
-            self.checkpointer.save(step, ckpt, save_kwargs={
-                                   'save_args': save_args}, force=True)
-            self.checkpointer.wait_until_finished()
-            pass
+            ckpt = {
+                # 'model': self.model,
+                'rngs': self.get_rngstate() if rngstate is None else self.get_np_tree(rngstate),
+                'state': self.get_state() if state is None else self.get_np_tree(state),
+                'best_state': self.get_best_state(),
+                'best_loss': np.array(self.best_loss),
+                'epoch': epoch,
+            }
+            try:
+                save_args = orbax_utils.save_args_from_target(ckpt)
+                self.checkpointer.save(step, ckpt, save_kwargs={
+                                    'save_args': save_args}, force=True)
+                self.checkpointer.wait_until_finished()
+                pass
+            except Exception as e:
+                print("Error saving checkpoint", e)
         except Exception as e:
-            print("Error saving checkpoint", e)
+            print("Error saving checkpoint outer", e)
 
     def _define_train_step(self, **kwargs):
         model = self.model
@@ -711,19 +979,25 @@ class SimpleTrainer:
             last_save_time = time.time()
             for i in range(steps_per_epoch):
                 batch = next(train_ds)
+                if i == 0:
+                    print(f"First batch loaded at step {current_step}")
+                    
                 if self.distributed_training and global_device_count > 1:
-                    # Convert the local device batches to a unified global jax.Array 
+                #     # Convert the local device batches to a unified global jax.Array 
                     batch = convert_to_global_tree(self.mesh, batch)
                 train_state, loss, rng_state = train_step(train_state, rng_state, batch, global_device_indexes)
 
+                if i == 0:
+                    print(f"Training started for process index {process_index} at step {current_step}")
+                
                 if self.distributed_training:
-                    loss = jax.experimental.multihost_utils.process_allgather(loss)
+                    # loss = jax.experimental.multihost_utils.process_allgather(loss)
                     loss = jnp.mean(loss) # Just to make sure its a scaler value
                     
                 if loss <= 1e-6:
                     # If the loss is too low, we can assume the model has diverged
                     print(colored(f"Loss too low at step {current_step} => {loss}", 'red'))
-                    # Exit the training loop
+                    # Reset the model to the old state
                     exit(1)
                             
                 epoch_loss += loss
@@ -737,10 +1011,12 @@ class SimpleTrainer:
                                 "train/step" : current_step,
                                 "train/loss": loss,
                             }, step=current_step)
-                    # Save the model every 40 minutes
-                    if time.time() - last_save_time > 40 * 60:
-                        print(f"Saving model after 40 minutes at step {current_step}")
-                        self.save(current_epoch, current_step)
+                    # Save the model every few steps
+                    if i % 10000 == 0 and i > 0:
+                        print(f"Saving model after 10000 step {current_step}")
+                        print(f"Devices: {len(jax.devices())}") # To sync the devices
+                        self.save(current_epoch, current_step, train_state, rng_state)
+                        print(f"Saving done by process index {process_index}")
                         last_save_time = time.time()
             print(colored(f"Epoch done on index {process_index} => {current_epoch} Loss: {epoch_loss/steps_per_epoch}", 'green'))
             return epoch_loss, current_step, train_state, rng_state
@@ -897,6 +1173,11 @@ class DiffusionTrainer(SimpleTrainer):
             local_rng_state = RandomMarkovState(subkey)
             
             images = batch['image']
+            
+            # First get the standard deviation of the images
+            # std = jnp.std(images, axis=(1, 2, 3))
+            # is_non_zero = (std > 0)
+            
             images = jnp.array(images, dtype=jnp.float32)
             # normalize image
             images = (images - 127.5) / 127.5
@@ -929,8 +1210,11 @@ class DiffusionTrainer(SimpleTrainer):
                 preds = model_output_transform.pred_transform(
                     noisy_images, preds, rates)
                 nloss = loss_fn(preds, expected_output)
-                # nloss = jnp.mean(nloss, axis=1)
+                # Ignore the loss contribution of images with zero standard deviation
                 nloss *= noise_schedule.get_weights(noise_level)
+                # nloss = jnp.mean(nloss, axis=(1,2,3))
+                # nloss = jnp.where(is_non_zero, nloss, 0)
+                # nloss = jnp.mean(nloss, where=nloss != 0)
                 nloss = jnp.mean(nloss)
                 loss = nloss
                 return loss
@@ -951,11 +1235,11 @@ class DiffusionTrainer(SimpleTrainer):
             
             new_state = train_state.apply_gradients(grads=grads)
             
-            if train_state.dynamic_scale:
+            if train_state.dynamic_scale is not None:
                 # if is_fin == False the gradients contain Inf/NaNs and optimizer state and
                 # params should be restored (= skip this step).
                 select_fn = functools.partial(jnp.where, is_fin)
-                new_state = train_state.replace(
+                new_state = new_state.replace(
                     opt_state=jax.tree_util.tree_map(
                         select_fn, new_state.opt_state, train_state.opt_state
                     ),
@@ -1003,13 +1287,21 @@ def boolean_string(s):
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Train a diffusion model')
 parser.add_argument('--GRAIN_WORKER_COUNT', type=int,
-                    default=16, help='Number of grain workers')
+                    default=32, help='Number of grain workers')
+# parser.add_argument('--GRAIN_READ_THREAD_COUNT', type=int,
+#                     default=512, help='Number of grain read threads')
+# parser.add_argument('--GRAIN_READ_BUFFER_SIZE', type=int,
+#                     default=80, help='Grain read buffer size')
+# parser.add_argument('--GRAIN_WORKER_BUFFER_SIZE', type=int,
+#                     default=500, help='Grain worker buffer size')
+# parser.add_argument('--GRAIN_WORKER_COUNT', type=int,
+#                     default=32, help='Number of grain workers')
 parser.add_argument('--GRAIN_READ_THREAD_COUNT', type=int,
-                    default=64, help='Number of grain read threads')
+                    default=128, help='Number of grain read threads')
 parser.add_argument('--GRAIN_READ_BUFFER_SIZE', type=int,
-                    default=50, help='Grain read buffer size')
+                    default=80, help='Grain read buffer size')
 parser.add_argument('--GRAIN_WORKER_BUFFER_SIZE', type=int,
-                    default=20, help='Grain worker buffer size')
+                    default=50, help='Grain worker buffer size')
 
 parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
 parser.add_argument('--image_size', type=int, default=128, help='Image size')
@@ -1030,6 +1322,11 @@ parser.add_argument('--attention_heads', type=int, default=8, help='Number of at
 parser.add_argument('--flash_attention', type=boolean_string, default=False, help='Use Flash Attention')
 parser.add_argument('--use_projection', type=boolean_string, default=False, help='Use projection')
 parser.add_argument('--use_self_and_cross', type=boolean_string, default=False, help='Use self and cross attention')
+parser.add_argument('--only_pure_attention', type=boolean_string, default=True, help='Use only pure attention or proper transformer in the attention blocks') 
+parser.add_argument('--norm_groups', type=int, default=8, help='Number of normalization groups. 0 for RMSNorm')
+
+parser.add_argument('--named_norms', type=boolean_string, default=False, help='Use named norms')
+
 parser.add_argument('--num_res_blocks', type=int, default=2, help='Number of residual blocks')
 parser.add_argument('--num_middle_res_blocks', type=int,  default=1, help='Number of middle residual blocks')
 parser.add_argument('--activation', type=str, default='swish', help='activation to use')
@@ -1066,6 +1363,7 @@ parser.add_argument('--autoencoder_opts', type=str,
                     default='{"modelname":"CompVis/stable-diffusion-v1-4"}', help='Autoencoder options as a dictionary')
 
 parser.add_argument('--use_dynamic_scale', type=boolean_string, default=False, help='Use dynamic scale for training')
+parser.add_argument('--clip_grads', type=float, default=0, help='Clip gradients to this value')
 
 def main(args):
     resource.setrlimit(
@@ -1076,6 +1374,7 @@ def main(args):
         resource.RLIMIT_OFILE,
         (65535, 65535))
 
+    print("Initializing JAX")
     jax.distributed.initialize()
 
     # jax.config.update('jax_threefry_partitionable', True)
@@ -1124,7 +1423,31 @@ def main(args):
     IMAGE_SIZE = args.image_size
 
     dataset_name = args.dataset
-    datalen = len(datasetMap[dataset_name]['source'](args.dataset_path))
+    
+    if 'online' in dataset_name:
+        print("Using Online Dataset Generator")
+        dataset_generator = get_dataset_online
+        GRAIN_WORKER_BUFFER_SIZE *= 10
+        GRAIN_READ_THREAD_COUNT *= 4
+    else:
+        dataset_generator = get_dataset_grain
+
+    data = dataset_generator(
+        args.dataset,
+        batch_size=BATCH_SIZE, image_scale=IMAGE_SIZE,
+        worker_count=GRAIN_WORKER_COUNT, read_thread_count=GRAIN_READ_THREAD_COUNT,
+        read_buffer_size=GRAIN_READ_BUFFER_SIZE, worker_buffer_size=GRAIN_WORKER_BUFFER_SIZE,
+        seed=args.dataset_seed,
+        dataset_source=args.dataset_path,
+    )
+
+    if args.dataset_test:
+        dataset = iter(data['train']())
+
+        for _ in tqdm.tqdm(range(2000)):
+            batch = next(dataset)
+            
+    datalen = data['train_len']
     batches = datalen // BATCH_SIZE
     # Define the configuration using the command-line arguments
     attention_configs = [
@@ -1133,12 +1456,18 @@ def main(args):
 
     if args.attention_heads > 0:
         attention_configs += [
-            {"heads": args.attention_heads, "dtype": DTYPE, "flash_attention": args.flash_attention,
-                "use_projection": args.use_projection, "use_self_and_cross": args.use_self_and_cross},
+            {
+                "heads": args.attention_heads, "dtype": DTYPE, "flash_attention": args.flash_attention,
+                "use_projection": args.use_projection, "use_self_and_cross": args.use_self_and_cross,
+                "only_pure_attention": args.only_pure_attention,    
+            },
         ] * (len(args.feature_depths) - 2)
         attention_configs += [
-            {"heads": args.attention_heads, "dtype": DTYPE, "flash_attention": False,
-                "use_projection": False, "use_self_and_cross": False},
+            {
+                "heads": args.attention_heads, "dtype": DTYPE, "flash_attention": False,
+                "use_projection": False, "use_self_and_cross": args.use_self_and_cross,
+                "only_pure_attention": args.only_pure_attention
+            },
         ]
     else:
         print("Attention heads not provided, disabling attention")
@@ -1169,6 +1498,8 @@ def main(args):
             "precision": PRECISION,
             "activation": args.activation,
             "output_channels": INPUT_CHANNELS,
+            "norm_groups": args.norm_groups,
+            "named_norms": args.named_norms,
         },
         "dataset": {
             "name": dataset_name,
@@ -1187,24 +1518,6 @@ def main(args):
         "autoencoder": args.autoencoder,
         "autoencoder_opts": args.autoencoder_opts,
     }
-
-    text_encoders = defaultTextEncodeModel()
-
-    data = get_dataset_grain(
-        CONFIG['dataset']['name'],
-        batch_size=BATCH_SIZE, image_scale=IMAGE_SIZE,
-        grain_worker_count=GRAIN_WORKER_COUNT, grain_read_thread_count=GRAIN_READ_THREAD_COUNT,
-        grain_read_buffer_size=GRAIN_READ_BUFFER_SIZE, grain_worker_buffer_size=GRAIN_WORKER_BUFFER_SIZE,
-        text_encoders=text_encoders,
-        seed=args.dataset_seed,
-        dataset_source=args.dataset_path,
-    )
-
-    if args.dataset_test:
-        dataset = iter(data['train']())
-
-        for _ in tqdm.tqdm(range(3000)):
-            batch = next(dataset)
 
     cosine_schedule = CosineNoiseSchedule(1000, beta_end=1)
     karas_ve_schedule = KarrasVENoiseScheduler(
@@ -1235,6 +1548,12 @@ def main(args):
             decay_steps=batches * args.learning_rate_decay_epochs, end_value=args.learning_rate_end,
         )
     solver = optimizer(learning_rate, **optimizer_opts)
+    
+    if args.clip_grads > 0:
+        solver = optax.chain(
+            optax.clip_by_global_norm(args.clip_grads),
+            solver,
+        )
 
     wandb_config = {
         "project": "flaxdiff",
@@ -1277,54 +1596,74 @@ New -->
 
 for tpu-v4-32
 
-python3 training.py --dataset=combined_30m --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+python3 training.py --dataset=combined_online --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=256 --image_size=128 \
+            --epochs=40 --batch_size=256 --image_size=512 \
             --learning_rate=9e-5 --num_res_blocks=3 --emb_features 512 \
             --use_self_and_cross=False --precision=default --dtype=bfloat16 --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_NEW_combined_30m_1'\
-            --optimizer=adamw --feature_depths 128 256 512 512 --use_dynamic_scale=True \
-             --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-128/batch-256-v4-32_flaxdiff-0-1-8__new-combined_1'
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_ldm_data-online_big'\
+            --optimizer=adamw --feature_depths 128 256 512 512 --autoencoder=stable_diffusion \
+            --norm_groups 0 --clip_grads 0.5 --only_pure_attention=True 
 
+python3 training.py --dataset=combined_online --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=256 --image_size=128 \
+            --learning_rate=1e-4 --num_res_blocks=3 --emb_features 512 \
+            --use_self_and_cross=False --precision=default --dtype=bfloat16 --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_data-online'\
+            --optimizer=adamw --feature_depths 128 256 512 512 \
+            --norm_groups 0 --clip_grads 0.5 --only_pure_attention=True
+    
 for tpu-v4-16
 
 python3 training.py --dataset=combined_30m --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=128 --image_size=512 \
-            --learning_rate=8e-5 --num_res_blocks=3 \
-            --use_self_and_cross=False --precision=default --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-16_flaxdiff-0-1-8__combined_30m_ldm_1'\
-            --learning_rate_schedule=cosine --learning_rate_peak=1e-4 --learning_rate_end=4e-5 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=1\
-            --optimizer=adamw  --autoencoder=stable_diffusion --use_dynamic_scale=True\
-            --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-512/batch-128-v4-16_flaxdiff-0-1-8_new-combined_ldm_1'
+            --epochs=40 --batch_size=128 --image_size=128 \
+            --learning_rate=4e-5 --num_res_blocks=3 \
+            --use_self_and_cross=False --dtype=bfloat16 --precision=default --attention_heads=8\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-16_flaxdiff-0-1-9_light_combined_30m_1'\
+            --optimizer=adamw --use_dynamic_scale=True --norm_groups 0 --only_pure_attention=False \
+            --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_30m/image_size-128/batch-128-v4-16_flaxdiff-0-1-9_light_combined_30m_ldm_1'
 
 ----------------------------------------------------------------------------------------------------------------------------
 Old -->
 
 for tpu-v4-64
 
-python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+python3 training.py --dataset=combined_online --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=512 --image_size=512 \
-            --learning_rate=9e-6 --num_res_blocks=4 \
-            --use_self_and_cross=False --dtype=bfloat16 --precision=default --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_flaxdiff-0-1-8_ldm_dyn_scale__new-combined_1'\
-            --learning_rate_schedule=cosine --learning_rate_peak=4e-5 --learning_rate_end=9e-6 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=2\
-            --optimizer=adamw --autoencoder=stable_diffusion --use_dynamic_scale=True --feature_depths 128 256 512 512\
-            --emb_features 512 --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-512/batch-512-v4-64_flaxdiff-0-1-8_ldm_dyn_scale_1'
+            --epochs=40 --batch_size=512 --image_size=512 --learning_rate=4e-5 \
+            --num_res_blocks=4 --emb_features 512 --feature_depths 128 256 512 512 --norm_groups 0 --only_pure_attention=True --use_self_and_cross=False \
+            --dtype=bfloat16 --precision=default --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_ldm_combined_online-bigger'\
+            --learning_rate_schedule=cosine --learning_rate_peak=2.7e-4 --learning_rate_end=9e-5 --learning_rate_warmup_steps=10000 --learning_rate_decay_epochs=2\
+            --optimizer=adamw --autoencoder=stable_diffusion  --clip_grads 0.5
+                
+                
+            --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_30m/image_size-512/batch-512-v4-64_flaxdiff-0-1-8_ldm_dyn_scale_NEW_ARCH_combined_30'
 
 
             --learning_rate_schedule=cosine --learning_rate_peak=4e-5 --learning_rate_end=9e-6 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=2\
+                
+
+python3 training.py --dataset=combined_30m --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
+            --epochs=40 --batch_size=256 --image_size=128 \
+            --learning_rate=4e-5 --num_res_blocks=3 \
+            --use_self_and_cross=False --precision=default --dtype=bfloat16 --attention_heads=16\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_flaxdiff-0-1-10__new-combined_30m'\
+            --optimizer=adamw --feature_depths 128 256 512 512 --use_dynamic_scale=True\
+            --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-128/batch-256-v4-32_flaxdiff-0-1-8__new-combined_1'
 
 for tpu-v4-32
 
-python3 training.py --dataset=combined_aesthetic --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+python3 training.py --dataset=combined_30m --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
             --epochs=40 --batch_size=256 --image_size=128 \
             --learning_rate=8e-5 --num_res_blocks=3 \
             --use_self_and_cross=False --precision=default --dtype=bfloat16 --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_flaxdiff-0-1-8__new-combined_1'\
-            --optimizer=adamw --feature_depths 128 256 512 512 --use_dynamic_scale=True\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_flaxdiff-0-1-9_combined_30m'\
+            --optimizer=adamw --feature_depths 128 256 512 512 --use_dynamic_scale=True --named_norms=True --only_pure_attention=True\
             --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-128/batch-256-v4-32_flaxdiff-0-1-8__3'
 
 for tpu-v4-16
