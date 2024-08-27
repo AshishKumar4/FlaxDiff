@@ -58,6 +58,9 @@ class UViT(nn.Module):
     dtype: Any = jnp.float32
     precision: Any = jax.lax.Precision.HIGH
     use_projection: bool = False
+    use_flash_attention: bool = False
+    use_self_and_cross: bool = False
+    force_fp32_for_softmax: bool = True
     activation:Callable = jax.nn.swish
     norm_groups:int=8
     dtype: Optional[Dtype] = None
@@ -102,7 +105,7 @@ class UViT(nn.Module):
         for i in range(self.num_layers // 2):
             x = TransformerBlock(heads=self.num_heads, dim_head=self.emb_features // self.num_heads, 
                                  dtype=self.dtype, precision=self.precision, use_projection=self.use_projection, 
-                                 use_flash_attention=False, use_self_and_cross=False, force_fp32_for_softmax=True, 
+                                 use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross, force_fp32_for_softmax=self.force_fp32_for_softmax, 
                                  only_pure_attention=False,
                                  kernel_init=self.kernel_init())(x)
             skips.append(x)
@@ -110,7 +113,7 @@ class UViT(nn.Module):
         # Middle block
         x = TransformerBlock(heads=self.num_heads, dim_head=self.emb_features // self.num_heads, 
                              dtype=self.dtype, precision=self.precision, use_projection=self.use_projection, 
-                             use_flash_attention=False, use_self_and_cross=True, force_fp32_for_softmax=True, 
+                             use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross, force_fp32_for_softmax=self.fforce_fp32_for_softmax, 
                              only_pure_attention=False,
                              kernel_init=self.kernel_init())(x)
         
@@ -121,7 +124,7 @@ class UViT(nn.Module):
                                    dtype=self.dtype, precision=self.precision)(skip)
             x = TransformerBlock(heads=self.num_heads, dim_head=self.emb_features // self.num_heads, 
                                  dtype=self.dtype, precision=self.precision, use_projection=self.use_projection, 
-                                 use_flash_attention=False, use_self_and_cross=False, force_fp32_for_softmax=True, 
+                                 use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross, force_fp32_for_softmax=self.fforce_fp32_for_softmax, 
                                  only_pure_attention=False,
                                  kernel_init=self.kernel_init())(skip)
         
