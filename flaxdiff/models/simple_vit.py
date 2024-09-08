@@ -83,7 +83,7 @@ class UViT(nn.Module):
 
         # Patch embedding
         x = PatchEmbedding(patch_size=self.patch_size, embedding_dim=self.emb_features, 
-                           dtype=self.dtype, precision=self.precision)(x)
+                           dtype=self.dtype, precision=self.precision, kernel_init=self.kernel_init)(x)
         num_patches = x.shape[1]
         
         context_emb = nn.DenseGeneral(features=self.emb_features, kernel_init=self.kernel_init(), 
@@ -98,7 +98,7 @@ class UViT(nn.Module):
         # print(f'Shape of x after time embedding: {x.shape}')
         
         # Add positional encoding
-        x = PositionalEncoding(max_len=x.shape[1], embedding_dim=self.emb_features, kernel_init=self.kernel_init)(x)
+        x = PositionalEncoding(max_len=x.shape[1], embedding_dim=self.emb_features)(x)
         
         # print(f'Shape of x after positional encoding: {x.shape}')
         
