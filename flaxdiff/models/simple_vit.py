@@ -6,7 +6,7 @@ from flax import linen as nn
 from typing import Callable, Any, Optional, Tuple
 from .simple_unet import FourierEmbedding, TimeProjection, ConvLayer, kernel_init
 from .attention import TransformerBlock
-from flaxdiff.models.simple_unet import FourierEmbedding, TimeProjection, ConvLayer, kernel_init
+from flaxdiff.models.simple_unet import FourierEmbedding, TimeProjection, ConvLayer, kernel_init, ResidualBlock
 import einops
 from flax.typing import Dtype, PrecisionLike
 from functools import partial
@@ -68,6 +68,7 @@ class UViT(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     kernel_init: Callable = partial(kernel_init, 1.0)
+    add_residualblock_output: bool = False
 
     def setup(self):
         if self.norm_groups > 0:
@@ -80,6 +81,8 @@ class UViT(nn.Module):
         # Time embedding
         temb = FourierEmbedding(features=self.emb_features)(temb)
         temb = TimeProjection(features=self.emb_features)(temb)
+        
+        original_img = x
 
         # Patch embedding
         x = PatchEmbedding(patch_size=self.patch_size, embedding_dim=self.emb_features, 
@@ -141,14 +144,36 @@ class UViT(nn.Module):
         x = x[:, 1 + num_text_tokens:, :]
         x = unpatchify(x, channels=self.output_channels)
         # print(f'Shape of x after final dense layer: {x.shape}')
-        x = nn.Conv(
-            features=self.output_channels, 
-            kernel_size=(3, 3), 
-            strides=(1, 1),
-            padding='SAME', 
-            dtype=self.dtype, 
-            precision=self.precision, 
-            kernel_init=kernel_init(0.0),
-        )(x)
         
+        if self.add_residualblock_output:
+            # Concatenate the original image
+            x = jnp.concatenate([original_img, x], axis=-1)
+            
+            x = ResidualBlock(
+                "conv",
+                name="final_residual",
+                features=64,
+                kernel_init=self.kernel_init(1.0),
+                kernel_size=(3,3),
+                strides=(1, 1),
+                activation=self.activation,
+                norm_groups=self.norm_groups,
+                dtype=self.dtype,
+                precision=self.precision,
+                named_norms=False
+            )(x, temb)
+
+            x = self.norm()(x)
+            x = self.activation(x)
+
+        x = ConvLayer(
+            "conv",
+            features=self.output_channels,
+            kernel_size=(3, 3),
+            strides=(1, 1),
+            # activation=jax.nn.mish
+            kernel_init=self.kernel_init(0.0),
+            dtype=self.dtype,
+            precision=self.precision
+        )(x)
         return x

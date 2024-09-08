@@ -19,3 +19,4 @@ gcsfuse.yml
 *.csv
 *.tsv
 *.parquet
+*.arrow
