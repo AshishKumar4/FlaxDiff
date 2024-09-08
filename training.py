@@ -1434,7 +1434,7 @@ def main(args):
     if 'online' in dataset_name:
         print("Using Online Dataset Generator")
         dataset_generator = get_dataset_online
-        GRAIN_WORKER_BUFFER_SIZE *= 10
+        GRAIN_WORKER_BUFFER_SIZE *= 5
         GRAIN_READ_THREAD_COUNT *= 4
     else:
         dataset_generator = get_dataset_grain

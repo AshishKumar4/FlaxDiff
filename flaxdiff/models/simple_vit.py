@@ -23,6 +23,7 @@ class PatchEmbedding(nn.Module):
     embedding_dim: int
     dtype: Any = jnp.float32
     precision: Any = jax.lax.Precision.HIGH
+    kernel_init: Callable = partial(kernel_init, 1.0)
 
     @nn.compact
     def __call__(self, x):
@@ -33,6 +34,7 @@ class PatchEmbedding(nn.Module):
                     kernel_size=(self.patch_size, self.patch_size), 
                     strides=(self.patch_size, self.patch_size),
                     dtype=self.dtype,
+                    kernel_init=self.kernel_init(),
                     precision=self.precision)(x)
         x = jnp.reshape(x, (batch, -1, self.embedding_dim))
         return x
@@ -96,7 +98,7 @@ class UViT(nn.Module):
         # print(f'Shape of x after time embedding: {x.shape}')
         
         # Add positional encoding
-        x = PositionalEncoding(max_len=x.shape[1], embedding_dim=self.emb_features)(x)
+        x = PositionalEncoding(max_len=x.shape[1], embedding_dim=self.emb_features, kernel_init=self.kernel_init)(x)
         
         # print(f'Shape of x after positional encoding: {x.shape}')
         
@@ -113,20 +115,20 @@ class UViT(nn.Module):
         # Middle block
         x = TransformerBlock(heads=self.num_heads, dim_head=self.emb_features // self.num_heads, 
                              dtype=self.dtype, precision=self.precision, use_projection=self.use_projection, 
-                             use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross, force_fp32_for_softmax=self.fforce_fp32_for_softmax, 
+                             use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross, force_fp32_for_softmax=self.force_fp32_for_softmax, 
                              only_pure_attention=False,
                              kernel_init=self.kernel_init())(x)
         
         # # Out blocks
         for i in range(self.num_layers // 2):
-            skip = jnp.concatenate([x, skips.pop()], axis=-1)
-            skip = nn.DenseGeneral(features=self.emb_features, kernel_init=self.kernel_init(), 
-                                   dtype=self.dtype, precision=self.precision)(skip)
+            x = jnp.concatenate([x, skips.pop()], axis=-1)
+            x = nn.DenseGeneral(features=self.emb_features, kernel_init=self.kernel_init(), 
+                                   dtype=self.dtype, precision=self.precision)(x)
             x = TransformerBlock(heads=self.num_heads, dim_head=self.emb_features // self.num_heads, 
                                  dtype=self.dtype, precision=self.precision, use_projection=self.use_projection, 
-                                 use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross, force_fp32_for_softmax=self.fforce_fp32_for_softmax, 
+                                 use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross, force_fp32_for_softmax=self.force_fp32_for_softmax, 
                                  only_pure_attention=False,
-                                 kernel_init=self.kernel_init())(skip)
+                                 kernel_init=self.kernel_init())(x)
         
         # print(f'Shape of x after transformer blocks: {x.shape}')
         x = self.norm()(x)
@@ -139,6 +141,14 @@ class UViT(nn.Module):
         x = x[:, 1 + num_text_tokens:, :]
         x = unpatchify(x, channels=self.output_channels)
         # print(f'Shape of x after final dense layer: {x.shape}')
-        x = nn.Dense(features=self.output_channels, dtype=self.dtype, precision=self.precision, kernel_init=self.kernel_init())(x)
+        x = nn.Conv(
+            features=self.output_channels, 
+            kernel_size=(3, 3), 
+            strides=(1, 1),
+            padding='SAME', 
+            dtype=self.dtype, 
+            precision=self.precision, 
+            kernel_init=kernel_init(0.0),
+        )(x)
         
         return x
