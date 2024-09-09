@@ -136,32 +136,25 @@ class UViT(nn.Module):
         # print(f'Shape of x after transformer blocks: {x.shape}')
         x = self.norm()(x)
         
-        # print(f'Shape of x after norm: {x.shape}')
-        
         patch_dim = self.patch_size ** 2 * self.output_channels
         x = nn.Dense(features=patch_dim, dtype=self.dtype, precision=self.precision, kernel_init=self.kernel_init())(x)
-        # print(f'Shape of x after patch dense layer: {x.shape}, patch_dim: {patch_dim}')
         x = x[:, 1 + num_text_tokens:, :]
         x = unpatchify(x, channels=self.output_channels)
-        # print(f'Shape of x after final dense layer: {x.shape}')
         
         if self.add_residualblock_output:
             # Concatenate the original image
             x = jnp.concatenate([original_img, x], axis=-1)
             
-            x = ResidualBlock(
+            x = ConvLayer(
                 "conv",
-                name="final_residual",
                 features=64,
-                kernel_init=self.kernel_init(1.0),
-                kernel_size=(3,3),
+                kernel_size=(3, 3),
                 strides=(1, 1),
-                activation=self.activation,
-                norm_groups=self.norm_groups,
+                # activation=jax.nn.mish
+                kernel_init=self.kernel_init(0.0),
                 dtype=self.dtype,
-                precision=self.precision,
-                named_norms=False
-            )(x, temb)
+                precision=self.precision
+            )(x)
 
             x = self.norm()(x)
             x = self.activation(x)
