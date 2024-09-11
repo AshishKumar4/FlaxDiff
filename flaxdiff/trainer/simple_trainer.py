@@ -437,5 +437,6 @@ class SimpleTrainer:
                         "train/epoch": current_epoch,
                     }, step=current_step)
                 print(colored(f"\n\tEpoch {current_epoch} completed. Avg Loss: {avg_loss}, Time: {total_time:.2f}s, Best Loss: {self.best_loss}", 'green'))
+        print("Training done")
         self.save(epochs)
         return self.state
