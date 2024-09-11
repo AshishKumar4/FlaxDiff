@@ -111,8 +111,8 @@ def map_sample(
             "original_width": original_width,
         })
     except Exception as e:
-        print(f"Error maping sample {url}", e)
-        traceback.print_exc()
+        # print(f"Error maping sample {url}", e)
+        # traceback.print_exc()
         # error_queue.put_nowait({
         #     "url": url,
         #     "caption": caption,
