@@ -21,11 +21,12 @@ import urllib
 
 import PIL.Image
 import cv2
-import traceback 
+import traceback
 
 USER_AGENT = get_datasets_user_agent()
 
 data_queue = Queue(16*2000)
+error_queue = Queue(16*2000)
 
 
 def fetch_single_image(image_url, timeout=None, retries=0):
@@ -45,7 +46,7 @@ def fetch_single_image(image_url, timeout=None, retries=0):
 
 
 def default_image_processor(
-    image, image_shape, 
+    image, image_shape,
     min_image_shape=(128, 128),
     upscale_interpolation=cv2.INTER_CUBIC,
     downscale_interpolation=cv2.INTER_AREA,
@@ -77,8 +78,15 @@ def default_image_processor(
     return image, original_height, original_width
 
 
+def default_feature_extractor(sample):
+    return {
+        "url": sample["url"],
+        "caption": sample["caption"],
+    }
+
+
 def map_sample(
-    url, caption,
+    sample,
     image_shape=(256, 256),
     min_image_shape=(128, 128),
     timeout=15,
@@ -86,8 +94,11 @@ def map_sample(
     upscale_interpolation=cv2.INTER_CUBIC,
     downscale_interpolation=cv2.INTER_AREA,
     image_processor=default_image_processor,
+    feature_extractor=default_feature_extractor,
 ):
     try:
+        features = feature_extractor(sample)
+        url, caption = features["url"], features["caption"]
         # Assuming fetch_single_image is defined elsewhere
         image = fetch_single_image(url, timeout=timeout, retries=retries)
         if image is None:
@@ -96,11 +107,12 @@ def map_sample(
         image, original_height, original_width = image_processor(
             image, image_shape, min_image_shape=min_image_shape,
             upscale_interpolation=upscale_interpolation,
-            downscale_interpolation=downscale_interpolation,)
-        
+            downscale_interpolation=downscale_interpolation,
+        )
+
         if image is None:
             return
-        
+
         data_queue.put({
             "url": url,
             "caption": caption,
@@ -110,22 +122,17 @@ def map_sample(
         })
     except Exception as e:
         print(f"Error maping sample {url}", e)
-        traceback.print_exc() 
+        traceback.print_exc()
         # error_queue.put_nowait({
         #     "url": url,
         #     "caption": caption,
         #     "error": str(e)
         # })
         pass
-    
-def default_feature_extractor(sample):
-    return {
-        "url": sample["url"],
-        "caption": sample["caption"],
-    }
+
 
 def map_batch(
-    batch, num_threads=256, image_shape=(256, 256), 
+    batch, num_threads=256, image_shape=(256, 256),
     min_image_shape=(128, 128),
     timeout=15, retries=3, image_processor=default_image_processor,
     upscale_interpolation=cv2.INTER_CUBIC,
@@ -133,40 +140,76 @@ def map_batch(
     feature_extractor=default_feature_extractor,
 ):
     try:
-        map_sample_fn = partial(map_sample, image_shape=image_shape, min_image_shape=min_image_shape,
-                                timeout=timeout, retries=retries, image_processor=image_processor,
-                                upscale_interpolation=upscale_interpolation,
-                                downscale_interpolation=downscale_interpolation)
+        map_sample_fn = partial(
+            map_sample, image_shape=image_shape, min_image_shape=min_image_shape,
+            timeout=timeout, retries=retries, image_processor=image_processor,
+            upscale_interpolation=upscale_interpolation,
+            downscale_interpolation=downscale_interpolation,
+            feature_extractor=feature_extractor
+        )
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            features = feature_extractor(batch)
-            url, caption = features["url"], features["caption"]
-            executor.map(map_sample_fn, url, caption)
+            executor.map(map_sample_fn, batch)
     except Exception as e:
         print(f"Error maping batch", e)
-        traceback.print_exc() 
-        # error_queue.put_nowait({
-        #     "batch": batch,
-        #     "error": str(e)
-        # })
+        traceback.print_exc()
+        error_queue.put_nowait({
+            "batch": batch,
+            "error": str(e)
+        })
         pass
 
 
+def map_batch_repeat_forever(
+    batch, num_threads=256, image_shape=(256, 256),
+    min_image_shape=(128, 128),
+    timeout=15, retries=3, image_processor=default_image_processor,
+    upscale_interpolation=cv2.INTER_CUBIC,
+    downscale_interpolation=cv2.INTER_AREA,
+    feature_extractor=default_feature_extractor,
+):
+    while True:  # Repeat forever
+        try:
+            map_sample_fn = partial(
+                map_sample, image_shape=image_shape, min_image_shape=min_image_shape,
+                timeout=timeout, retries=retries, image_processor=image_processor,
+                upscale_interpolation=upscale_interpolation,
+                downscale_interpolation=downscale_interpolation,
+                feature_extractor=feature_extractor
+            )
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                executor.map(map_sample_fn, batch)
+            # Shuffle the batch
+            batch = batch.shuffle(seed=np.random.randint(0, 1000000))
+        except Exception as e:
+            print(f"Error maping batch", e)
+            traceback.print_exc()
+            error_queue.put_nowait({
+                "batch": batch,
+                "error": str(e)
+            })
+            pass
+
+
 def parallel_image_loader(
-    dataset: Dataset, num_workers: int = 8, image_shape=(256, 256), 
+    dataset: Dataset, num_workers: int = 8, image_shape=(256, 256),
     min_image_shape=(128, 128),
     num_threads=256, timeout=15, retries=3, image_processor=default_image_processor,
     upscale_interpolation=cv2.INTER_CUBIC,
     downscale_interpolation=cv2.INTER_AREA,
     feature_extractor=default_feature_extractor,
+    map_batch_fn=map_batch,
+
 ):
-    map_batch_fn = partial(map_batch, num_threads=num_threads, image_shape=image_shape, 
-                           min_image_shape=min_image_shape,
-                           timeout=timeout, retries=retries, image_processor=image_processor,
-                           upscale_interpolation=upscale_interpolation,
-                           downscale_interpolation=downscale_interpolation,
-                           feature_extractor=feature_extractor)
+    map_batch_fn = partial(
+        map_batch_fn, num_threads=num_threads, image_shape=image_shape,
+        min_image_shape=min_image_shape,
+        timeout=timeout, retries=retries, image_processor=image_processor,
+        upscale_interpolation=upscale_interpolation,
+        downscale_interpolation=downscale_interpolation,
+        feature_extractor=feature_extractor
+    )
     shard_len = len(dataset) // num_workers
-    print(f"Local Shard lengths: {shard_len}")
+    print(f"Local Shard lengths: {shard_len}, workers: {num_workers}")
     with multiprocessing.Pool(num_workers) as pool:
         iteration = 0
         while True:
@@ -178,6 +221,7 @@ def parallel_image_loader(
             iteration += 1
             print(f"Shuffling dataset with seed {iteration}")
             dataset = dataset.shuffle(seed=iteration)
+            print(f"Dataset shuffled")
             # Clear the error queue
             # while not error_queue.empty():
             #     error_queue.get_nowait()
@@ -185,27 +229,44 @@ def parallel_image_loader(
 
 class ImageBatchIterator:
     def __init__(
-        self, dataset: Dataset, batch_size: int = 64, image_shape=(256, 256), 
+        self, dataset: Dataset, batch_size: int = 64, image_shape=(256, 256),
         min_image_shape=(128, 128),
-        num_workers: int = 8, num_threads=256, timeout=15, retries=3, 
+        num_workers: int = 8, num_threads=256, timeout=15, retries=3,
         image_processor=default_image_processor,
         upscale_interpolation=cv2.INTER_CUBIC,
         downscale_interpolation=cv2.INTER_AREA,
         feature_extractor=default_feature_extractor,
+        map_batch_fn=map_batch,
     ):
         self.dataset = dataset
         self.num_workers = num_workers
         self.batch_size = batch_size
-        loader = partial(parallel_image_loader, num_threads=num_threads,
-                         image_shape=image_shape,
-                         min_image_shape=min_image_shape, 
-                         num_workers=num_workers, 
-                         timeout=timeout, retries=retries, image_processor=image_processor,
-                         upscale_interpolation=upscale_interpolation,
-                         downscale_interpolation=downscale_interpolation,
-                         feature_extractor=feature_extractor)
+        loader = partial(
+            parallel_image_loader,
+            num_threads=num_threads,
+            image_shape=image_shape,
+            min_image_shape=min_image_shape,
+            num_workers=num_workers,
+            timeout=timeout, retries=retries,
+            image_processor=image_processor,
+            upscale_interpolation=upscale_interpolation,
+            downscale_interpolation=downscale_interpolation,
+            feature_extractor=feature_extractor,
+            map_batch_fn=map_batch_fn,
+        )
         self.thread = threading.Thread(target=loader, args=(dataset,))
         self.thread.start()
+        self.error_queue = queue.Queue()
+
+        def error_fetcher():
+            while True:
+                error = error_queue.get()
+                self.error_queue.put(error)
+        self.error_thread = threading.Thread(target=error_fetcher)
+        self.error_thread.start()
+
+    def get_error(self):
+        yield self.error_queue.get()
 
     def __iter__(self):
         return self
@@ -269,6 +330,7 @@ class OnlineStreamingDataLoader():
         upscale_interpolation=cv2.INTER_CUBIC,
         downscale_interpolation=cv2.INTER_AREA,
         feature_extractor=default_feature_extractor,
+        map_batch_fn=map_batch,
     ):
         if isinstance(dataset, str):
             dataset_path = dataset
@@ -289,13 +351,16 @@ class OnlineStreamingDataLoader():
         self.dataset = dataset.shard(
             num_shards=global_process_count, index=global_process_index)
         print(f"Dataset length: {len(dataset)}")
-        self.iterator = ImageBatchIterator(self.dataset, image_shape=image_shape,
-                                           min_image_shape=min_image_shape,
-                                           num_workers=num_workers, batch_size=batch_size, num_threads=num_threads,
-                                            timeout=timeout, retries=retries, image_processor=image_processor,
-                                             upscale_interpolation=upscale_interpolation,
-                                             downscale_interpolation=downscale_interpolation,
-                                             feature_extractor=feature_extractor)
+        self.iterator = ImageBatchIterator(
+            self.dataset, image_shape=image_shape,
+            min_image_shape=min_image_shape,
+            num_workers=num_workers, batch_size=batch_size, num_threads=num_threads,
+            timeout=timeout, retries=retries, image_processor=image_processor,
+            upscale_interpolation=upscale_interpolation,
+            downscale_interpolation=downscale_interpolation,
+            feature_extractor=feature_extractor,
+            map_batch_fn=map_batch_fn,
+        )
         self.batch_size = batch_size
 
         # Launch a thread to load batches in the background
@@ -306,7 +371,7 @@ class OnlineStreamingDataLoader():
                 try:
                     self.batch_queue.put(collate_fn(batch))
                 except Exception as e:
-                    print("Error processing batch", e)
+                    print("Error collating batch", e)
 
         self.loader_thread = threading.Thread(target=batch_loader)
         self.loader_thread.start()
