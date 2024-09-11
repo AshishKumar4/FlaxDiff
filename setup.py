@@ -11,7 +11,7 @@ required_packages=[
 setup(
     name='flaxdiff',
     packages=find_packages(),
-    version='0.1.35.2',
+    version='0.1.35.3',
     description='A versatile and easy to understand Diffusion library',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
