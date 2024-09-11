@@ -84,7 +84,6 @@ def default_feature_extractor(sample):
         "caption": sample["caption"],
     }
 
-
 def map_sample(
     url,
     caption,
@@ -128,7 +127,6 @@ def map_sample(
         # })
         pass
 
-
 def map_batch(
     batch, num_threads=256, image_shape=(256, 256),
     min_image_shape=(128, 128),
@@ -149,46 +147,48 @@ def map_batch(
         url, caption = features["url"], features["caption"]
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             executor.map(map_sample_fn, url, caption)
+        return None
     except Exception as e:
         print(f"Error maping batch", e)
         traceback.print_exc()
-        error_queue.put_nowait({
-            "batch": batch,
-            "error": str(e)
-        })
-        pass
+        # error_queue.put_nowait({
+        #     "batch": batch,
+        #     "error": str(e)
+        # })
+        return e
 
 
-def map_batch_repeat_forever(
-    batch, num_threads=256, image_shape=(256, 256),
-    min_image_shape=(128, 128),
-    timeout=15, retries=3, image_processor=default_image_processor,
-    upscale_interpolation=cv2.INTER_CUBIC,
-    downscale_interpolation=cv2.INTER_AREA,
-    feature_extractor=default_feature_extractor,
-):
-    while True:  # Repeat forever
-        try:
-            map_sample_fn = partial(
-                map_sample, image_shape=image_shape, min_image_shape=min_image_shape,
-                timeout=timeout, retries=retries, image_processor=image_processor,
-                upscale_interpolation=upscale_interpolation,
-                downscale_interpolation=downscale_interpolation,
-                feature_extractor=feature_extractor
-            )
-            with ThreadPoolExecutor(max_workers=num_threads) as executor:
-                executor.map(map_sample_fn, batch)
-            # Shuffle the batch
-            batch = batch.shuffle(seed=np.random.randint(0, 1000000))
-        except Exception as e:
-            print(f"Error maping batch", e)
-            traceback.print_exc()
-            error_queue.put_nowait({
-                "batch": batch,
-                "error": str(e)
-            })
-            pass
-
+# def map_batch_repeat_forever(
+#     batch, num_threads=256, image_shape=(256, 256),
+#     min_image_shape=(128, 128),
+#     timeout=15, retries=3, image_processor=default_image_processor,
+#     upscale_interpolation=cv2.INTER_CUBIC,
+#     downscale_interpolation=cv2.INTER_AREA,
+#     feature_extractor=default_feature_extractor,
+# ):
+#     while True:  # Repeat forever
+#         try:
+#             map_sample_fn = partial(
+#                 map_sample, image_shape=image_shape, min_image_shape=min_image_shape,
+#                 timeout=timeout, retries=retries, image_processor=image_processor,
+#                 upscale_interpolation=upscale_interpolation,
+#                 downscale_interpolation=downscale_interpolation,
+#                 feature_extractor=feature_extractor
+#             )
+#             features = feature_extractor(batch)
+#             url, caption = features["url"], features["caption"]
+#             with ThreadPoolExecutor(max_workers=num_threads) as executor:
+#                 executor.map(map_sample_fn, url, caption)
+#             # Shuffle the batch
+#             batch = batch.shuffle(seed=np.random.randint(0, 1000000))
+#         except Exception as e:
+#             print(f"Error maping batch", e)
+#             traceback.print_exc()
+#             # error_queue.put_nowait({
+#             #     "batch": batch,
+#             #     "error": str(e)
+#             # })
+#             pass
 
 def parallel_image_loader(
     dataset: Dataset, num_workers: int = 8, image_shape=(256, 256),
@@ -218,7 +218,10 @@ def parallel_image_loader(
                       for i in range(num_workers)]
             # shards = [dataset.shard(num_shards=num_workers, index=i) for i in range(num_workers)]
             print(f"mapping {len(shards)} shards")
-            pool.map(map_batch_fn, shards)
+            errors = pool.map(map_batch_fn, shards)
+            for error in errors:
+                if error is not None:
+                    print(f"Error in mapping batch", error)
             iteration += 1
             print(f"Shuffling dataset with seed {iteration}")
             dataset = dataset.shuffle(seed=iteration)
@@ -257,17 +260,6 @@ class ImageBatchIterator:
         )
         self.thread = threading.Thread(target=loader, args=(dataset,))
         self.thread.start()
-        self.error_queue = queue.Queue()
-
-        def error_fetcher():
-            while True:
-                error = error_queue.get()
-                self.error_queue.put(error)
-        self.error_thread = threading.Thread(target=error_fetcher)
-        self.error_thread.start()
-
-    def get_error(self):
-        yield self.error_queue.get()
 
     def __iter__(self):
         return self
