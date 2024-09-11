@@ -10,6 +10,7 @@ import orbax.checkpoint
 import flax.jax_utils
 import wandb.util
 import wandb.wandb_run
+from flaxdiff.models.common import kernel_init
 from flaxdiff.models.simple_unet import Unet
 from flaxdiff.models.simple_vit import UViT
 import jax.experimental.pallas.ops.tpu.flash_attention
@@ -473,6 +474,36 @@ def default_image_processor(
         # traceback.print_exc()
         return None, 0, 0
 
+def default_feature_extractor(sample):
+    url = None
+    if "url" in sample:
+        url = sample["url"]
+    elif "URL" in sample:
+        url = sample["URL"]
+    elif "image_url" in sample:
+        url = sample["image_url"]
+    else:
+        print("No url found in sample, skipping", sample.keys())
+    
+    caption = None
+    if "caption" in sample:
+        caption = sample["caption"]
+    elif "CAPTION" in sample:
+        caption = sample["CAPTION"]
+    elif "txt" in sample:
+        caption = sample["txt"]
+    elif "TEXT" in sample:
+        caption = sample["TEXT"]
+    elif "text" in sample:
+        caption = sample["text"]
+    else:
+        print("No caption found in sample, skipping", sample.keys())
+        
+    return {
+        "url": url,
+        "caption": caption,
+    }
+    
 
 class OnlineStreamingDataLoader():
     def __init__(
@@ -498,6 +529,7 @@ class OnlineStreamingDataLoader():
         image_processor=default_image_processor,
         upscale_interpolation=cv2.INTER_CUBIC,
         downscale_interpolation=cv2.INTER_AREA,
+        feature_extractor=default_feature_extractor,
     ):
         if isinstance(dataset, str):
             dataset_path = dataset
@@ -523,7 +555,8 @@ class OnlineStreamingDataLoader():
                                            num_workers=num_workers, batch_size=batch_size, num_threads=num_threads,
                                             timeout=timeout, retries=retries, image_processor=image_processor,
                                              upscale_interpolation=upscale_interpolation,
-                                             downscale_interpolation=downscale_interpolation)
+                                             downscale_interpolation=downscale_interpolation,
+                                             feature_extractor=feature_extractor)
         self.batch_size = batch_size
 
         # Launch a thread to load batches in the background
@@ -556,17 +589,18 @@ onlineDatasetMap = {
             # "ChristophSchuhmann/MS_COCO_2017_URL_TEXT",
             # "dclure/laion-aesthetics-12m-umap",
             "gs://flaxdiff-datasets-regional/datasets/laion-aesthetics-12m+mscoco-2017",
-            # "gs://flaxdiff-datasets-regional/datasets/coyo700m-aesthetic-5.4_25M",
+            "gs://flaxdiff-datasets-regional/datasets/coyo700m-aesthetic-5.4_25M",
             "gs://flaxdiff-datasets-regional/datasets/leonardo-liked-1.8m",
             "gs://flaxdiff-datasets-regional/datasets/leonardo-liked-1.8m",
             "gs://flaxdiff-datasets-regional/datasets/leonardo-liked-1.8m",
             "gs://flaxdiff-datasets-regional/datasets/cc12m",
-            "gs://flaxdiff-datasets-regional/datasets/cc3m",
             "gs://flaxdiff-datasets-regional/datasets/playground-liked",
             "gs://flaxdiff-datasets-regional/datasets/leonardo-liked-1.8m",
             "gs://flaxdiff-datasets-regional/datasets/leonardo-liked-1.8m",
             "gs://flaxdiff-datasets-regional/datasets/cc3m",
             "gs://flaxdiff-datasets-regional/datasets/cc3m",
+            "gs://flaxdiff-datasets-regional/datasets/laion2B-en-aesthetic-4.2_37M",
+            # "gs://flaxdiff-datasets-regional/datasets/laiion400m-185M"
         ]
     }
 }
@@ -1371,6 +1405,8 @@ parser.add_argument('--autoencoder_opts', type=str,
 
 parser.add_argument('--use_dynamic_scale', type=boolean_string, default=False, help='Use dynamic scale for training')
 parser.add_argument('--clip_grads', type=float, default=0, help='Clip gradients to this value')
+parser.add_argument('--add_residualblock_output', type=boolean_string, default=False, help='Add a residual block stage to the final output')
+parser.add_argument('--kernel_init', type=None, default=1.0, help='Kernel initialization value')
 
 def main(args):
     resource.setrlimit(
@@ -1522,6 +1558,7 @@ def main(args):
                 "num_heads":  args.num_heads,
                 "dropout_rate": 0.1,
                 "use_projection": False,
+                "add_residualblock_output": args.add_residualblock_output,
             },
         }
     }
@@ -1552,6 +1589,10 @@ def main(args):
         "autoencoder": args.autoencoder,
         "autoencoder_opts": args.autoencoder_opts,
     }
+    
+    if args.kernel_init is not None:
+        model_config['kernel_init'] = partial(kernel_init, scale=float(args.kernel_init))
+        print("Using custom kernel initialization with scale", args.kernel_init)
 
     cosine_schedule = CosineNoiseSchedule(1000, beta_end=1)
     karas_ve_schedule = KarrasVENoiseScheduler(
@@ -1663,14 +1704,14 @@ Old -->
 
 for tpu-v4-64
 
-python3 training.py --dataset=combined_30m --dataset_path='/home/mrwhite0racle/gcs_mount/'\
+python3 training.py --dataset=combined_online --dataset_path='/home/mrwhite0racle/gcs_mount/'\
             --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=512 --image_size=128 --learning_rate=9e-5 \
+            --epochs=40 --batch_size=512 --image_size=512 --learning_rate=9e-5 \
             --architecture=uvit --num_layers=12 --emb_features=768 --norm_groups 0 --num_heads=12 \
             --dtype=bfloat16 --precision=default \
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_uvit_combined_30m'\
-            --optimizer=adamw --clip_grads 0.5 \
-            --learning_rate_schedule=cosine --learning_rate_peak=2.7e-4 --learning_rate_end=9e-5 --learning_rate_warmup_steps=10000 --learning_rate_decay_epochs=2\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_uvit_ldm_combined_online'\
+            --optimizer=adamw --clip_grads 0.5 --autoencoder=stable_diffusion \
+            --learning_rate_schedule=cosine --learning_rate_peak=2.7e-4 --learning_rate_end=4e-5 --learning_rate_warmup_steps=10000 --learning_rate_decay_epochs=2\
                 
                 
             --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_30m/image_size-512/batch-512-v4-64_flaxdiff-0-1-8_ldm_dyn_scale_NEW_ARCH_combined_30'
@@ -1679,25 +1720,23 @@ python3 training.py --dataset=combined_30m --dataset_path='/home/mrwhite0racle/g
             --learning_rate_schedule=cosine --learning_rate_peak=4e-5 --learning_rate_end=9e-6 --learning_rate_warmup_steps=5000 --learning_rate_decay_epochs=2\
                 
 
-python3 training.py --dataset=combined_30m --dataset_path='/home/mrwhite0racle/gcs_mount/'\
-            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=256 --image_size=128 \
-            --learning_rate=9e-5 --architecture=uvit --num_layers=12 \
-            --use_self_and_cross=False --precision=default --dtype=bfloat16 --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_flaxdiff-0-1-10__new-combined_30m'\
-            --optimizer=adamw --feature_depths 128 256 512 512 --use_dynamic_scale=True\
-            --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-128/batch-256-v4-32_flaxdiff-0-1-8__new-combined_1'
+python3 training.py --dataset=combined_online --dataset_path=/home/mrwhite0racle/gcs_mount/ \
+    --checkpoint_dir=flaxdiff-datasets-regional/checkpoints/ --checkpoint_fs=gcs \
+    --epochs=40 --batch_size=512 --image_size=256 --learning_rate=4e-5 \
+    --architecture=uvit --num_layers=12 --emb_features=768 --norm_groups 0 --num_heads=12 \
+    --dtype=bfloat16 --precision=default \
+    --experiment_name=dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64_uvit_combined_online-larger_residualout \
+    --optimizer=adamw --clip_grads 1 --add_residualblock_output=True
 
 for tpu-v4-32
 
-python3 training.py --dataset=combined_30m --dataset_path='/home/mrwhite0racle/gcs_mount/'\
-            --checkpoint_dir='flaxdiff-datasets-regional/checkpoints/' --checkpoint_fs='gcs'\
-            --epochs=40 --batch_size=256 --image_size=128 \
-            --learning_rate=8e-5 --num_res_blocks=3 \
-            --use_self_and_cross=False --precision=default --dtype=bfloat16 --attention_heads=16\
-            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-32_flaxdiff-0-1-9_combined_30m'\
-            --optimizer=adamw --feature_depths 128 256 512 512 --use_dynamic_scale=True --named_norms=True --only_pure_attention=True\
-            --load_from_checkpoint='gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_aesthetic/image_size-128/batch-256-v4-32_flaxdiff-0-1-8__3'
+python3 training.py --dataset=combined_online --dataset_path=/home/mrwhite0racle/gcs_mount/ --checkpoint_dir=flaxdiff-datasets-regional/checkpoints/ \
+    --checkpoint_fs=gcs --epochs=40 --batch_size=512 --image_size=256 --learning_rate=8e-5 \
+    --num_res_blocks=3 --emb_features 512 --use_self_and_cross=False \
+    --precision=default --dtype=bfloat16 --attention_heads=16 \
+    --experiment_name=dataset-{dataset}/image_size-{image_size}/batch-{batch_size}-v4-64-_combined_online-finetuned-more-biggerdata \
+    --optimizer=adamw --feature_depths 128 256 512 512 --only_pure_attention=True --named_norms=True --norm_groups=0 \
+    --clip_grads=1 --load_from_checkpoint=gs://flaxdiff-datasets-regional/checkpoints/dataset-combined_online/image_size-256/batch-512-v4-64-_combined_online-finetuned-more
 
 for tpu-v4-16
 
