@@ -1,0 +1,574 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "laion2_b-en-aesthetic",
+  "dataset_size": 11459405563,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00000-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64692911,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00001-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64774696,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00002-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64731259,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00003-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64666241,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00004-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64852256,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00005-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64761727,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00006-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64754693,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00007-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64692147,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00008-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64754963,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00009-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64803411,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00010-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64619675,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00011-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64722106,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00012-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64745051,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00013-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64655723,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00014-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64771123,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00015-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64752857,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00016-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64638803,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00017-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64786448,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00018-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64719742,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00019-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64701394,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00020-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64728633,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00021-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64730400,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00022-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64799140,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00023-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64775330,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00024-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64725847,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00025-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64812942,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00026-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64745715,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00027-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64785270,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00028-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64780575,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00029-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64754469,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00030-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64725263,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00031-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64758209,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00032-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64684413,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00033-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64721816,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00034-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64787316,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00035-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64677821,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00036-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64730009,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00037-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64689948,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00038-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64704581,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00039-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64718889,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00040-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64708552,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00041-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64747739,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00042-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64732107,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00043-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64703396,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00044-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64679281,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00045-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64693169,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00046-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64768334,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00047-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64814831,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00048-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64774764,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00049-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64828716,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00050-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64773464,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00051-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64735920,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00052-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64681051,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00053-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64884924,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00054-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64701969,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00055-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64881482,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00056-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64744496,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00057-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64723799,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00058-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64783560,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00059-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64727774,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00060-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64720085,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00061-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64757535,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00062-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64696567,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00063-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64685113,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00064-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64781760,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00065-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64705138,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00066-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64684675,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00067-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64691545,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00068-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64756752,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00069-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64725058,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00070-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64751694,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00071-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64675673,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00072-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64716972,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00073-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64852149,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00074-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64686758,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00075-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64739311,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00076-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64646874,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00077-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64743878,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00078-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64724822,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00079-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64736953,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00080-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64667027,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00081-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64755193,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00082-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64719944,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00083-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64716414,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00084-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64827134,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00085-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64707772,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00086-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64806444,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00087-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64716990,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00088-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64715573,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00089-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64795551,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00090-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64674972,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00091-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64797860,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00092-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64704409,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00093-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64781225,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00094-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64812479,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00095-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64685048,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00096-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64647420,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00097-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64753207,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00098-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64687614,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00099-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64644022,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00100-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64776384,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00101-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64708601,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00102-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64779625,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00103-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64732734,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00104-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64703436,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00105-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64827202,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00106-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64853811,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00107-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64680701,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00108-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64787539,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00109-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64782994,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00110-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64692385,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00111-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64738815,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00112-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64672258,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00113-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64688547,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00114-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64746984,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00115-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64776343,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00116-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64769265,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00117-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64652151,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00118-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64630519,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00119-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64771811,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00120-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64752332,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00121-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64796949,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00122-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64663074,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00123-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64734398,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00124-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64761168,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00125-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64728823,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00126-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64690664,
+      "checksum": null
+    },
+    "hf://datasets/laion/laion2B-en-aesthetic@c2f3a74facd1c4f019f7623414fab06285e50f75/part-00127-cad4a140-cebd-46fa-b874-e8968f93e32e-c000.snappy.parquet": {
+      "num_bytes": 64691216,
+      "checksum": null
+    }
+  },
+  "download_size": 8286209479,
+  "features": {
+    "url": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "caption": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 19745615042,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 11459405563,
+      "num_examples": 51869119,
+      "shard_lengths": [
+        2431332,
+        2431333,
+        2431333,
+        2431324,
+        2431360,
+        2431377,
+        2431408,
+        2431437,
+        2431417,
+        2431429,
+        2431408,
+        2431373,
+        2431343,
+        2431344,
+        2431337,
+        2431347,
+        2431342,
+        2431340,
+        2431360,
+        2431365,
+        2431362,
+        810448
+      ],
+      "dataset_name": "laion2_b-en-aesthetic"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
