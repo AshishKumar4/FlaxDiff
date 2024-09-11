@@ -214,8 +214,9 @@ def parallel_image_loader(
         iteration = 0
         while True:
             # Repeat forever
-            shards = [dataset[i*shard_len:(i+1)*shard_len]
-                      for i in range(num_workers)]
+            # shards = [dataset[i*shard_len:(i+1)*shard_len]
+            #           for i in range(num_workers)]
+            shards = [dataset.shard(num_shards=num_workers, index=i) for i in range(num_workers)]
             print(f"mapping {len(shards)} shards")
             pool.map(map_batch_fn, shards)
             iteration += 1
