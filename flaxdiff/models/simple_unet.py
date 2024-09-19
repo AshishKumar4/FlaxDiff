@@ -83,6 +83,8 @@ class Unet(nn.Module):
                                         precision=attention_config.get("precision", self.precision),
                                         only_pure_attention=attention_config.get("only_pure_attention", True),
                                         force_fp32_for_softmax=attention_config.get("force_fp32_for_softmax", False),
+                                        norm_inputs=attention_config.get("norm_inputs", True),
+                                        explicitly_add_residual=attention_config.get("explicitly_add_residual", True),
                                         kernel_init=self.kernel_init(1.0),
                                         name=f"down_{i}_attention_{j}")(x, textcontext)
                 # print("down residual for feature level", i, "is of shape", x.shape, "features", dim_in)
@@ -125,6 +127,8 @@ class Unet(nn.Module):
                                     precision=middle_attention.get("precision", self.precision),
                                     only_pure_attention=middle_attention.get("only_pure_attention", True),
                                     force_fp32_for_softmax=middle_attention.get("force_fp32_for_softmax", False),
+                                    norm_inputs=middle_attention.get("norm_inputs", True),
+                                    explicitly_add_residual=middle_attention.get("explicitly_add_residual", True),
                                     kernel_init=self.kernel_init(1.0),
                                     name=f"middle_attention_{j}")(x, textcontext)
             x = ResidualBlock(
@@ -171,6 +175,8 @@ class Unet(nn.Module):
                                         precision=attention_config.get("precision", self.precision),
                                         only_pure_attention=attention_config.get("only_pure_attention", True),
                                         force_fp32_for_softmax=middle_attention.get("force_fp32_for_softmax", False),
+                                        norm_inputs=attention_config.get("norm_inputs", True),
+                                        explicitly_add_residual=attention_config.get("explicitly_add_residual", True),
                                         kernel_init=self.kernel_init(1.0),
                                         name=f"up_{i}_attention_{j}")(x, textcontext)
             # print("Upscaling ", i, x.shape)

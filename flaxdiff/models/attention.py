@@ -303,27 +303,30 @@ class TransformerBlock(nn.Module):
     only_pure_attention:bool = False
     force_fp32_for_softmax: bool = True
     kernel_init: Callable = kernel_init(1.0)
+    norm_inputs: bool = True
+    explicitly_add_residual: bool = True
 
     @nn.compact
     def __call__(self, x, context=None):
         inner_dim = self.heads * self.dim_head
         C = x.shape[-1]
-        normed_x = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)(x)
+        if self.norm_inputs:
+            x = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)(x)
         if self.use_projection == True:
             if self.use_linear_attention:
                 projected_x = nn.Dense(features=inner_dim, 
                                        use_bias=False, precision=self.precision, 
                                        kernel_init=self.kernel_init,
-                                       dtype=self.dtype, name=f'project_in')(normed_x)
+                                       dtype=self.dtype, name=f'project_in')(x)
             else:
                 projected_x = nn.Conv(
                     features=inner_dim, kernel_size=(1, 1),
                     kernel_init=self.kernel_init,
                     strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
                     precision=self.precision, name=f'project_in_conv',
-                )(normed_x)
+                )(x)
         else:
-            projected_x = normed_x
+            projected_x = x
             inner_dim = C
             
         context = projected_x if context is None else context
@@ -356,6 +359,9 @@ class TransformerBlock(nn.Module):
                     strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
                     precision=self.precision, name=f'project_out_conv',
                 )(projected_x)
-
-        out = x + projected_x
+                
+        if self.only_pure_attention or self.explicitly_add_residual:
+            projected_x = x + projected_x
+            
+        out = projected_x
         return out

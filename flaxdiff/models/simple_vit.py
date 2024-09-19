@@ -69,6 +69,8 @@ class UViT(nn.Module):
     precision: PrecisionLike = None
     kernel_init: Callable = partial(kernel_init, scale=1.0)
     add_residualblock_output: bool = False
+    norm_inputs: bool = False
+    explicitly_add_residual: bool = False
 
     def setup(self):
         if self.norm_groups > 0:
@@ -110,16 +112,20 @@ class UViT(nn.Module):
         for i in range(self.num_layers // 2):
             x = TransformerBlock(heads=self.num_heads, dim_head=self.emb_features // self.num_heads, 
                                  dtype=self.dtype, precision=self.precision, use_projection=self.use_projection, 
-                                 use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross, force_fp32_for_softmax=self.force_fp32_for_softmax, 
+                                 use_flash_attention=self.use_flash_attention, use_self_and_cross=False, force_fp32_for_softmax=self.force_fp32_for_softmax, 
                                  only_pure_attention=False,
+                                 norm_inputs=self.norm_inputs,
+                                 explicitly_add_residual=self.explicitly_add_residual,
                                  kernel_init=self.kernel_init())(x)
             skips.append(x)
             
         # Middle block
         x = TransformerBlock(heads=self.num_heads, dim_head=self.emb_features // self.num_heads, 
                              dtype=self.dtype, precision=self.precision, use_projection=self.use_projection, 
-                             use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross, force_fp32_for_softmax=self.force_fp32_for_softmax, 
+                             use_flash_attention=self.use_flash_attention, use_self_and_cross=False, force_fp32_for_softmax=self.force_fp32_for_softmax, 
                              only_pure_attention=False,
+                            norm_inputs=self.norm_inputs,
+                            explicitly_add_residual=self.explicitly_add_residual,
                              kernel_init=self.kernel_init())(x)
         
         # # Out blocks
@@ -131,6 +137,8 @@ class UViT(nn.Module):
                                  dtype=self.dtype, precision=self.precision, use_projection=self.use_projection, 
                                  use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross, force_fp32_for_softmax=self.force_fp32_for_softmax, 
                                  only_pure_attention=False,
+                                 norm_inputs=self.norm_inputs,
+                                 explicitly_add_residual=self.explicitly_add_residual,
                                  kernel_init=self.kernel_init())(x)
         
         # print(f'Shape of x after transformer blocks: {x.shape}')
