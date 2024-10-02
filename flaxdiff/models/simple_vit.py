@@ -70,7 +70,7 @@ class UViT(nn.Module):
     kernel_init: Callable = partial(kernel_init, scale=1.0)
     add_residualblock_output: bool = False
     norm_inputs: bool = False
-    explicitly_add_residual: bool = False
+    explicitly_add_residual: bool = True
 
     def setup(self):
         if self.norm_groups > 0:
