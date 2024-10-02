@@ -50,7 +50,7 @@ class Unet(nn.Module):
             features=self.feature_depths[0],
             kernel_size=(3, 3),
             strides=(1, 1),
-            kernel_init=self.kernel_init(1.0),
+            kernel_init=self.kernel_init(scale=1.0),
             dtype=self.dtype,
             precision=self.precision
         )(x)
@@ -65,7 +65,7 @@ class Unet(nn.Module):
                     down_conv_type,
                     name=f"down_{i}_residual_{j}",
                     features=dim_in,
-                    kernel_init=self.kernel_init(1.0),
+                    kernel_init=self.kernel_init(scale=1.0),
                     kernel_size=(3, 3),
                     strides=(1, 1),
                     activation=self.activation,
@@ -85,7 +85,7 @@ class Unet(nn.Module):
                                         force_fp32_for_softmax=attention_config.get("force_fp32_for_softmax", False),
                                         norm_inputs=attention_config.get("norm_inputs", True),
                                         explicitly_add_residual=attention_config.get("explicitly_add_residual", True),
-                                        kernel_init=self.kernel_init(1.0),
+                                        kernel_init=self.kernel_init(scale=1.0),
                                         name=f"down_{i}_attention_{j}")(x, textcontext)
                 # print("down residual for feature level", i, "is of shape", x.shape, "features", dim_in)
                 downs.append(x)
@@ -108,7 +108,7 @@ class Unet(nn.Module):
                 middle_conv_type,
                 name=f"middle_res1_{j}",
                 features=middle_dim_out,
-                kernel_init=self.kernel_init(1.0),
+                kernel_init=self.kernel_init(scale=1.0),
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 activation=self.activation,
@@ -129,13 +129,13 @@ class Unet(nn.Module):
                                     force_fp32_for_softmax=middle_attention.get("force_fp32_for_softmax", False),
                                     norm_inputs=middle_attention.get("norm_inputs", True),
                                     explicitly_add_residual=middle_attention.get("explicitly_add_residual", True),
-                                    kernel_init=self.kernel_init(1.0),
+                                    kernel_init=self.kernel_init(scale=1.0),
                                     name=f"middle_attention_{j}")(x, textcontext)
             x = ResidualBlock(
                 middle_conv_type,
                 name=f"middle_res2_{j}",
                 features=middle_dim_out,
-                kernel_init=self.kernel_init(1.0),
+                kernel_init=self.kernel_init(scale=1.0),
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 activation=self.activation,
@@ -157,7 +157,7 @@ class Unet(nn.Module):
                     up_conv_type,# if j == 0 else "separable",
                     name=f"up_{i}_residual_{j}",
                     features=dim_out,
-                    kernel_init=self.kernel_init(1.0),
+                    kernel_init=self.kernel_init(scale=1.0),
                     kernel_size=kernel_size,
                     strides=(1, 1),
                     activation=self.activation,
@@ -177,7 +177,7 @@ class Unet(nn.Module):
                                         force_fp32_for_softmax=middle_attention.get("force_fp32_for_softmax", False),
                                         norm_inputs=attention_config.get("norm_inputs", True),
                                         explicitly_add_residual=attention_config.get("explicitly_add_residual", True),
-                                        kernel_init=self.kernel_init(1.0),
+                                        kernel_init=self.kernel_init(scale=1.0),
                                         name=f"up_{i}_attention_{j}")(x, textcontext)
             # print("Upscaling ", i, x.shape)
             if i != len(feature_depths) - 1:
@@ -196,7 +196,7 @@ class Unet(nn.Module):
             features=self.feature_depths[0],
             kernel_size=(3, 3),
             strides=(1, 1),
-            kernel_init=self.kernel_init(1.0),
+            kernel_init=self.kernel_init(scale=1.0),
             dtype=self.dtype,
             precision=self.precision
         )(x)
@@ -207,7 +207,7 @@ class Unet(nn.Module):
             conv_type,
             name="final_residual",
             features=self.feature_depths[0],
-            kernel_init=self.kernel_init(1.0),
+            kernel_init=self.kernel_init(scale=1.0),
             kernel_size=(3,3),
             strides=(1, 1),
             activation=self.activation,
@@ -226,7 +226,7 @@ class Unet(nn.Module):
             kernel_size=(3, 3),
             strides=(1, 1),
             # activation=jax.nn.mish
-            kernel_init=self.kernel_init(0.0),
+            kernel_init=self.kernel_init(scale=0.0),
             dtype=self.dtype,
             precision=self.precision
         )(x)
