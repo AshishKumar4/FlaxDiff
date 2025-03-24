@@ -45,36 +45,43 @@ def fetch_single_image(image_url, timeout=None, retries=0):
 
 
 def default_image_processor(
-    image, image_shape,
+    image, image_shape, 
     min_image_shape=(128, 128),
     upscale_interpolation=cv2.INTER_CUBIC,
     downscale_interpolation=cv2.INTER_AREA,
 ):
-    image = np.array(image)
-    original_height, original_width = image.shape[:2]
-    # check if the image is too small
-    if min(original_height, original_width) < min(min_image_shape):
-        return None, original_height, original_width
-    # check if wrong aspect ratio
-    if max(original_height, original_width) / min(original_height, original_width) > 2.4:
-        return None, original_height, original_width
-    # check if the variance is too low
-    if np.std(image) < 1e-5:
-        return None, original_height, original_width
-    # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    downscale = max(original_width, original_height) > max(image_shape)
-    interpolation = downscale_interpolation if downscale else upscale_interpolation
+    try:
+        image = np.array(image)
+        if len(image.shape) != 3 or image.shape[2] != 3:
+            return None, 0, 0
+        original_height, original_width = image.shape[:2]
+        # check if the image is too small
+        if min(original_height, original_width) < min(min_image_shape):
+            return None, original_height, original_width
+        # check if wrong aspect ratio
+        if max(original_height, original_width) / min(original_height, original_width) > 2.4:
+            return None, original_height, original_width
+        # check if the variance is too low
+        if np.std(image) < 1e-5:
+            return None, original_height, original_width
+        # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        downscale = max(original_width, original_height) > max(image_shape)
+        interpolation = downscale_interpolation if downscale else upscale_interpolation
 
-    image = A.longest_max_size(image, max(
-        image_shape), interpolation=interpolation)
-    image = A.pad(
-        image,
-        min_height=image_shape[0],
-        min_width=image_shape[1],
-        border_mode=cv2.BORDER_CONSTANT,
-        value=[255, 255, 255],
-    )
-    return image, original_height, original_width
+        image = A.longest_max_size(image, max(
+            image_shape), interpolation=interpolation)
+        image = A.pad(
+            image,
+            min_height=image_shape[0],
+            min_width=image_shape[1],
+            border_mode=cv2.BORDER_CONSTANT,
+            value=[255, 255, 255],
+        )
+        return image, original_height, original_width
+    except Exception as e:
+        # print("Error processing image", e, image_shape, interpolation)
+        # traceback.print_exc()
+        return None, 0, 0
 
 
 def map_sample(
@@ -120,14 +127,36 @@ def map_sample(
         # })
         pass
 
-
 def default_feature_extractor(sample):
+    url = None
+    if "url" in sample:
+        url = sample["url"]
+    elif "URL" in sample:
+        url = sample["URL"]
+    elif "image_url" in sample:
+        url = sample["image_url"]
+    else:
+        print("No url found in sample, skipping", sample.keys())
+    
+    caption = None
+    if "caption" in sample:
+        caption = sample["caption"]
+    elif "CAPTION" in sample:
+        caption = sample["CAPTION"]
+    elif "txt" in sample:
+        caption = sample["txt"]
+    elif "TEXT" in sample:
+        caption = sample["TEXT"]
+    elif "text" in sample:
+        caption = sample["text"]
+    else:
+        print("No caption found in sample, skipping", sample.keys())
+        
     return {
-        "url": sample["url"],
-        "caption": sample["caption"],
+        "url": url,
+        "caption": caption,
     }
-
-
+    
 def map_batch(
     batch, num_threads=256, image_shape=(256, 256),
     min_image_shape=(128, 128),
@@ -301,15 +330,13 @@ class OnlineStreamingDataLoader():
         self.dataset = dataset.shard(
             num_shards=global_process_count, index=global_process_index)
         print(f"Dataset length: {len(dataset)}")
-        self.iterator = ImageBatchIterator(
-            self.dataset, image_shape=image_shape,
-            min_image_shape=min_image_shape,
-            num_workers=num_workers, batch_size=batch_size, num_threads=num_threads,
-            timeout=timeout, retries=retries, image_processor=image_processor,
-            upscale_interpolation=upscale_interpolation,
-            downscale_interpolation=downscale_interpolation,
-            feature_extractor=feature_extractor
-        )
+        self.iterator = ImageBatchIterator(self.dataset, image_shape=image_shape,
+                                           min_image_shape=min_image_shape,
+                                           num_workers=num_workers, batch_size=batch_size, num_threads=num_threads,
+                                            timeout=timeout, retries=retries, image_processor=image_processor,
+                                             upscale_interpolation=upscale_interpolation,
+                                             downscale_interpolation=downscale_interpolation,
+                                             feature_extractor=feature_extractor)
         self.batch_size = batch_size
 
         # Launch a thread to load batches in the background
@@ -320,7 +347,7 @@ class OnlineStreamingDataLoader():
                 try:
                     self.batch_queue.put(collate_fn(batch))
                 except Exception as e:
-                    print("Error processing batch", e)
+                    print("Error collating batch", e)
 
         self.loader_thread = threading.Thread(target=batch_loader)
         self.loader_thread.start()
