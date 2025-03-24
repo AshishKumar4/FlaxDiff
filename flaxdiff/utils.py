@@ -2,7 +2,11 @@ import jax
 import jax.numpy as jnp
 import flax.struct as struct
 import flax.linen as nn
-from typing import Any
+from typing import Any, Callable
+from dataclasses import dataclass
+from functools import partial
+import numpy as np
+from jax.sharding import Mesh, PartitionSpec as P
 
 class MarkovState(struct.PyTreeNode):
     pass
@@ -16,6 +20,30 @@ class RandomMarkovState(MarkovState):
 
 def clip_images(images, clip_min=-1, clip_max=1):
     return jnp.clip(images, clip_min, clip_max)
+
+def _build_global_shape_and_sharding(
+    local_shape: tuple[int, ...], global_mesh: Mesh
+) -> tuple[tuple[int, ...], jax.sharding.NamedSharding]:
+  sharding = jax.sharding.NamedSharding(global_mesh, P(global_mesh.axis_names))
+  global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
+  return global_shape, sharding
+
+
+def form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
+  """Put local sharded array into local devices"""
+  global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
+  try:
+    local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
+  except ValueError as array_split_error:
+    raise ValueError(
+        f"Unable to put to devices shape {array.shape} with "
+        f"local device count {len(global_mesh.local_devices)} "
+    ) from array_split_error
+  local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
+  return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
+
+def convert_to_global_tree(global_mesh, pytree):
+    return jax.tree_util.tree_map_with_path(partial(form_global_array, global_mesh=global_mesh), pytree)
 
 class RMSNorm(nn.Module):
     """
@@ -87,3 +115,59 @@ class RMSNorm(nn.Module):
             mul *= scale
         y = mul * x
         return jnp.asarray(y, dtype)
+    
+    
+@dataclass
+class TextEncoder:
+    model: nn.Module
+    tokenizer: Callable
+    
+    def __call__(self, prompts):
+        # inputs = tokenizer(prompts, padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="np")
+        inputs = self.tokenizer(prompts, padding="max_length",
+                        max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="np")
+        outputs = self.model(input_ids=inputs['input_ids'],
+                        attention_mask=inputs['attention_mask'])
+        # outputs = infer(inputs['input_ids'], inputs['attention_mask'])
+
+        last_hidden_state = outputs.last_hidden_state
+        pooler_output = outputs.pooler_output  # pooled (EOS token) states
+        embed_pooled = pooler_output  # .astype(jnp.float16)
+        embed_labels_full = last_hidden_state  # .astype(jnp.float16)
+
+        return embed_pooled, embed_labels_full
+
+class AutoTextTokenizer:
+    def __init__(self, tensor_type="pt", modelname="openai/clip-vit-large-patch14"):
+        from transformers import AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(modelname)
+        self.tensor_type = tensor_type
+
+    def __call__(self, inputs):
+        # print(caption)
+        tokens = self.tokenizer(inputs, padding="max_length", max_length=self.tokenizer.model_max_length,
+                                truncation=True, return_tensors=self.tensor_type)
+        # print(tokens.keys())
+        return {
+            "input_ids": tokens["input_ids"],
+            "attention_mask": tokens["attention_mask"],
+            "caption": inputs,
+        }
+
+    def __repr__(self):
+        return self.__class__.__name__ + '()'
+
+def defaultTextEncodeModel(backend="jax"):
+    from transformers import (
+        CLIPTextModel,
+        FlaxCLIPTextModel,
+        AutoTokenizer,
+    )
+    modelname = "openai/clip-vit-large-patch14"
+    if backend == "jax":
+        model = FlaxCLIPTextModel.from_pretrained(
+            modelname, dtype=jnp.bfloat16)
+    else:
+        model = CLIPTextModel.from_pretrained(modelname)
+    tokenizer = AutoTokenizer.from_pretrained(modelname, dtype=jnp.float16)
+    return TextEncoder(model, tokenizer)
