@@ -26,27 +26,26 @@ class DataSink(DataProcessor[InputDataFrame, None], ABC):
     """
     def __init__(
         self,
-        sources: Iterable[DataSource[InputDataFrame]],
-        buffer_size: int = None,
-        num_workers: int = None
+        *args,
+        **kwargs,
     ):
-        super().__init__(sources, buffer_size=buffer_size, num_workers=num_workers)
+        super().__init__(*args, **kwargs)
         self.__should_put_into_queue__ = False
     
     @abstractmethod
-    def write(self, data: InputDataFrame) -> None:
+    def write(self, data: InputDataFrame, threadId) -> None:
         """
         User-defined function to consume a data item.
         For example, writing the data to a file, database, or any other endpoint.
         """
         pass
 
-    def process(self, data: InputDataFrame) -> None:
+    def process(self, data: InputDataFrame, threadId) -> None:
         """
         Instead of performing a transformation and returning a new item,
         this method calls the sink() function with the data.
         You may optionally return the original data (or a status) if you want
         to pass something downstream; otherwise, the sink side effect is enough.
         """
-        self.write(data)
+        self.write(data, threadId=threadId)
         return None

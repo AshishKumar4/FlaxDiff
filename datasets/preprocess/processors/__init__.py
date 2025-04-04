@@ -22,12 +22,12 @@ class DataProcessor(DataSource[OutputDataFrame], Generic[InputDataFrame, OutputD
     def __init__(
         self,
         sources: Iterable[DataSource[InputDataFrame]],
-        buffer_size: int = None,
-        num_workers: int = None
+        *args,
+        **kwargs,
     ):
         self.sources = list(sources)
         self._source_idx = 0
-        super().__init__(buffer_size=buffer_size, num_workers=num_workers)
+        super().__init__(*args, **kwargs)
 
     def __set_property_types__(self) -> None:
         self.dataframe_class = None
@@ -48,14 +48,14 @@ class DataProcessor(DataSource[OutputDataFrame], Generic[InputDataFrame, OutputD
         print(f"DataProcessor: Detected DataFrame class: {self.dataframe_class}")
         
     @abstractmethod
-    def process(self, data: InputDataFrame) -> OutputDataFrame:
+    def process(self, data: InputDataFrame, threadId) -> OutputDataFrame:
         """
         User-defined transformation on a single data item.
         Must be overridden by the user.
         """
         pass
 
-    def fetch(self) -> OutputDataFrame:
+    def fetch(self, threadId) -> OutputDataFrame:
         """
         Called by each worker in the parent class.
         We'll pull data from the next available source,
@@ -77,17 +77,17 @@ class DataProcessor(DataSource[OutputDataFrame], Generic[InputDataFrame, OutputD
                 raw_data = next(select_source)
             except StopIteration:
                 # This source is done; remove it
-                self.sources.remove(source)
+                self.sources.remove(select_source)
                 continue
             except Exception as e:
                 # Log, skip, or handle accordingly
                 print(f"[DataProcessor] Upstream source error: {e}")
                 # Optionally remove the source or keep it – depends on your design
-                self.sources.remove(source)
+                self.sources.remove(select_source)
                 continue
 
             # Transform the raw_data
-            processed = self.process(raw_data)
+            processed = self.process(raw_data, threadId=threadId)
             return processed
 
         # If we get here, all sources are exhausted:
