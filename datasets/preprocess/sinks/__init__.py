@@ -30,7 +30,6 @@ class DataSink(DataProcessor[InputDataFrame, None], ABC):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.__should_put_into_queue__ = False
     
     @abstractmethod
     def write(self, data: InputDataFrame, threadId) -> None:
