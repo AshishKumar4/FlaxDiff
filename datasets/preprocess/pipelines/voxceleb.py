@@ -26,6 +26,7 @@ import threading
 import time
 import uuid
 import traceback
+from concurrent.futures import ProcessPoolExecutor
 
 def read_video(video_path: str, change_fps=True, reader="rsreader"):
     if change_fps:
@@ -136,7 +137,8 @@ class AVPathGenerator(DataSource[VideoPaths]):
         self.output_dir = output_dir
         # self.video_paths_iter = gather_video_paths_iter(input_dir, output_dir)
         video_paths = gather_video_paths(input_dir, output_dir)
-        local_paths = get_local_partition(video_paths, world_size, rank)[:10]
+        local_paths = get_local_partition(video_paths, world_size, rank)
+        print(f"Total video paths: {len(video_paths)}, Rank {rank} has {len(local_paths)}")
         self.total_paths = len(local_paths)
         self.video_paths_iter = iter(local_paths)
         
@@ -301,14 +303,25 @@ class AVWrite(DataSink[VideoObjects]):
             if self.pbar is not None:
                 with self.lock:
                     self.pbar.update(1)
-                    self.pbar.set_postfix_str(f"Processed {video_objects.video_output}")
+                    # self.pbar.set_postfix_str(f"Processed {video_objects.video_output}")
             return True
         except Exception as e:
             print(f"Error combining video and audio: {str(e)}")
             traceback.print_exc()
             return False
         
-def run_pipeline(input_dir: str, output_dir: str, process_temp_dir: str, world_size: int = 1, rank: int = 0, num_workers: int = 1):
+def run_pipeline_proc(
+    input_dir: str, 
+    output_dir: str, 
+    process_temp_dir: str, 
+    world_size: int = 1, 
+    rank: int = 0, 
+    num_workers: int = 1,
+    use_wandb: bool = False,
+):
+    if use_wandb:
+        import wandb
+        wandb.init(project="Voxceleb-prep", name=f"pipeline_{rank}", config={"input_dir": input_dir, "output_dir": output_dir})
     # Create the pipeline
     av_path_generator = AVPathGenerator(input_dir, output_dir, world_size, rank, verbose=False)
     total_paths = av_path_generator.total_paths
@@ -329,3 +342,29 @@ def run_pipeline(input_dir: str, output_dir: str, process_temp_dir: str, world_s
     # Wait for the pipeline to finish
     av_write.join()
     # av_affine_transform.join()
+    
+def run_pipeline(
+    input_dir: str,
+    output_dir: str,
+    process_temp_dir: str,
+    num_processes: int = 1,
+    num_workers_per_process: int = 1,
+    use_wandb: bool = False,
+):
+    # Create the process pool
+    with ProcessPoolExecutor(max_workers=num_processes) as executor:
+        futures = []
+        for rank in range(num_processes):
+            futures.append(executor.submit(
+                run_pipeline_proc,
+                input_dir,
+                output_dir,
+                process_temp_dir,
+                world_size=num_processes,
+                rank=rank,
+                num_workers=num_workers_per_process,
+                use_wandb=use_wandb,
+            ))
+        # Wait for all processes to finish
+        for future in futures:
+            future.result()

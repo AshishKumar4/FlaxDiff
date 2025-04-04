@@ -27,7 +27,6 @@ class DataSource(Generic[DataFrame], Iterator[DataFrame], ABC):
         self._num_workers = num_workers if num_workers is not None else (os.cpu_count() or 2)
         
         self.queue = queue.Queue(self._buffer_size)
-        self.__should_put_into_queue__ = True
         self._stop_event = threading.Event()
         self._threads = []
             
@@ -48,7 +47,7 @@ class DataSource(Generic[DataFrame], Iterator[DataFrame], ABC):
                         self.dataframe_class = args[0]
                         break
         
-        print(f"DataSource: Detected DataFrame class: {self.dataframe_class}")
+        # print(f"DataSource: Detected DataFrame class: {self.dataframe_class}")
         
     def start(self) -> None:
         # Launch worker threads
@@ -73,7 +72,7 @@ class DataSource(Generic[DataFrame], Iterator[DataFrame], ABC):
                 if data == NO_DATA:
                     # A return of None signals no more data
                     break
-                if data and self.__should_put_into_queue__:
+                if data:
                     # print(f"[DataSource] Worker putting data into queue: {data}")
                     self.queue.put(data)
             except Exception as e:
@@ -83,7 +82,7 @@ class DataSource(Generic[DataFrame], Iterator[DataFrame], ABC):
                 break
         
         # self._stop_event.set()
-        # print("[DataSource] Worker thread stopping.")
+        print("[DataSource] Worker thread stopping.")
 
     @abstractmethod
     def fetch(self, threadId) -> DataFrame:
