@@ -76,16 +76,16 @@ class FaceAlignmentProcessor:
             image = np.array(image)
             print(f"Image is a list, converting to numpy array of shape {image.shape}")
                 
-        # Make sure image is RGB (MediaPipe expects RGB)
-        if image.shape[2] == 3 and (image.dtype == np.uint8):
-            # If likely BGR (OpenCV default), convert to RGB
-            if np.mean(image[:,:,0]) < np.mean(image[:,:,2]):
-                # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                logging.warning("Image is likely in BGR format, please check")
-                from matplotlib import pyplot as plt
-                plt.imshow(image)
-                plt.axis('off')
-                plt.show()
+        # # Make sure image is RGB (MediaPipe expects RGB)
+        # if image.shape[2] == 3 and (image.dtype == np.uint8):
+        #     # If likely BGR (OpenCV default), convert to RGB
+        #     if np.mean(image[:,:,0]) < np.mean(image[:,:,2]):
+        #         # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        #         logging.warning("Image is likely in BGR format, please check")
+        #         from matplotlib import pyplot as plt
+        #         plt.imshow(image)
+        #         plt.axis('off')
+        #         plt.show()
                 
         height, width = image.shape[:2]
         results = self.face_mesh.process(image)
@@ -123,15 +123,15 @@ class FaceAlignmentProcessor:
                 image = image.numpy()
                 
         # Make sure image is RGB (MediaPipe expects RGB)
-        if image.shape[2] == 3 and (image.dtype == np.uint8):
-            # If likely BGR (OpenCV default), convert to RGB
-            if np.mean(image[:,:,0]) < np.mean(image[:,:,2]):  # Simple heuristic to detect BGR
-                # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                logging.warning("Image is likely in BGR format, please check")
-                from matplotlib import pyplot as plt
-                plt.imshow(image)
-                plt.axis('off')
-                plt.show()
+        # if image.shape[2] == 3 and (image.dtype == np.uint8):
+        #     # If likely BGR (OpenCV default), convert to RGB
+        #     if np.mean(image[:,:,0]) < np.mean(image[:,:,2]):  # Simple heuristic to detect BGR
+        #         # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        #         logging.warning("Image is likely in BGR format, please check")
+        #         from matplotlib import pyplot as plt
+        #         plt.imshow(image)
+        #         plt.axis('off')
+        #         plt.show()
         
         height, width = image.shape[:2]
         results = self.face_mesh.process(image)

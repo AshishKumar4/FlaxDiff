@@ -5,7 +5,7 @@ from typing import Iterator, TypeVar, Generic, Type, get_args, get_origin, Itera
 import threading
 import queue
 from sources import DataSource
-from typing import TypeVar, Generic
+from typing import TypeVar, Generic, Callable
 
 InputDataFrame = TypeVar("DataInputDataFrameFrame")
 OutputDataFrame = TypeVar("DataOutputDataFrame")
@@ -22,11 +22,15 @@ class DataProcessor(DataSource[OutputDataFrame], Generic[InputDataFrame, OutputD
     def __init__(
         self,
         sources: Iterable[DataSource[InputDataFrame]],
+        on_success: Callable = None,
+        on_error: Callable = None,
         *args,
         **kwargs,
     ):
         self.sources = list(sources)
         self._source_idx = 0
+        self.on_success = on_success
+        self.on_error = on_error
         super().__init__(*args, **kwargs)
 
     def __set_property_types__(self) -> None:
@@ -45,7 +49,7 @@ class DataProcessor(DataSource[OutputDataFrame], Generic[InputDataFrame, OutputD
                     if args:
                         self.dataframe_class = args[-1]
                         break
-        print(f"DataProcessor: Detected DataFrame class: {self.dataframe_class}")
+        # print(f"DataProcessor: Detected DataFrame class: {self.dataframe_class}")
         
     @abstractmethod
     def process(self, data: InputDataFrame, threadId) -> OutputDataFrame:
@@ -88,6 +92,13 @@ class DataProcessor(DataSource[OutputDataFrame], Generic[InputDataFrame, OutputD
 
             # Transform the raw_data
             processed = self.process(raw_data, threadId=threadId)
+            if processed:
+                if self.on_success:
+                    # Call the success callback if provided
+                    self.on_success(processed)
+            elif self.on_error:
+                # Call the error callback if provided
+                self.on_error(raw_data)
             return processed
 
         # If we get here, all sources are exhausted:
