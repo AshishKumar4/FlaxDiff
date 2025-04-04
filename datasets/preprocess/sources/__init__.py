@@ -5,17 +5,21 @@ from typing import Iterator, TypeVar, Generic, Type, get_args, get_origin, Itera
 import threading
 import queue
 import os
+import traceback
 from typing import TypeVar, Generic
 
 DataFrame = TypeVar("DataFrame")
+
+NO_DATA = object()
 
 class DataSource(Generic[DataFrame], Iterator[DataFrame], ABC):
     """
     Abstract class for a data source.
     Provides multi-threaded fetching with a queue-based buffer.
     """
-    def __init__(self, buffer_size: int = None, num_workers: int = None) -> None:
+    def __init__(self, buffer_size: int = None, num_workers: int = None, verbose: bool = False) -> None:
         super().__init__()
+        self.verbose = verbose
         
         self.__set_property_types__()
         
@@ -26,12 +30,6 @@ class DataSource(Generic[DataFrame], Iterator[DataFrame], ABC):
         self.__should_put_into_queue__ = True
         self._stop_event = threading.Event()
         self._threads = []
-        
-        # Launch worker threads
-        for _ in range(self._num_workers):
-            thread = threading.Thread(target=self._worker, daemon=True)
-            thread.start()
-            self._threads.append(thread)
             
     def __set_property_types__(self) -> None:
         self.dataframe_class = None
@@ -51,30 +49,44 @@ class DataSource(Generic[DataFrame], Iterator[DataFrame], ABC):
                         break
         
         print(f"DataSource: Detected DataFrame class: {self.dataframe_class}")
-
-    def _worker(self) -> None:
+        
+    def start(self) -> None:
+        # Launch worker threads
+        for threadId in range(self._num_workers):
+            thread = threading.Thread(target=self._worker, daemon=True, args=(threadId,))
+            thread.start()
+            self._threads.append(thread)
+            
+    def join(self) -> None:
+        # Wait for all threads to finish
+        for thread in self._threads:
+            thread.join()
+        self._threads.clear()
+            
+    def _worker(self, threadId) -> None:
         """
         Worker thread that repeatedly calls `fetch()` and places items into our queue.
         """
         while not self._stop_event.is_set():
             try:
-                data = self.fetch()
-                if data is None:
+                data = self.fetch(threadId=threadId)
+                if data == NO_DATA:
                     # A return of None signals no more data
                     break
-                if self.__should_put_into_queue__:
+                if data and self.__should_put_into_queue__:
                     # print(f"[DataSource] Worker putting data into queue: {data}")
                     self.queue.put(data)
             except Exception as e:
                 # In production, handle/log errors as appropriate
                 print(f"[DataSource] Worker error: {e}")
+                traceback.print_exc()
                 break
         
         # self._stop_event.set()
         # print("[DataSource] Worker thread stopping.")
 
     @abstractmethod
-    def fetch(self) -> DataFrame:
+    def fetch(self, threadId) -> DataFrame:
         """
         Called by each worker thread to get one new item of data.
         Return `None` to signal no more data to fetch.
