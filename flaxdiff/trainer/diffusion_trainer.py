@@ -1,9 +1,11 @@
+import flax
 from flax import linen as nn
 import jax
 from typing import Callable
 from dataclasses import field
 import jax.numpy as jnp
 import optax
+import functools
 from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
 from typing import Dict, Callable, Sequence, Any, Union, Tuple
@@ -16,7 +18,7 @@ from flaxdiff.utils import RandomMarkovState
 from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics
 
 from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
-from flax.training.dynamic_scale import DynamicScale
+from flax.training import dynamic_scale as dynamic_scale_lib
 
 class TrainState(SimpleTrainState):
     rngs: jax.random.PRNGKey
@@ -84,8 +86,7 @@ class DiffusionTrainer(SimpleTrainer):
             new_state = existing_state
 
         if param_transforms is not None:
-            new_state['params'] = param_transforms(new_state['params'])
-            new_state['ema_params'] = param_transforms(new_state['ema_params'])
+            params = param_transforms(params)
 
         state = TrainState.create(
             apply_fn=model.apply,
@@ -94,7 +95,7 @@ class DiffusionTrainer(SimpleTrainer):
             tx=optimizer,
             rngs=rngs,
             metrics=Metrics.empty(),
-            dynamic_scale = DynamicScale() if use_dynamic_scale else None
+            dynamic_scale = dynamic_scale_lib.DynamicScale() if use_dynamic_scale else None
         )
             
         if existing_best_state is not None:
@@ -131,6 +132,11 @@ class DiffusionTrainer(SimpleTrainer):
             local_rng_state = RandomMarkovState(subkey)
             
             images = batch['image']
+            
+            # First get the standard deviation of the images
+            # std = jnp.std(images, axis=(1, 2, 3))
+            # is_non_zero = (std > 0)
+            
             images = jnp.array(images, dtype=jnp.float32)
             # normalize image
             images = (images - 127.5) / 127.5
@@ -163,8 +169,11 @@ class DiffusionTrainer(SimpleTrainer):
                 preds = model_output_transform.pred_transform(
                     noisy_images, preds, rates)
                 nloss = loss_fn(preds, expected_output)
-                # nloss = jnp.mean(nloss, axis=1)
+                # Ignore the loss contribution of images with zero standard deviation
                 nloss *= noise_schedule.get_weights(noise_level)
+                # nloss = jnp.mean(nloss, axis=(1,2,3))
+                # nloss = jnp.where(is_non_zero, nloss, 0)
+                # nloss = jnp.mean(nloss, where=nloss != 0)
                 nloss = jnp.mean(nloss)
                 loss = nloss
                 return loss
@@ -185,11 +194,11 @@ class DiffusionTrainer(SimpleTrainer):
             
             new_state = train_state.apply_gradients(grads=grads)
             
-            if train_state.dynamic_scale:
+            if train_state.dynamic_scale is not None:
                 # if is_fin == False the gradients contain Inf/NaNs and optimizer state and
                 # params should be restored (= skip this step).
                 select_fn = functools.partial(jnp.where, is_fin)
-                new_state = train_state.replace(
+                new_state = new_state.replace(
                     opt_state=jax.tree_util.tree_map(
                         select_fn, new_state.opt_state, train_state.opt_state
                     ),
@@ -227,8 +236,3 @@ class DiffusionTrainer(SimpleTrainer):
         text_embedder = data['model']
         super().fit(data, steps_per_epoch, epochs, {
             "batch_size": local_batch_size, "null_labels_seq": null_labels_full, "text_embedder": text_embedder})
-
-def boolean_string(s):
-    if type(s) == bool:
-        return s
-    return s == 'True'
