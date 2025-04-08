@@ -37,7 +37,7 @@ class DiffusionSampler():
             # Classifier free guidance
             assert null_labels_seq is not None, "Null labels sequence is required for classifier-free guidance"
             print("Using classifier-free guidance")
-            def sample_model(x_t, t, *additional_inputs):
+            def sample_model(params, x_t, t, *additional_inputs):
                 # Concatenate unconditional and conditional inputs
                 x_t_cat = jnp.concatenate([x_t] * 2, axis=0)
                 t_cat = jnp.concatenate([t] * 2, axis=0)
@@ -46,7 +46,7 @@ class DiffusionSampler():
                 
                 text_labels_seq, = additional_inputs
                 text_labels_seq = jnp.concatenate([text_labels_seq, jnp.broadcast_to(null_labels_seq, text_labels_seq.shape)], axis=0)
-                model_output = self.model.apply(self.params, *self.noise_schedule.transform_inputs(x_t_cat * c_in_cat, t_cat), text_labels_seq)
+                model_output = self.model.apply(params, *self.noise_schedule.transform_inputs(x_t_cat * c_in_cat, t_cat), text_labels_seq)
                 # Split model output into unconditional and conditional parts
                 model_output_cond, model_output_uncond = jnp.split(model_output, 2, axis=0)
                 model_output = model_output_uncond + guidance_scale * (model_output_cond - model_output_uncond)
@@ -55,10 +55,10 @@ class DiffusionSampler():
                 return x_0, eps, model_output
         else:
             # Unconditional sampling
-            def sample_model(x_t, t, *additional_inputs):
+            def sample_model(params, x_t, t, *additional_inputs):
                 rates = self.noise_schedule.get_rates(t)
                 c_in = self.model_output_transform.get_input_scale(rates)
-                model_output = self.model.apply(self.params, *self.noise_schedule.transform_inputs(x_t * c_in, t), *additional_inputs)
+                model_output = self.model.apply(params, *self.noise_schedule.transform_inputs(x_t * c_in, t), *additional_inputs)
                 x_0, eps = self.model_output_transform(x_t, model_output, t, self.noise_schedule)
                 return x_0, eps, model_output
             
@@ -70,22 +70,23 @@ class DiffusionSampler():
         self.sample_model = sample_model
 
     # Used to sample from the diffusion model
-    def sample_step(self, current_samples:jnp.ndarray, current_step, model_conditioning_inputs, next_step=None, state:MarkovState=None) -> tuple[jnp.ndarray, MarkovState]:
+    def sample_step(self, sample_model_fn, current_samples:jnp.ndarray, current_step, model_conditioning_inputs, next_step=None, state:MarkovState=None) -> tuple[jnp.ndarray, MarkovState]:
         # First clip the noisy images
         step_ones = jnp.ones((current_samples.shape[0], ), dtype=jnp.int32)
         current_step = step_ones * current_step
         next_step = step_ones * next_step
-        pred_images, pred_noise, _ = self.sample_model(current_samples, current_step, *model_conditioning_inputs)
+        pred_images, pred_noise, _ = sample_model_fn(current_samples, current_step, *model_conditioning_inputs)
         # plotImages(pred_images)
         # pred_images = clip_images(pred_images)
         new_samples, state =  self.take_next_step(current_samples=current_samples, reconstructed_samples=pred_images, 
-                             pred_noise=pred_noise, current_step=current_step, next_step=next_step, state=state,
-                             model_conditioning_inputs=model_conditioning_inputs
+                                pred_noise=pred_noise, current_step=current_step, next_step=next_step, state=state,
+                                model_conditioning_inputs=model_conditioning_inputs,
+                                sample_model_fn=sample_model_fn,
                              )
         return new_samples, state
 
     def take_next_step(self, current_samples, reconstructed_samples, model_conditioning_inputs,
-                 pred_noise, current_step, state:RandomMarkovState, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
+                 pred_noise, current_step, state:RandomMarkovState, sample_model_fn, next_step=1,) -> tuple[jnp.ndarray, RandomMarkovState]:
         # estimate the q(x_{t-1} | x_t, x_0). 
         # pred_images is x_0, noisy_images is x_t, steps is t
         return NotImplementedError
@@ -114,6 +115,7 @@ class DiffusionSampler():
         return jax.random.normal(rngs, (num_images, image_size, image_size, image_channels)) * variance
 
     def generate_images(self,
+                        params:dict=None,
                         num_images=16, 
                         diffusion_steps=1000, 
                         start_step:int = None,
@@ -131,10 +133,15 @@ class DiffusionSampler():
             if self.autoencoder is not None:
                 priors = self.autoencoder.encode(priors)
             samples = priors
+            
+        params = params if params is not None else self.params
+        
+        def sample_model_fn(x_t, t, *additional_inputs):
+            return self.sample_model(params, x_t, t, *additional_inputs)
 
         # @jax.jit
-        def sample_step(state:RandomMarkovState, samples, current_step, next_step):
-            samples, state = self.sample_step(current_samples=samples,
+        def sample_step(sample_model_fn, state:RandomMarkovState, samples, current_step, next_step):
+            samples, state = self.sample_step(sample_model_fn=sample_model_fn, current_samples=samples,
                                               current_step=current_step, 
                                               model_conditioning_inputs=model_conditioning_inputs,
                                               state=state, next_step=next_step)
@@ -154,11 +161,11 @@ class DiffusionSampler():
             next_step = self.scale_steps(steps[i+1] if i+1 < len(steps) else 0)
             if i != len(steps) - 1:
                 # print("normal step")
-                samples, rngstate = sample_step(rngstate, samples, current_step, next_step)
+                samples, rngstate = sample_step(sample_model_fn, rngstate, samples, current_step, next_step)
             else:
                 # print("last step")
                 step_ones = jnp.ones((num_images, ), dtype=jnp.int32)
-                samples, _, _ = self.sample_model(samples, current_step * step_ones, *model_conditioning_inputs)
+                samples, _, _ = sample_model_fn(samples, current_step * step_ones, *model_conditioning_inputs)
         if self.autoencoder is not None:
             samples = self.autoencoder.decode(samples)
         samples = clip_images(samples)
