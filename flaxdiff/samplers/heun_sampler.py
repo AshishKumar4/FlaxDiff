@@ -4,9 +4,8 @@ from .common import DiffusionSampler
 from ..utils import RandomMarkovState
 
 class HeunSampler(DiffusionSampler):
-    def take_next_step(self, 
-                 current_samples, reconstructed_samples, 
-                 pred_noise, current_step, state:RandomMarkovState, next_step=None) -> tuple[jnp.ndarray, RandomMarkovState]:
+    def take_next_step(self, current_samples, reconstructed_samples, model_conditioning_inputs,
+                 pred_noise, current_step, state:RandomMarkovState, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
         # Get the noise and signal rates for the current and next steps
         current_alpha, current_sigma = self.noise_schedule.get_rates(current_step)
         next_alpha, next_sigma = self.noise_schedule.get_rates(next_step)
@@ -18,7 +17,7 @@ class HeunSampler(DiffusionSampler):
         next_samples_0 = current_samples + dx_0 * dt
         
         # Recompute x_0 and eps at the first estimate to refine the derivative
-        estimated_x_0, _, _ = self.sample_model(next_samples_0, next_step)
+        estimated_x_0, _, _ = self.sample_model(next_samples_0, next_step, *model_conditioning_inputs)
         
         # Estimate the refined derivative using the midpoint (Heun's method)
         dx_1 = (next_samples_0 - x_0_coeff * estimated_x_0) / next_sigma

@@ -8,9 +8,8 @@ class MultiStepDPM(DiffusionSampler):
         super().__init__(*args, **kwargs)
         self.history = []
 
-    def _renoise(self, 
-                 current_samples, reconstructed_samples, 
-                 pred_noise, current_step, state:RandomMarkovState, next_step=None) -> tuple[jnp.ndarray, RandomMarkovState]:
+    def take_next_step(self, current_samples, reconstructed_samples, model_conditioning_inputs,
+                 pred_noise, current_step, state:RandomMarkovState, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
         # Get the noise and signal rates for the current and next steps
         current_alpha, current_sigma = self.noise_schedule.get_rates(current_step)
         next_alpha, next_sigma = self.noise_schedule.get_rates(next_step)

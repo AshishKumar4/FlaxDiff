@@ -3,10 +3,19 @@ import jax.numpy as jnp
 import grain.python as pygrain
 from flaxdiff.utils import AutoTextTokenizer
 from typing import Dict
+import random
 
 # -----------------------------------------------------------------------------------------------#
 # Oxford flowers and other TFDS datasources -----------------------------------------------------#
 # -----------------------------------------------------------------------------------------------#
+
+PROMPT_TEMPLATES = [
+    "a photo of a {}",
+    "a photo of a {} flower",
+    "This is a photo of a {}",
+    "This is a photo of a {} flower",
+    "A photo of a {} flower",
+]
 
 def data_source_tfds(name, use_tf=True, split="all"):
     import tensorflow_datasets as tfds
@@ -23,7 +32,13 @@ def labelizer_oxford_flowers102(path):
         textlabels = [i.strip() for i in f.readlines()]
 
     def load_labels(sample):
-        return textlabels[int(sample['label'])]
+        raw = textlabels[int(sample['label'])]
+        # randomly select a prompt template
+        template = random.choice(PROMPT_TEMPLATES)
+        # format the template with the label
+        caption = template.format(raw)
+        # return the caption
+        return caption
     return load_labels
 
 def tfds_augmenters(image_scale, method):
