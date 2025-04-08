@@ -140,20 +140,21 @@ class ConditioningEncoder(ABC):
     
 @dataclass
 class TextEncoder(ConditioningEncoder):
-    def __call__(self, data):
-        tokens = self.tokenize(data)
-        outputs = self.encode_from_tokens(tokens)
-        return outputs
+    # def __call__(self, data):
+    #     tokens = self.tokenize(data)
+    #     outputs = self.encode_from_tokens(tokens)
+    #     return outputs
         
-    def encode_from_tokens(self, tokens):
-        outputs = self.model(input_ids=tokens['input_ids'],
-                        attention_mask=tokens['attention_mask'])
-        last_hidden_state = outputs.last_hidden_state
-        pooler_output = outputs.pooler_output  # pooled (EOS token) states
-        embed_pooled = pooler_output  # .astype(jnp.float16)
-        embed_labels_full = last_hidden_state  # .astype(jnp.float16)
+    # def encode_from_tokens(self, tokens):
+    #     outputs = self.model(input_ids=tokens['input_ids'],
+    #                     attention_mask=tokens['attention_mask'])
+    #     last_hidden_state = outputs.last_hidden_state
+    #     # pooler_output = outputs.pooler_output  # pooled (EOS token) states
+    #     # embed_pooled = pooler_output  # .astype(jnp.float16)
+    #     embed_labels_full = last_hidden_state  # .astype(jnp.float16)
 
-        return embed_pooled, embed_labels_full
+    #     return embed_labels_full
+    pass
 
 class AutoTextTokenizer:
     def __init__(self, tensor_type="pt", modelname="openai/clip-vit-large-patch14"):

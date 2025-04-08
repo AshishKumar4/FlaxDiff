@@ -57,6 +57,7 @@ from flaxdiff.data.datasets import get_dataset_grain, get_dataset_online
 
 import warnings
 import traceback
+from flaxdiff.utils import defaultTextEncodeModel
 
 warnings.filterwarnings("ignore")
 
@@ -66,33 +67,6 @@ warnings.filterwarnings("ignore")
 #####################################################################################################################
 
 os.environ['TOKENIZERS_PARALLELISM'] = "false"
-
-
-class RandomClass():
-    def __init__(self, rng: jax.random.PRNGKey):
-        self.rng = rng
-
-    def get_random_key(self):
-        self.rng, subkey = jax.random.split(self.rng)
-        return subkey
-
-    def get_sigmas(self, steps):
-        return jnp.tan(self.theta_min + steps * (self.theta_max - self.theta_min)) / self.kappa
-
-    def reset_random_key(self):
-        self.rng = jax.random.PRNGKey(42)
-
-
-class MarkovState(struct.PyTreeNode):
-    pass
-
-
-class RandomMarkovState(MarkovState):
-    rng: jax.random.PRNGKey
-
-    def get_random_key(self):
-        rng, subkey = jax.random.split(self.rng)
-        return RandomMarkovState(rng), subkey
 
 PROCESS_COLOR_MAP = {
     0: "green",
@@ -122,7 +96,6 @@ def boolean_string(s):
         return s
     return s == 'True'
 
-# %%
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Train a diffusion model')
 parser.add_argument('--GRAIN_WORKER_COUNT', type=int,
@@ -441,6 +414,8 @@ def main(args):
     
     start_time = time.time()
     
+    text_encoder = defaultTextEncodeModel()
+    
     trainer = DiffusionTrainer(
         unet, optimizer=solver,
         input_shapes=CONFIG['input_shapes'],
@@ -455,11 +430,11 @@ def main(args):
         checkpoint_base_path=CHECKPOINT_DIR,
         autoencoder=autoencoder,
         use_dynamic_scale=args.use_dynamic_scale,
+        encoder=text_encoder,
     )
     
     if trainer.distributed_training:
         print("Distributed Training enabled")
-    # %%
     batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
     print(f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
     

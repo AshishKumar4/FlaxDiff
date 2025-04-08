@@ -3,7 +3,7 @@ import grain.python as pygrain
 from typing import Dict
 import numpy as np
 import jax
-from flaxdiff.utils import convert_to_global_tree, defaultTextEncodeModel, AutoTextTokenizer
+from flaxdiff.utils import convert_to_global_tree, AutoTextTokenizer
 from .dataset_map import datasetMap, onlineDatasetMap
 import traceback
 from .online_loader import OnlineStreamingDataLoader
@@ -39,11 +39,6 @@ def get_dataset_grain(
     augmenter = dataset["augmenter"](image_scale, method)
 
     local_batch_size = batch_size // jax.process_count()
-    # model, tokenizer = defaultTextEncodeModel()
-
-    # null_labels, null_labels_full = encodePrompts([""], model, tokenizer)
-    # null_labels = np.array(null_labels[0], dtype=np.float16)
-    # null_labels_full = np.array(null_labels_full[0], dtype=np.float16)
 
     sampler = pygrain.IndexSampler(
         num_records=len(data_source) if count is None else count,
@@ -120,12 +115,6 @@ def get_dataset_online(
         dataset_source="/mnt/gcs_mount/arrayrecord2/cc12m/",
     ):
     local_batch_size = batch_size // jax.process_count()
-    
-    # model, tokenizer = defaultTextEncodeModel()
-
-    # null_labels, null_labels_full = encodePrompts([""], model, tokenizer)
-    # null_labels = np.array(null_labels[0], dtype=np.float16)
-    # null_labels_full = np.array(null_labels_full[0], dtype=np.float16)
     
     sources = onlineDatasetMap[data_name]["source"]
     dataloader = OnlineStreamingDataLoader(
