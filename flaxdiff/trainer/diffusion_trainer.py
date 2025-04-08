@@ -4,14 +4,16 @@ import jax
 from typing import Callable
 from dataclasses import field
 import jax.numpy as jnp
+import traceback
 import optax
 import functools
 from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
-from typing import Dict, Callable, Sequence, Any, Union, Tuple
+from typing import Dict, Callable, Sequence, Any, Union, Tuple, Type
 
 from ..schedulers import NoiseScheduler
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
+from ..samplers.common import DiffusionSampler
 
 from flaxdiff.utils import RandomMarkovState
 
@@ -226,16 +228,99 @@ class DiffusionTrainer(SimpleTrainer):
             
         return train_step
 
-    def _define_compute_metrics(self):
-        @jax.jit
-        def compute_metrics(state: TrainState, expected, pred):
-            loss = jnp.mean(jnp.square(pred - expected))
-            metric_updates = state.metrics.single_from_model_output(loss=loss)
-            metrics = state.metrics.merge(metric_updates)
-            state = state.replace(metrics=metrics)
-            return state
-        return compute_metrics
+    def _define_vaidation_step(self, sampler_class: Type[DiffusionSampler]):
+        model = self.model
+        encoder = self.encoder
+        autoencoder = self.autoencoder
+        
+        null_labels_full = encoder([""])
+        null_labels_full = null_labels_full.astype(jnp.float16)
+        # null_labels_seq = jnp.array(null_labels_full[0], dtype=jnp.float16)
+        
+        def generate_sampler(state: TrainState):
+            sampler = sampler_class(
+                model=model,
+                params=state.ema_params,
+                noise_schedule=self.noise_schedule,
+                model_output_transform=self.model_output_transform,
+                image_size=self.input_shapes['x'][0],
+                null_labels_seq=null_labels_full,
+                autoencoder=autoencoder,
+            )
+            return sampler
+        
+        def generate_samples(
+            batch,
+            sampler: DiffusionSampler, 
+            diffusion_steps: int,
+        ):
+            labels_seq = encoder.encode_from_tokens(batch)
+            labels_seq = jnp.array(labels_seq, dtype=jnp.float16)
+            samples = sampler.generate_images(
+                num_images=len(labels_seq),
+                diffusion_steps=diffusion_steps,
+                start_step=1000,
+                end_step=0,
+                priors=None,
+                model_conditioning_inputs=(labels_seq,),
+            )
+            return samples
+        
+        return generate_sampler, generate_samples
 
-    def fit(self, data, steps_per_epoch, epochs):
+    def validation_loop(
+        self,
+        val_state: SimpleTrainState,
+        val_step_fn: Callable,
+        val_ds,
+        val_steps_per_epoch,
+        current_step,
+        diffusion_steps=200,
+    ):
+        generate_sampler, generate_samples = val_step_fn
+        
+        sampler = generate_sampler(val_state)
+        
+        val_ds = iter(val_ds()) if val_ds else None
+        # Evaluation step
+        try:
+            samples = generate_samples(
+                next(val_ds),
+                sampler,
+                diffusion_steps,
+            )
+            
+            # Put each sample on wandb
+            if self.wandb:
+                import numpy as np
+                from wandb import Image as wandbImage
+                wandb_images = []
+                for i in range(samples.shape[0]):
+                    # convert the sample to numpy
+                    sample = np.array(samples[i])
+                    # denormalize the image
+                    sample = (sample + 1) * 127.5
+                    sample = np.clip(sample, 0, 255).astype(np.uint8)
+                    # add the image to the list
+                    wandb_images.append(sample)
+                    # log the images to wandb
+                    self.wandb.log({
+                        f"sample_{i}": wandbImage(sample, caption=f"Sample {i} at step {current_step}")
+                    }, step=current_step)
+        except Exception as e:
+            print("Error logging images to wandb", e)
+            traceback.print_exc()
+    
+    def fit(self, data, training_steps_per_epoch, epochs, val_steps_per_epoch=8, sampler_class=None):
         local_batch_size = data['local_batch_size']
-        super().fit(data, steps_per_epoch, epochs, {"batch_size": local_batch_size})
+        validation_step_args = {
+            "sampler_class": sampler_class,
+        }
+        super().fit(
+            data, 
+            train_steps_per_epoch=training_steps_per_epoch, 
+            epochs=epochs, 
+            train_step_args={"batch_size": local_batch_size}, 
+            val_steps_per_epoch=val_steps_per_epoch,
+            validation_step_args=validation_step_args,
+        )

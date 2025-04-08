@@ -309,21 +309,26 @@ class SimpleTrainer:
             train_step = jax.pmap(train_step)
         return train_step
 
-    def _define_compute_metrics(self):
+    def _define_vaidation_step(self):
         model = self.model
         loss_fn = self.loss_fn
+        distributed_training = self.distributed_training
 
-        @jax.jit
-        def compute_metrics(state: SimpleTrainState, batch):
+        def validation_step(state: SimpleTrainState, batch):
             preds = model.apply(state.params, batch['image'])
             expected_output = batch['label']
             loss = jnp.mean(loss_fn(preds, expected_output))
+            if distributed_training:
+                loss = jax.lax.pmean(loss, "data")
             metric_updates = state.metrics.single_from_model_output(
                 loss=loss, logits=preds, labels=expected_output)
             metrics = state.metrics.merge(metric_updates)
             state = state.replace(metrics=metrics)
             return state
-        return compute_metrics
+        if distributed_training:
+            validation_step = shard_map(validation_step, mesh=self.mesh, in_specs=(P(), P('data')), out_specs=(P()))
+            validation_step = jax.pmap(validation_step)
+        return validation_step
 
     def summary(self):
         input_vars = self.get_input_ones()
@@ -348,17 +353,53 @@ class SimpleTrainer:
             "batch_size": batch_size
         })
         return summary_writer
+    
+    def validation_loop(
+        self,
+        val_state: SimpleTrainState,
+        val_step_fn: Callable,
+        val_ds,
+        val_steps_per_epoch,
+        current_step,
+    ):
+        global_device_count = jax.device_count()
+        local_device_count = jax.local_device_count()
+        process_index = jax.process_index()
+        
+        val_ds = iter(val_ds()) if val_ds else None
+        # Evaluation step
+        try:
+            for i in range(val_steps_per_epoch):
+                if val_ds is None:
+                    batch = None
+                else:
+                    batch = next(val_ds)
+                    if self.distributed_training and global_device_count > 1:
+                        batch = convert_to_global_tree(self.mesh, batch)
+                if i == 0:
+                    print(f"Evaluation started for process index {process_index}")
+                metrics = val_step_fn(val_state, batch)
+                if self.wandb is not None:
+                    # metrics is a dict of metrics
+                    if metrics and type(metrics) == dict:
+                        for key, value in metrics.items():
+                            if isinstance(value, jnp.ndarray):
+                                value = np.array(value)
+                            self.wandb.log({
+                                f"val/{key}": value,
+                            }, step=current_step)
+        except Exception as e:
+            print("Error logging images to wandb", e)
 
-    def fit(self, data, steps_per_epoch, epochs, train_step_args={}):
-        train_ds = iter(data['train']())
-        if 'test' in data:
-            test_ds = data['test']
-        else:
-            test_ds = None
-        train_step = self._define_train_step(**train_step_args)
-        compute_metrics = self._define_compute_metrics()
-        train_state = self.state
-        rng_state = self.rngstate
+    def train_loop(
+        self,
+        train_state: SimpleTrainState,
+        train_step_fn: Callable,
+        train_ds,
+        train_steps_per_epoch,
+        current_step,
+        rng_state
+    ):
         global_device_count = jax.device_count()
         local_device_count = jax.local_device_count()
         process_index = jax.process_index()
@@ -366,75 +407,105 @@ class SimpleTrainer:
             global_device_indexes = jnp.arange(global_device_count)
         else:
             global_device_indexes = 0
-
-        def train_loop(current_step, pbar: tqdm.tqdm, train_state, rng_state):
-            epoch_loss = 0
-            current_epoch = current_step // steps_per_epoch
-            last_save_time = time.time()
-            for i in range(steps_per_epoch):
-                batch = next(train_ds)
-                if i == 0:
-                    print(f"First batch loaded at step {current_step}")
-                    
-                if self.distributed_training and global_device_count > 1:
-                #     # Convert the local device batches to a unified global jax.Array 
-                    batch = convert_to_global_tree(self.mesh, batch)
-                train_state, loss, rng_state = train_step(train_state, rng_state, batch, global_device_indexes)
-
-                if i == 0:
-                    print(f"Training started for process index {process_index} at step {current_step}")
+            
+        epoch_loss = 0
+        current_epoch = current_step // train_steps_per_epoch
+        last_save_time = time.time()
+        
+        if process_index == 0:
+            pbar = tqdm.tqdm(total=train_steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step')
+            
+        for i in range(train_steps_per_epoch):
+            batch = next(train_ds)
+            if i == 0:
+                print(f"First batch loaded at step {current_step}")
                 
-                if self.distributed_training:
-                    # loss = jax.experimental.multihost_utils.process_allgather(loss)
-                    loss = jnp.mean(loss) # Just to make sure its a scaler value
-                    
-                if loss <= 1e-6:
-                    # If the loss is too low, we can assume the model has diverged
-                    print(colored(f"Loss too low at step {current_step} => {loss}", 'red'))
-                    # Reset the model to the old state
-                    exit(1)
-                            
-                epoch_loss += loss
-                current_step += 1
-                if i % 100 == 0:
-                    if pbar is not None:
-                        pbar.set_postfix(loss=f'{loss:.4f}')
-                        pbar.update(100)
-                        if self.wandb is not None:
-                            self.wandb.log({
-                                "train/step" : current_step,
-                                "train/loss": loss,
-                            }, step=current_step)
-                    # Save the model every few steps
-                    if i % 10000 == 0 and i > 0:
-                        print(f"Saving model after 10000 step {current_step}")
-                        print(f"Devices: {len(jax.devices())}") # To sync the devices
-                        self.save(current_epoch, current_step, train_state, rng_state)
-                        print(f"Saving done by process index {process_index}")
-                        last_save_time = time.time()
-            print(colored(f"Epoch done on index {process_index} => {current_epoch} Loss: {epoch_loss/steps_per_epoch}", 'green'))
-            return epoch_loss, current_step, train_state, rng_state
+            if self.distributed_training and global_device_count > 1:
+            #     # Convert the local device batches to a unified global jax.Array 
+                batch = convert_to_global_tree(self.mesh, batch)
+            train_state, loss, rng_state = train_step_fn(train_state, rng_state, batch, global_device_indexes)
 
-        while self.latest_step < epochs * steps_per_epoch:
-            current_epoch = self.latest_step // steps_per_epoch
+            if i == 0:
+                print(f"Training started for process index {process_index} at step {current_step}")
+                
+            if self.distributed_training:
+                # loss = jax.experimental.multihost_utils.process_allgather(loss)
+                loss = jnp.mean(loss) # Just to make sure its a scaler value
+                    
+            if loss <= 1e-6:
+                # If the loss is too low, we can assume the model has diverged
+                print(colored(f"Loss too low at step {current_step} => {loss}", 'red'))
+                # Reset the model to the old state
+                exit(1)
+                            
+            epoch_loss += loss
+            current_step += 1
+            if i % 100 == 0:
+                if pbar is not None:
+                    pbar.set_postfix(loss=f'{loss:.4f}')
+                    pbar.update(100)
+                    if self.wandb is not None:
+                        self.wandb.log({
+                            "train/step" : current_step,
+                            "train/loss": loss,
+                        }, step=current_step)
+                # Save the model every few steps
+                if i % 10000 == 0 and i > 0:
+                    print(f"Saving model after 10000 step {current_step}")
+                    print(f"Devices: {len(jax.devices())}") # To sync the devices
+                    self.save(current_epoch, current_step, train_state, rng_state)
+                    print(f"Saving done by process index {process_index}")
+                    last_save_time = time.time()
+        print(colored(f"Epoch done on index {process_index} => {current_epoch} Loss: {epoch_loss/train_steps_per_epoch}", 'green'))
+        if pbar is not None:
+            pbar.close()
+        return epoch_loss, current_step, train_state, rng_state
+
+
+    def fit(self, data, train_steps_per_epoch, epochs, train_step_args={}, val_steps_per_epoch=5, validation_step_args={}):
+        train_ds = iter(data['train']())
+        train_step = self._define_train_step(**train_step_args)
+        val_step = self._define_vaidation_step(**validation_step_args)
+        train_state = self.state
+        rng_state = self.rngstate
+        process_index = jax.process_index()
+        
+        if val_steps_per_epoch > 0:
+            # We should first run a validation step to make sure the model is working
+            print(f"Validation run for sanity check for process index {process_index}")
+            # Validation step
+            self.validation_loop(
+                train_state,
+                val_step,
+                data.get('test', data.get('val', None)),
+                val_steps_per_epoch,
+                self.latest_step,
+            )
+            print(colored(f"Sanity Validation done on process index {process_index}", PROCESS_COLOR_MAP[process_index]))
+                
+        while self.latest_step < epochs * train_steps_per_epoch:
+            current_epoch = self.latest_step // train_steps_per_epoch
             print(f"\nEpoch {current_epoch}/{epochs}")
             start_time = time.time()
             epoch_loss = 0
-
-            if process_index == 0:
-                with tqdm.tqdm(total=steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step') as pbar:
-                    epoch_loss, current_step, train_state, rng_state = train_loop(self.latest_step, pbar, train_state, rng_state)
-            else:
-                epoch_loss, current_step, train_state, rng_state = train_loop(self.latest_step, None, train_state, rng_state)
-                print(colored(f"Epoch done on process index {process_index}", PROCESS_COLOR_MAP[process_index]))
+            
+            epoch_loss, current_step, train_state, rng_state = self.train_loop(
+                train_state,
+                train_step,
+                train_ds,
+                train_steps_per_epoch,
+                self.latest_step,
+                rng_state,
+            )
+            print(colored(f"Epoch done on process index {process_index}", PROCESS_COLOR_MAP[process_index]))
             
             self.latest_step = current_step
             end_time = time.time()
             self.state = train_state
             self.rngstate = rng_state
             total_time = end_time - start_time
-            avg_time_per_step = total_time / steps_per_epoch
-            avg_loss = epoch_loss / steps_per_epoch
+            avg_time_per_step = total_time / train_steps_per_epoch
+            avg_loss = epoch_loss / train_steps_per_epoch
             if avg_loss < self.best_loss:
                 self.best_loss = avg_loss
                 self.best_state = train_state
@@ -450,5 +521,18 @@ class SimpleTrainer:
                         "train/epoch": current_epoch,
                     }, step=current_step)
                 print(colored(f"\n\tEpoch {current_epoch} completed. Avg Loss: {avg_loss}, Time: {total_time:.2f}s, Best Loss: {self.best_loss}", 'green'))
+                    
+            if val_steps_per_epoch > 0:
+                print(f"Validation started for process index {process_index}")
+                # Validation step
+                self.validation_loop(
+                    train_state,
+                    val_step,
+                    data.get('test', None),
+                    val_steps_per_epoch,
+                    current_step,
+                )
+                print(colored(f"Validation done on process index {process_index}", PROCESS_COLOR_MAP[process_index]))
+                
         self.save(epochs)
         return self.state
