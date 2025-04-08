@@ -235,19 +235,19 @@ class DiffusionTrainer(SimpleTrainer):
         null_labels_full = null_labels_full.astype(jnp.float16)
         # null_labels_seq = jnp.array(null_labels_full[0], dtype=jnp.float16)
         
-        def generate_sampler(state: TrainState):
-            sampler = sampler_class(
-                model=model,
-                params=state.ema_params,
-                noise_schedule=self.noise_schedule if sampling_noise_schedule is None else sampling_noise_schedule,
-                model_output_transform=self.model_output_transform,
-                image_size=self.input_shapes['x'][0],
-                null_labels_seq=null_labels_full,
-                autoencoder=autoencoder,
-            )
-            return sampler
+        sampler = sampler_class(
+            model=model,
+            params=None,
+            noise_schedule=self.noise_schedule if sampling_noise_schedule is None else sampling_noise_schedule,
+            model_output_transform=self.model_output_transform,
+            image_size=self.input_shapes['x'][0],
+            null_labels_seq=null_labels_full,
+            autoencoder=autoencoder,
+            guidance_scale=3.0,
+        )
         
         def generate_samples(
+            val_state: TrainState,
             batch,
             sampler: DiffusionSampler, 
             diffusion_steps: int,
@@ -255,6 +255,7 @@ class DiffusionTrainer(SimpleTrainer):
             labels_seq = encoder.encode_from_tokens(batch)
             labels_seq = jnp.array(labels_seq, dtype=jnp.float16)
             samples = sampler.generate_images(
+                params=val_state.ema_params,
                 num_images=len(labels_seq),
                 diffusion_steps=diffusion_steps,
                 start_step=1000,
@@ -264,7 +265,7 @@ class DiffusionTrainer(SimpleTrainer):
             )
             return samples
         
-        return generate_sampler, generate_samples
+        return sampler, generate_samples
 
     def validation_loop(
         self,
@@ -275,14 +276,15 @@ class DiffusionTrainer(SimpleTrainer):
         current_step,
         diffusion_steps=200,
     ):
-        generate_sampler, generate_samples = val_step_fn
+        sampler, generate_samples = val_step_fn
         
-        sampler = generate_sampler(val_state)
+        # sampler = generate_sampler(val_state)
         
         val_ds = iter(val_ds()) if val_ds else None
         # Evaluation step
         try:
             samples = generate_samples(
+                val_state,
                 next(val_ds),
                 sampler,
                 diffusion_steps,

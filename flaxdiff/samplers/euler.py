@@ -6,7 +6,7 @@ from ..utils import RandomMarkovState
 class EulerSampler(DiffusionSampler):
     # Basically a DDIM Sampler but parameterized as an ODE
     def take_next_step(self, current_samples, reconstructed_samples, model_conditioning_inputs,
-                 pred_noise, current_step, state:RandomMarkovState, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
+                 pred_noise, current_step, state:RandomMarkovState, sample_model_fn, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
         current_alpha, current_sigma = self.noise_schedule.get_rates(current_step)
         next_alpha, next_sigma = self.noise_schedule.get_rates(next_step)
 
@@ -22,7 +22,7 @@ class SimplifiedEulerSampler(DiffusionSampler):
     This is for networks with forward diffusion of the form x_{t+1} = x_t + sigma_t * epsilon_t
     """
     def take_next_step(self, current_samples, reconstructed_samples, model_conditioning_inputs,
-                 pred_noise, current_step, state:RandomMarkovState, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
+                 pred_noise, current_step, state:RandomMarkovState, sample_model_fn, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
         _, current_sigma = self.noise_schedule.get_rates(current_step)
         _, next_sigma = self.noise_schedule.get_rates(next_step)
 
@@ -37,7 +37,7 @@ class EulerAncestralSampler(DiffusionSampler):
     Similar to EulerSampler but with ancestral sampling
     """
     def take_next_step(self, current_samples, reconstructed_samples, model_conditioning_inputs,
-                 pred_noise, current_step, state:RandomMarkovState, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
+                 pred_noise, current_step, state:RandomMarkovState, sample_model_fn, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
         current_alpha, current_sigma = self.noise_schedule.get_rates(current_step)
         next_alpha, next_sigma = self.noise_schedule.get_rates(next_step)
 
