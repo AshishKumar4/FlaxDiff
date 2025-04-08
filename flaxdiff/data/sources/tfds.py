@@ -4,6 +4,8 @@ import grain.python as pygrain
 from flaxdiff.utils import AutoTextTokenizer
 from typing import Dict
 import random
+import augmax
+import jax
 
 # -----------------------------------------------------------------------------------------------#
 # Oxford flowers and other TFDS datasources -----------------------------------------------------#
@@ -47,6 +49,15 @@ def tfds_augmenters(image_scale, method):
         interpolation = cv2.INTER_CUBIC
     else:
         interpolation = cv2.INTER_AREA
+        
+    augments = augmax.Chain(
+        augmax.HorizontalFlip(0.5),
+        augmax.RandomContrast((-0.05, 0.05), 1.),
+        augmax.RandomBrightness((-0.2, 0.2), 1.)
+    )
+
+    augments = jax.jit(augments, backend="cpu")
+        
     class augmenters(pygrain.MapTransform):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
@@ -56,6 +67,7 @@ def tfds_augmenters(image_scale, method):
             image = element['image']
             image = cv2.resize(image, (image_scale, image_scale),
                             interpolation=interpolation)
+            # image = augments(image)
             # image = (image - 127.5) / 127.5
             caption = labelizer(element)
             results = self.tokenize(caption)

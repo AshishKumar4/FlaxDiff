@@ -14,6 +14,7 @@ from typing import Dict, Callable, Sequence, Any, Union, Tuple, Type
 from ..schedulers import NoiseScheduler
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
 from ..samplers.common import DiffusionSampler
+from ..samplers.ddim import DDIMSampler
 
 from flaxdiff.utils import RandomMarkovState
 
@@ -179,9 +180,6 @@ class DiffusionTrainer(SimpleTrainer):
                 nloss = loss_fn(preds, expected_output)
                 # Ignore the loss contribution of images with zero standard deviation
                 nloss *= noise_schedule.get_weights(noise_level)
-                # nloss = jnp.mean(nloss, axis=(1,2,3))
-                # nloss = jnp.where(is_non_zero, nloss, 0)
-                # nloss = jnp.mean(nloss, where=nloss != 0)
                 nloss = jnp.mean(nloss)
                 loss = nloss
                 return loss
@@ -224,11 +222,11 @@ class DiffusionTrainer(SimpleTrainer):
         if distributed_training:
             train_step = shard_map(train_step, mesh=self.mesh, in_specs=(P(), P(), P('data'), P('data')), 
                                    out_specs=(P(), P(), P()))
-            train_step = jax.jit(train_step)
+        train_step = jax.jit(train_step)
             
         return train_step
 
-    def _define_vaidation_step(self, sampler_class: Type[DiffusionSampler]):
+    def _define_vaidation_step(self, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
         model = self.model
         encoder = self.encoder
         autoencoder = self.autoencoder
@@ -241,7 +239,7 @@ class DiffusionTrainer(SimpleTrainer):
             sampler = sampler_class(
                 model=model,
                 params=state.ema_params,
-                noise_schedule=self.noise_schedule,
+                noise_schedule=self.noise_schedule if sampling_noise_schedule is None else sampling_noise_schedule,
                 model_output_transform=self.model_output_transform,
                 image_size=self.input_shapes['x'][0],
                 null_labels_seq=null_labels_full,
@@ -311,10 +309,11 @@ class DiffusionTrainer(SimpleTrainer):
             print("Error logging images to wandb", e)
             traceback.print_exc()
     
-    def fit(self, data, training_steps_per_epoch, epochs, val_steps_per_epoch=8, sampler_class=None):
+    def fit(self, data, training_steps_per_epoch, epochs, val_steps_per_epoch=8, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
         local_batch_size = data['local_batch_size']
         validation_step_args = {
             "sampler_class": sampler_class,
+            "sampling_noise_schedule": sampling_noise_schedule,
         }
         super().fit(
             data, 
