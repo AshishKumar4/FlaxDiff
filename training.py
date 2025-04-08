@@ -15,7 +15,7 @@ from flaxdiff.models.simple_unet import Unet
 from flaxdiff.models.simple_vit import UViT
 import jax.experimental.pallas.ops.tpu.flash_attention
 from flaxdiff.predictors import VPredictionTransform, EpsilonPredictionTransform, DiffusionPredictionTransform, DirectPredictionTransform, KarrasPredictionTransform
-from flaxdiff.schedulers import CosineNoiseSchedule, NoiseScheduler, GeneralizedNoiseScheduler, KarrasVENoiseScheduler, EDMNoiseScheduler
+from flaxdiff.schedulers import CosineNoiseScheduler, NoiseScheduler, GeneralizedNoiseScheduler, KarrasVENoiseScheduler, EDMNoiseScheduler
 import struct as st
 import flax
 import tqdm
@@ -373,7 +373,7 @@ def main(args):
         model_config['kernel_init'] = partial(kernel_init, scale=float(args.kernel_init))
         print("Using custom kernel initialization with scale", args.kernel_init)
 
-    cosine_schedule = CosineNoiseSchedule(1000, beta_end=1)
+    cosine_schedule = CosineNoiseScheduler(1000, beta_end=1)
     karas_ve_schedule = KarrasVENoiseScheduler(
         1, sigma_max=80, rho=7, sigma_data=0.5)
     edm_schedule = EDMNoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
