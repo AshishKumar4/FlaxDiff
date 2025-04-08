@@ -24,6 +24,7 @@ from termcolor import colored
 from typing import Dict, Callable, Sequence, Any, Union, Tuple
 from flax.training.dynamic_scale import DynamicScale
 from flaxdiff.utils import RandomMarkovState
+from flax.training import dynamic_scale as dynamic_scale_lib
 
 PROCESS_COLOR_MAP = {
     0: "green",
@@ -63,12 +64,12 @@ def convert_to_global_tree(global_mesh, pytree):
 @struct.dataclass
 class Metrics(metrics.Collection):
     accuracy: metrics.Accuracy
-    loss: metrics.Average.from_output('loss')
+    loss: metrics.Average#.from_output('loss')
 
 # Define the TrainState
 class SimpleTrainState(train_state.TrainState):
     metrics: Metrics
-    dynamic_scale: DynamicScale
+    dynamic_scale: dynamic_scale_lib.DynamicScale
 
 class SimpleTrainer:
     state: SimpleTrainState
@@ -110,6 +111,7 @@ class SimpleTrainer:
         
         
         if wandb_config is not None and jax.process_index() == 0:
+            import wandb
             run = wandb.init(**wandb_config)
             self.wandb = run
             
@@ -177,16 +179,13 @@ class SimpleTrainer:
             params = model.init(subkey, **input_vars)
         else:
             params = existing_state['params']
-            
-        if param_transforms is not None:
-            params = param_transforms(params)
 
         state = SimpleTrainState.create(
             apply_fn=model.apply,
             params=params,
             tx=optimizer,
             metrics=Metrics.empty(),
-            dynamic_scale = DynamicScale() if use_dynamic_scale else None
+            dynamic_scale = dynamic_scale_lib.DynamicScale() if use_dynamic_scale else None
         )
         if existing_best_state is not None:
             best_state = state.replace(
@@ -207,16 +206,16 @@ class SimpleTrainer:
         self.best_state = best_state
 
     def get_state(self):
-        # return fully_replicated_host_local_array_to_global_array()
-        return jax.tree_util.tree_map(lambda x : np.array(x), self.state)
+        return self.get_np_tree(self.state)
 
     def get_best_state(self):
-        # return convert_to_global_tree(self.mesh, flax.jax_utils.replicate(self.best_state, jax.local_devices()))
-        return jax.tree_util.tree_map(lambda x : np.array(x), self.best_state)
+        return self.get_np_tree(self.best_state)
         
     def get_rngstate(self):
-        # return convert_to_global_tree(self.mesh, flax.jax_utils.replicate(self.rngstate, jax.local_devices()))
-        return jax.tree_util.tree_map(lambda x : np.array(x), self.rngstate)
+        return self.get_np_tree(self.rngstate)
+    
+    def get_np_tree(self, pytree):
+        return jax.tree_util.tree_map(lambda x : np.array(x), pytree)
 
     def checkpoint_path(self):
         path = os.path.join(self.checkpoint_base_path, self.name.replace(' ', '_').lower())
@@ -253,29 +252,35 @@ class SimpleTrainer:
         rngstate = ckpt['rngs']
         # Convert the state to a TrainState
         self.best_loss = ckpt['best_loss']
+        if self.best_loss == 0:
+            # It cant be zero as that must have been some problem
+            self.best_loss = 1e9
         current_epoch = ckpt.get('epoch', step) # Must be a checkpoint from an older version which used epochs instead of steps
         print(
             f"Loaded model from checkpoint at epoch {current_epoch} step {step}", ckpt['best_loss'])
         return current_epoch, step, state, best_state, rngstate
 
-    def save(self, epoch=0, step=0):
+    def save(self, epoch=0, step=0, state=None, rngstate=None):
         print(f"Saving model at epoch {epoch} step {step}")
-        ckpt = {
-            # 'model': self.model,
-            'rngs': self.get_rngstate(),
-            'state': self.get_state(),
-            'best_state': self.get_best_state(),
-            'best_loss': np.array(self.best_loss),
-            'epoch': epoch,
-        }
         try:
-            save_args = orbax_utils.save_args_from_target(ckpt)
-            self.checkpointer.save(step, ckpt, save_kwargs={
-                                   'save_args': save_args}, force=True)
-            self.checkpointer.wait_until_finished()
-            pass
+            ckpt = {
+                # 'model': self.model,
+                'rngs': self.get_rngstate() if rngstate is None else self.get_np_tree(rngstate),
+                'state': self.get_state() if state is None else self.get_np_tree(state),
+                'best_state': self.get_best_state(),
+                'best_loss': np.array(self.best_loss),
+                'epoch': epoch,
+            }
+            try:
+                save_args = orbax_utils.save_args_from_target(ckpt)
+                self.checkpointer.save(step, ckpt, save_kwargs={
+                                    'save_args': save_args}, force=True)
+                self.checkpointer.wait_until_finished()
+                pass
+            except Exception as e:
+                print("Error saving checkpoint", e)
         except Exception as e:
-            print("Error saving checkpoint", e)
+            print("Error saving checkpoint outer", e)
 
     def _define_train_step(self, **kwargs):
         model = self.model
@@ -368,19 +373,25 @@ class SimpleTrainer:
             last_save_time = time.time()
             for i in range(steps_per_epoch):
                 batch = next(train_ds)
+                if i == 0:
+                    print(f"First batch loaded at step {current_step}")
+                    
                 if self.distributed_training and global_device_count > 1:
-                    # Convert the local device batches to a unified global jax.Array 
+                #     # Convert the local device batches to a unified global jax.Array 
                     batch = convert_to_global_tree(self.mesh, batch)
                 train_state, loss, rng_state = train_step(train_state, rng_state, batch, global_device_indexes)
 
+                if i == 0:
+                    print(f"Training started for process index {process_index} at step {current_step}")
+                
                 if self.distributed_training:
-                    loss = jax.experimental.multihost_utils.process_allgather(loss)
+                    # loss = jax.experimental.multihost_utils.process_allgather(loss)
                     loss = jnp.mean(loss) # Just to make sure its a scaler value
                     
                 if loss <= 1e-6:
                     # If the loss is too low, we can assume the model has diverged
                     print(colored(f"Loss too low at step {current_step} => {loss}", 'red'))
-                    # Exit the training loop
+                    # Reset the model to the old state
                     exit(1)
                             
                 epoch_loss += loss
@@ -394,10 +405,12 @@ class SimpleTrainer:
                                 "train/step" : current_step,
                                 "train/loss": loss,
                             }, step=current_step)
-                    # Save the model every 40 minutes
-                    if time.time() - last_save_time > 40 * 60:
-                        print(f"Saving model after 40 minutes at step {current_step}")
-                        self.save(current_epoch, current_step)
+                    # Save the model every few steps
+                    if i % 10000 == 0 and i > 0:
+                        print(f"Saving model after 10000 step {current_step}")
+                        print(f"Devices: {len(jax.devices())}") # To sync the devices
+                        self.save(current_epoch, current_step, train_state, rng_state)
+                        print(f"Saving done by process index {process_index}")
                         last_save_time = time.time()
             print(colored(f"Epoch done on index {process_index} => {current_epoch} Loss: {epoch_loss/steps_per_epoch}", 'green'))
             return epoch_loss, current_step, train_state, rng_state
@@ -437,6 +450,5 @@ class SimpleTrainer:
                         "train/epoch": current_epoch,
                     }, step=current_step)
                 print(colored(f"\n\tEpoch {current_epoch} completed. Avg Loss: {avg_loss}, Time: {total_time:.2f}s, Best Loss: {self.best_loss}", 'green'))
-        print("Training done")
         self.save(epochs)
         return self.state
