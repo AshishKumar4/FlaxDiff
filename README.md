@@ -74,7 +74,7 @@ Also, few of the text may be generated with help of github copilot, so please ex
 ### Schedulers
 Implemented in `flaxdiff.schedulers`:
 - **LinearNoiseSchedule** (`flaxdiff.schedulers.LinearNoiseSchedule`): A beta-parameterized discrete scheduler.
-- **CosineNoiseSchedule** (`flaxdiff.schedulers.CosineNoiseSchedule`): A beta-parameterized discrete scheduler.
+- **CosineNoiseScheduler** (`flaxdiff.schedulers.CosineNoiseScheduler`): A beta-parameterized discrete scheduler.
 - **ExpNoiseSchedule** (`flaxdiff.schedulers.ExpNoiseSchedule`): A beta-parameterized discrete scheduler.
 - **CosineContinuousNoiseScheduler** (`flaxdiff.schedulers.CosineContinuousNoiseScheduler`): A continuous scheduler.
 - **CosineGeneralNoiseScheduler** (`flaxdiff.schedulers.CosineGeneralNoiseScheduler`): A continuous sigma parameterized cosine scheduler.
@@ -125,43 +125,81 @@ sticking to the versions mentioned in the requirements.txt
 Here is a simplified example to get you started with training a diffusion model using FlaxDiff:
 
 ```python
-from flaxdiff.schedulers import EDMNoiseScheduler
+from flaxdiff.schedulers import EDMNoiseScheduler, KarrasVENoiseScheduler
 from flaxdiff.predictors import KarrasPredictionTransform
-from flaxdiff.models.simple_unet import SimpleUNet as UNet
+from flaxdiff.models.simple_unet import Unet
 from flaxdiff.trainer import DiffusionTrainer
+from flaxdiff.data.datasets import get_dataset_grain
+from flaxdiff.utils import defaultTextEncodeModel
+from flaxdiff.samplers.euler import EulerAncestralSampler
 import jax
+import jax.numpy as jnp
 import optax
 from datetime import datetime
 
 BATCH_SIZE = 16
-IMAGE_SIZE = 64
+IMAGE_SIZE = 128
 
 # Define noise scheduler
 edm_schedule = EDMNoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
-
+karas_ve_schedule = KarrasVENoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
 # Define model
-unet = UNet(emb_features=256, 
-            feature_depths=[64, 128, 256, 512],
-            attention_configs=[{"heads":4}, {"heads":4}, {"heads":4}, {"heads":4}, {"heads":4}],
+unet = Unet(emb_features=256, 
+            feature_depths=[64, 64, 128, 256, 512],
+            attention_configs=[
+                None,
+                {"heads":8, "dtype":jnp.float16, "flash_attention":False, "use_projection":True, "use_self_and_cross":True}, 
+                {"heads":8, "dtype":jnp.float16, "flash_attention":False, "use_projection":True, "use_self_and_cross":True}, 
+                {"heads":8, "dtype":jnp.float16, "flash_attention":False, "use_projection":True, "use_self_and_cross":True}, 
+                {"heads":8, "dtype":jnp.float16, "flash_attention":False, "use_projection":False, "use_self_and_cross":False}
+                ],
             num_res_blocks=2,
-            num_middle_res_blocks=1)
-
+            num_middle_res_blocks=1
+)
 # Load dataset
-data, datalen = get_dataset("oxford_flowers102", batch_size=BATCH_SIZE, image_scale=IMAGE_SIZE)
+data = get_dataset_grain("oxford_flowers102", batch_size=BATCH_SIZE, image_scale=IMAGE_SIZE)
+datalen = data['train_len']
 batches = datalen // BATCH_SIZE
+
+input_shapes = {
+    "x": (IMAGE_SIZE, IMAGE_SIZE, 3),
+    "temb": (),
+    "textcontext": (77, 768)
+}
+text_encoder = defaultTextEncodeModel()
+
+# Construct a validation set by the prompts
+val_prompts = ['water tulip', ' a water lily', ' a water lily', ' a photo of a rose', ' a photo of a rose', ' a water lily', ' a water lily', ' a photo of a marigold', ' a photo of a marigold']
+
+def get_val_dataset(batch_size=8):
+    for i in range(0, len(val_prompts), batch_size):
+        prompts = val_prompts[i:i + batch_size]
+        tokens = text_encoder.tokenize(prompts)
+        yield tokens
+
+data['test'] = get_val_dataset
+data['test_len'] = len(val_prompts)
 
 # Define optimizer
 solver = optax.adam(2e-4)
 
 # Create trainer
-trainer = DiffusionTrainer(unet, optimizer=solver, 
-                           noise_schedule=edm_schedule,
-                           rngs=jax.random.PRNGKey(4), 
-                           name="Diffusion_SDE_VE_" + datetime.now().strftime("%Y-%m-%d_%H:%M:%S"),
-                           model_output_transform=KarrasPredictionTransform(sigma_data=edm_schedule.sigma_data))
+trainer = DiffusionTrainer(
+    unet, optimizer=solver, 
+    input_shapes=input_shapes,
+    noise_schedule=edm_schedule,
+    rngs=jax.random.PRNGKey(4), 
+    name="Diffusion_SDE_VE_" + datetime.now().strftime("%Y-%m-%d_%H:%M:%S"),
+    model_output_transform=KarrasPredictionTransform(sigma_data=edm_schedule.sigma_data),
+    encoder=text_encoder,
+    distributed_training=True,
+    wandb_config = {
+        "project": 'mlops-msml605-project',
+        "name": f"prototype-{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}",
+})
 
 # Train the model
-final_state = trainer.fit(data, batches, epochs=2000)
+final_state = trainer.fit(data, batches, epochs=2000, sampler_class=EulerAncestralSampler, sampling_noise_schedule=karas_ve_schedule)
 ```
 
 ### Inference Example
@@ -279,8 +317,8 @@ Images generated by the following prompts using classifier free guidance with gu
 `Training Epochs: 1000`
 `Steps per epoch: 511`
 
-`Training Noise Schedule: CosineNoiseSchedule`
-`Inference Noise Schedule: CosineNoiseSchedule`
+`Training Noise Schedule: CosineNoiseScheduler`
+`Inference Noise Schedule: CosineNoiseScheduler`
 
 `Model: UNet(emb_features=256, 
             feature_depths=[64, 128, 256, 512],
@@ -299,8 +337,8 @@ Images generated by the following prompts using classifier free guidance with gu
 `Training Epochs: 1000`
 `Steps per epoch: 511`
 
-`Training Noise Schedule: CosineNoiseSchedule`
-`Inference Noise Schedule: CosineNoiseSchedule`
+`Training Noise Schedule: CosineNoiseScheduler`
+`Inference Noise Schedule: CosineNoiseScheduler`
 
 `Model: UNet(emb_features=256, 
             feature_depths=[64, 128, 256, 512],
