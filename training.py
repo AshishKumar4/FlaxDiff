@@ -115,6 +115,15 @@ parser.add_argument('--GRAIN_READ_BUFFER_SIZE', type=int,
 parser.add_argument('--GRAIN_WORKER_BUFFER_SIZE', type=int,
                     default=50, help='Grain worker buffer size')
 
+parser.add_argument('--dtype', type=str, default=None, help='dtype to use')
+parser.add_argument('--precision', type=str, default=None, help='precision to use', choices=['high', 'default', 'highest', 'None', None])
+
+parser.add_argument('--wandb_project', type=str, default='flaxdiff', help='Wandb project name')
+parser.add_argument('--distributed_training', type=boolean_string, default=True, help='Should use distributed training or not')
+parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
+parser.add_argument('--load_from_checkpoint', type=str,
+                    default=None, help='Load from the best previously stored checkpoint. The checkpoint path should be provided')
+
 parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
 parser.add_argument('--image_size', type=int, default=128, help='Image size')
 parser.add_argument('--epochs', type=int, default=20, help='Number of epochs')
@@ -149,13 +158,6 @@ parser.add_argument('--num_layers', type=int, default=12, help='Number of layers
 parser.add_argument('--num_heads', type=int, default=12, help='Number of heads in the transformer if using UViT')
 parser.add_argument('--mlp_ratio', type=int, default=4, help='MLP ratio in the transformer if using UViT')
 
-parser.add_argument('--dtype', type=str, default=None, help='dtype to use')
-parser.add_argument('--precision', type=str, default=None, help='precision to use', choices=['high', 'default', 'highest', 'None', None])
-
-parser.add_argument('--distributed_training', type=boolean_string, default=True, help='Should use distributed training or not')
-parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
-parser.add_argument('--load_from_checkpoint', type=str,
-                    default=None, help='Load from the best previously stored checkpoint. The checkpoint path should be provided')
 parser.add_argument('--dataset_seed', type=int, default=0, help='Dataset starting seed')
 
 parser.add_argument('--dataset_test', type=boolean_string,
@@ -407,7 +409,7 @@ def main(args):
         )
 
     wandb_config = {
-        "project": "flaxdiff",
+        "project": args.wandb_project,
         "config": CONFIG,
         "name": experiment_name,
     }
