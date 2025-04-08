@@ -39,11 +39,11 @@ def get_dataset_grain(
     augmenter = dataset["augmenter"](image_scale, method)
 
     local_batch_size = batch_size // jax.process_count()
-    model, tokenizer = defaultTextEncodeModel()
+    # model, tokenizer = defaultTextEncodeModel()
 
-    null_labels, null_labels_full = encodePrompts([""], model, tokenizer)
-    null_labels = np.array(null_labels[0], dtype=np.float16)
-    null_labels_full = np.array(null_labels_full[0], dtype=np.float16)
+    # null_labels, null_labels_full = encodePrompts([""], model, tokenizer)
+    # null_labels = np.array(null_labels[0], dtype=np.float16)
+    # null_labels_full = np.array(null_labels_full[0], dtype=np.float16)
 
     sampler = pygrain.IndexSampler(
         num_records=len(data_source) if count is None else count,
@@ -80,13 +80,13 @@ def get_dataset_grain(
         "train_len": len(data_source),
         "local_batch_size": local_batch_size,
         "global_batch_size": batch_size,
-        "null_labels": null_labels,
-        "null_labels_full": null_labels_full,
-        "model": model,
-        "tokenizer": tokenizer,
+        # "null_labels": null_labels,
+        # "null_labels_full": null_labels_full,
+        # "model": model,
+        # "tokenizer": tokenizer,
     }
 
-def generate_collate_fn(tokenizer):
+def generate_collate_fn():
     auto_tokenize = AutoTextTokenizer(tensor_type="np")
     def default_collate(batch):
         try:
@@ -121,11 +121,11 @@ def get_dataset_online(
     ):
     local_batch_size = batch_size // jax.process_count()
     
-    model, tokenizer = defaultTextEncodeModel()
+    # model, tokenizer = defaultTextEncodeModel()
 
-    null_labels, null_labels_full = encodePrompts([""], model, tokenizer)
-    null_labels = np.array(null_labels[0], dtype=np.float16)
-    null_labels_full = np.array(null_labels_full[0], dtype=np.float16)
+    # null_labels, null_labels_full = encodePrompts([""], model, tokenizer)
+    # null_labels = np.array(null_labels[0], dtype=np.float16)
+    # null_labels_full = np.array(null_labels_full[0], dtype=np.float16)
     
     sources = onlineDatasetMap[data_name]["source"]
     dataloader = OnlineStreamingDataLoader(
@@ -137,7 +137,7 @@ def get_dataset_online(
             global_process_count=jax.process_count(),
             global_process_index=jax.process_index(),
             prefetch=worker_buffer_size,
-            collate_fn=generate_collate_fn(tokenizer),
+            collate_fn=generate_collate_fn(),
             default_split="train",
         )
     
@@ -173,8 +173,8 @@ def get_dataset_online(
         "train_len": len(dataloader) * jax.process_count(),
         "local_batch_size": local_batch_size,
         "global_batch_size": batch_size,
-        "null_labels": null_labels,
-        "null_labels_full": null_labels_full,
-        "model": model,
-        "tokenizer": tokenizer,
+        # "null_labels": null_labels,
+        # "null_labels_full": null_labels_full,
+        # "model": model,
+        # "tokenizer": tokenizer,
     }

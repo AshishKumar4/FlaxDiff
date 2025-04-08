@@ -14,7 +14,7 @@ from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransfor
 from flaxdiff.utils import RandomMarkovState
 
 from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics
-
+from .diffusion_trainer import TrainState
 from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
 
 class AutoEncoderTrainer(SimpleTrainer):
