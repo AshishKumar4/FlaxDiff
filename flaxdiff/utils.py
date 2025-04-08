@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import partial
 import numpy as np
 from jax.sharding import Mesh, PartitionSpec as P
+from abc import ABC, abstractmethod
 
 class MarkovState(struct.PyTreeNode):
     pass
@@ -115,21 +116,38 @@ class RMSNorm(nn.Module):
             mul *= scale
         y = mul * x
         return jnp.asarray(y, dtype)
-    
-    
+
 @dataclass
-class TextEncoder:
+class ConditioningEncoder(ABC):
     model: nn.Module
     tokenizer: Callable
-    
-    def __call__(self, prompts):
-        # inputs = tokenizer(prompts, padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="np")
-        inputs = self.tokenizer(prompts, padding="max_length",
-                        max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="np")
-        outputs = self.model(input_ids=inputs['input_ids'],
-                        attention_mask=inputs['attention_mask'])
-        # outputs = infer(inputs['input_ids'], inputs['attention_mask'])
 
+    def __call__(self, data):
+        tokens = self.tokenize(data)
+        outputs = self.encode_from_tokens(tokens)
+        return outputs
+        
+    def encode_from_tokens(self, tokens):
+        outputs = self.model(input_ids=tokens['input_ids'],
+                        attention_mask=tokens['attention_mask'])
+        last_hidden_state = outputs.last_hidden_state
+        return last_hidden_state
+    
+    def tokenize(self, data):
+        tokens = self.tokenizer(data, padding="max_length",
+                        max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="np")
+        return tokens
+    
+@dataclass
+class TextEncoder(ConditioningEncoder):
+    def __call__(self, data):
+        tokens = self.tokenize(data)
+        outputs = self.encode_from_tokens(tokens)
+        return outputs
+        
+    def encode_from_tokens(self, tokens):
+        outputs = self.model(input_ids=tokens['input_ids'],
+                        attention_mask=tokens['attention_mask'])
         last_hidden_state = outputs.last_hidden_state
         pooler_output = outputs.pooler_output  # pooled (EOS token) states
         embed_pooled = pooler_output  # .astype(jnp.float16)
