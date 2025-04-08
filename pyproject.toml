@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flaxdiff"
+dynamic = ["version"]
+description = "A versatile and easy to understand Diffusion library"
+readme = "README.md"
+authors = [
+  { name="Ashish Kumar Singh", email="ashishkmr472@gmail.com" }
+]
+dependencies = [
+    "flax>=0.8.4",
+    "jax>=0.4.28",
+    "optax>=0.2.2",
+    "orbax",
+    "numpy",
+    "clu",
+    "einops",
+    "tqdm",
+    "grain",
+    "termcolor",
+    "augmax",
+    "albumentations",
+    "rich",
+    "python-dotenv",
+]
+license = "MIT"
+
+[tool.setuptools]
+packages = ["flaxdiff"]

@@ -219,6 +219,8 @@ class SimpleTrainer:
 
     def checkpoint_path(self):
         path = os.path.join(self.checkpoint_base_path, self.name.replace(' ', '_').lower())
+        # Convert the path to an absolute path
+        path = os.path.abspath(path)
         if not os.path.exists(path):
             os.makedirs(path)
         return path
