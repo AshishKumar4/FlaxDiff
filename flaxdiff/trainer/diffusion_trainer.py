@@ -19,6 +19,7 @@ from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics
 
 from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
 from flax.training import dynamic_scale as dynamic_scale_lib
+from flaxdiff.utils import TextEncoder, ConditioningEncoder
 
 class TrainState(SimpleTrainState):
     rngs: jax.random.PRNGKey
@@ -49,6 +50,7 @@ class DiffusionTrainer(SimpleTrainer):
                  name: str = "Diffusion",
                  model_output_transform: DiffusionPredictionTransform = EpsilonPredictionTransform(),
                  autoencoder: AutoEncoder = None,
+                 encoder: ConditioningEncoder = None,
                  **kwargs
                  ):
         super().__init__(
@@ -64,6 +66,7 @@ class DiffusionTrainer(SimpleTrainer):
         self.unconditional_prob = unconditional_prob
         
         self.autoencoder = autoencoder
+        self.encoder = encoder
 
     def generate_states(
         self,
@@ -106,7 +109,7 @@ class DiffusionTrainer(SimpleTrainer):
 
         return state, best_state
 
-    def _define_train_step(self, batch_size, null_labels_seq, text_embedder):
+    def _define_train_step(self, batch_size):
         noise_schedule: NoiseScheduler = self.noise_schedule
         model = self.model
         model_output_transform = self.model_output_transform
@@ -115,6 +118,11 @@ class DiffusionTrainer(SimpleTrainer):
 
         # Determine the number of unconditional samples
         num_unconditional = int(batch_size * unconditional_prob)
+        
+        _, null_labels_full = self.encoder([""])
+        null_labels_seq = jnp.array(null_labels_full[0], dtype=jnp.float16)
+        
+        conditioning_encoder = self.encoder.model
 
         nS, nC = null_labels_seq.shape
         null_labels_seq = jnp.broadcast_to(
@@ -146,7 +154,7 @@ class DiffusionTrainer(SimpleTrainer):
                 local_rng_state, rngs = local_rng_state.get_random_key()
                 images = autoencoder.encode(images, rngs)
 
-            output = text_embedder(
+            output = conditioning_encoder(
                 input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
             label_seq = output.last_hidden_state
 
@@ -231,8 +239,5 @@ class DiffusionTrainer(SimpleTrainer):
         return compute_metrics
 
     def fit(self, data, steps_per_epoch, epochs):
-        null_labels_full = data['null_labels_full']
         local_batch_size = data['local_batch_size']
-        text_embedder = data['model']
-        super().fit(data, steps_per_epoch, epochs, {
-            "batch_size": local_batch_size, "null_labels_seq": null_labels_full, "text_embedder": text_embedder})
+        super().fit(data, steps_per_epoch, epochs, {"batch_size": local_batch_size})
