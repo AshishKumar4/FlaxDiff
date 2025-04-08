@@ -119,10 +119,10 @@ class DiffusionTrainer(SimpleTrainer):
         # Determine the number of unconditional samples
         num_unconditional = int(batch_size * unconditional_prob)
         
-        _, null_labels_full = self.encoder([""])
+        null_labels_full = self.encoder([""])
         null_labels_seq = jnp.array(null_labels_full[0], dtype=jnp.float16)
         
-        conditioning_encoder = self.encoder.model
+        conditioning_encoder = self.encoder
 
         nS, nC = null_labels_seq.shape
         null_labels_seq = jnp.broadcast_to(
@@ -154,9 +154,7 @@ class DiffusionTrainer(SimpleTrainer):
                 local_rng_state, rngs = local_rng_state.get_random_key()
                 images = autoencoder.encode(images, rngs)
 
-            output = conditioning_encoder(
-                input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
-            label_seq = output.last_hidden_state
+            label_seq = conditioning_encoder.encode_from_tokens(batch)
 
             # Generate random probabilities to decide how much of this batch will be unconditional
 
