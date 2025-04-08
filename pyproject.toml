@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flaxdiff"
-version = "0.1.36.1"
+version = "0.1.36.3"
 description = "A versatile and easy to understand Diffusion library"
 readme = "README.md"
 authors = [
@@ -28,5 +28,5 @@ dependencies = [
 ]
 license = "MIT"
 
-[tool.setuptools]
-packages = ["flaxdiff"]
+[tool.setuptools.packages.find]
+include = ["flaxdiff*"]
