@@ -4,7 +4,7 @@ from .common import DiffusionSampler
 from ..utils import MarkovState, RandomMarkovState
 class DDPMSampler(DiffusionSampler):
     def take_next_step(self, current_samples, reconstructed_samples, model_conditioning_inputs,
-                 pred_noise, current_step, state:RandomMarkovState, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
+                 pred_noise, current_step, state:RandomMarkovState, sample_model_fn, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
         mean = self.noise_schedule.get_posterior_mean(reconstructed_samples, current_samples, current_step)
         variance = self.noise_schedule.get_posterior_variance(steps=current_step)
         
@@ -19,7 +19,7 @@ class DDPMSampler(DiffusionSampler):
     
 class SimpleDDPMSampler(DiffusionSampler):
     def take_next_step(self, current_samples, reconstructed_samples, model_conditioning_inputs,
-                 pred_noise, current_step, state:RandomMarkovState, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
+                 pred_noise, current_step, state:RandomMarkovState, sample_model_fn, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
         state, rng = state.get_random_key()
         noise = jax.random.normal(rng, reconstructed_samples.shape, dtype=jnp.float32)
 
