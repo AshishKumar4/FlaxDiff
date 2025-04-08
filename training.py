@@ -53,6 +53,7 @@ from jax.experimental import mesh_utils
 from jax.experimental.shard_map import shard_map
 from orbax.checkpoint.utils import fully_replicated_host_local_array_to_global_array
 from termcolor import colored
+from flaxdiff.data.datasets import get_dataset_grain, get_dataset_online
 
 import warnings
 import traceback
