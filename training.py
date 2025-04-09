@@ -16,6 +16,7 @@ from flaxdiff.models.simple_vit import UViT
 import jax.experimental.pallas.ops.tpu.flash_attention
 from flaxdiff.predictors import VPredictionTransform, EpsilonPredictionTransform, DiffusionPredictionTransform, DirectPredictionTransform, KarrasPredictionTransform
 from flaxdiff.schedulers import CosineNoiseScheduler, NoiseScheduler, GeneralizedNoiseScheduler, KarrasVENoiseScheduler, EDMNoiseScheduler
+
 import struct as st
 import flax
 import tqdm
@@ -60,7 +61,6 @@ import traceback
 from flaxdiff.utils import defaultTextEncodeModel
 
 warnings.filterwarnings("ignore")
-
 
 #####################################################################################################################
 ################################################# Initialization ####################################################
@@ -186,6 +186,7 @@ parser.add_argument('--use_dynamic_scale', type=boolean_string, default=False, h
 parser.add_argument('--clip_grads', type=float, default=0, help='Clip gradients to this value')
 parser.add_argument('--add_residualblock_output', type=boolean_string, default=False, help='Add a residual block stage to the final output')
 parser.add_argument('--kernel_init', type=None, default=1.0, help='Kernel initialization value')
+
 
 def main(args):
     resource.setrlimit(

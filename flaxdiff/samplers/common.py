@@ -2,20 +2,15 @@ from flax import linen as nn
 import jax
 import jax.numpy as jnp
 import tqdm
-from typing import Union
+from typing import Union, Type
 from ..schedulers import NoiseScheduler
 from ..utils import RandomMarkovState, MarkovState, clip_images
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
 
 class DiffusionSampler():
-    model:nn.Module
-    noise_schedule:NoiseScheduler
-    params:dict
-    model_output_transform:DiffusionPredictionTransform
-
     def __init__(self, model:nn.Module, params:dict,  
                  noise_schedule:NoiseScheduler, 
-                 model_output_transform:DiffusionPredictionTransform=EpsilonPredictionTransform(),
+                 model_output_transform:DiffusionPredictionTransform,
                  guidance_scale:float = 0.0,
                  null_labels_seq:jax.Array=None,
                  autoencoder=None,
@@ -122,9 +117,11 @@ class DiffusionSampler():
                         end_step:int = 0,
                         steps_override=None,
                         priors=None, 
-                        rngstate:RandomMarkovState=RandomMarkovState(jax.random.PRNGKey(42)),
+                        rngstate:RandomMarkovState=None,
                         model_conditioning_inputs:tuple=()
                         ) -> jnp.ndarray:
+        if rngstate is None:
+            rngstate = RandomMarkovState(jax.random.PRNGKey(42))
         if priors is None:
             rngstate, newrngs = rngstate.get_random_key()
             samples = self.get_initial_samples(num_images, newrngs, start_step)
@@ -170,3 +167,4 @@ class DiffusionSampler():
             samples = self.autoencoder.decode(samples)
         samples = clip_images(samples)
         return samples
+    
