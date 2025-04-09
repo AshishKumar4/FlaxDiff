@@ -67,7 +67,7 @@ class DiffusionSampler():
     # Used to sample from the diffusion model
     def sample_step(self, sample_model_fn, current_samples:jnp.ndarray, current_step, model_conditioning_inputs, next_step=None, state:MarkovState=None) -> tuple[jnp.ndarray, MarkovState]:
         # First clip the noisy images
-        step_ones = jnp.ones((current_samples.shape[0], ), dtype=jnp.int32)
+        step_ones = jnp.ones((len(current_samples), ), dtype=jnp.int32)
         current_step = step_ones * current_step
         next_step = step_ones * next_step
         pred_images, pred_noise, _ = sample_model_fn(current_samples, current_step, *model_conditioning_inputs)
