@@ -11,7 +11,7 @@ from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
 from typing import Dict, Callable, Sequence, Any, Union, Tuple, Type
 
-from ..schedulers import NoiseScheduler
+from ..schedulers import NoiseScheduler, get_coeff_shapes_tuple
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
 from ..samplers.common import DiffusionSampler
 from ..samplers.ddim import DDIMSampler
@@ -144,6 +144,8 @@ class DiffusionTrainer(SimpleTrainer):
             
             images = batch['image']
             
+            local_batch_size = images.shape[0]
+            
             # First get the standard deviation of the images
             # std = jnp.std(images, axis=(1, 2, 3))
             # is_non_zero = (std > 0)
@@ -164,7 +166,7 @@ class DiffusionTrainer(SimpleTrainer):
             label_seq = jnp.concat(
                 [null_labels_seq[:num_unconditional], label_seq[num_unconditional:]], axis=0)
 
-            noise_level, local_rng_state = noise_schedule.generate_timesteps(images.shape[0], local_rng_state)
+            noise_level, local_rng_state = noise_schedule.generate_timesteps(local_batch_size, local_rng_state)
             
             local_rng_state, rngs = local_rng_state.get_random_key()
             noise: jax.Array = jax.random.normal(rngs, shape=images.shape, dtype=jnp.float32)
@@ -172,17 +174,15 @@ class DiffusionTrainer(SimpleTrainer):
             # Make sure image is also float32
             images = images.astype(jnp.float32)
             
-            rates = noise_schedule.get_rates(noise_level)
-            noisy_images, c_in, expected_output = model_output_transform.forward_diffusion(
-                images, noise, rates)
+            rates = noise_schedule.get_rates(noise_level, get_coeff_shapes_tuple(images))
+            noisy_images, c_in, expected_output = model_output_transform.forward_diffusion(images, noise, rates)
 
             def model_loss(params):
                 preds = model.apply(params, *noise_schedule.transform_inputs(noisy_images*c_in, noise_level), label_seq)
-                preds = model_output_transform.pred_transform(
-                    noisy_images, preds, rates)
+                preds = model_output_transform.pred_transform(noisy_images, preds, rates)
                 nloss = loss_fn(preds, expected_output)
                 # Ignore the loss contribution of images with zero standard deviation
-                nloss *= noise_schedule.get_weights(noise_level)
+                nloss *= noise_schedule.get_weights(noise_level, get_coeff_shapes_tuple(nloss))
                 nloss = jnp.mean(nloss)
                 loss = nloss
                 return loss
@@ -216,7 +216,7 @@ class DiffusionTrainer(SimpleTrainer):
             #     operand=None
             # )
     
-            # new_state = train_state.apply_gradients(grads=grads)
+            new_state = train_state.apply_gradients(grads=grads)
             
             if train_state.dynamic_scale is not None:
                 # if is_fin == False the gradients contain Inf/NaNs and optimizer state and
@@ -238,9 +238,16 @@ class DiffusionTrainer(SimpleTrainer):
             return train_state, loss, rng_state
 
         if distributed_training:
-            train_step = shard_map(train_step, mesh=self.mesh, in_specs=(P(), P(), P('data'), P('data')), 
-                                   out_specs=(P(), P(), P()))
-        train_step = jax.jit(train_step)
+            train_step = shard_map(
+                train_step, 
+                mesh=self.mesh, 
+                in_specs=(P(), P(), P('data'), P('data')), 
+                out_specs=(P(), P(), P()),
+            )
+        train_step = jax.jit(
+            train_step,
+            donate_argnums=(2)
+        )
             
         return train_step
 
@@ -253,12 +260,21 @@ class DiffusionTrainer(SimpleTrainer):
         null_labels_full = null_labels_full.astype(jnp.float16)
         # null_labels_seq = jnp.array(null_labels_full[0], dtype=jnp.float16)
         
+        if 'image' in self.input_shapes:
+            image_size = self.input_shapes['image'][1]
+        elif 'x' in self.input_shapes:
+            image_size = self.input_shapes['x'][1]
+        elif 'sample' in self.input_shapes:
+            image_size = self.input_shapes['sample'][1]
+        else:
+            raise ValueError("No image input shape found in input shapes")
+        
         sampler = sampler_class(
             model=model,
             params=None,
             noise_schedule=self.noise_schedule if sampling_noise_schedule is None else sampling_noise_schedule,
             model_output_transform=self.model_output_transform,
-            image_size=self.input_shapes['x'][0],
+            image_size=image_size,
             null_labels_seq=null_labels_full,
             autoencoder=autoencoder,
             guidance_scale=3.0,
@@ -309,7 +325,7 @@ class DiffusionTrainer(SimpleTrainer):
             )
             
             # Put each sample on wandb
-            if self.wandb:
+            if getattr(self, 'wandb', None) is not None and self.wandb:
                 import numpy as np
                 from wandb import Image as wandbImage
                 wandb_images = []

@@ -116,6 +116,7 @@ parser.add_argument('--GRAIN_WORKER_BUFFER_SIZE', type=int,
                     default=50, help='Grain worker buffer size')
 
 parser.add_argument('--dtype', type=str, default=None, help='dtype to use')
+parser.add_argument('--attn_dtype', type=str, default=None, help='dtype to use for attention')
 parser.add_argument('--precision', type=str, default=None, help='precision to use', choices=['high', 'default', 'highest', 'None', None])
 
 parser.add_argument('--wandb_project', type=str, default='flaxdiff', help='Wandb project name')
@@ -235,6 +236,7 @@ def main(args):
         CHECKPOINT_DIR = f"gs://{CHECKPOINT_DIR}"
 
     DTYPE = DTYPE_MAP[args.dtype]
+    ATTN_DTYPE = DTYPE_MAP[args.attn_dtype if args.attn_dtype is not None else args.dtype]
     PRECISION = PRECISION_MAP[args.precision]
 
     GRAIN_WORKER_COUNT = args.GRAIN_WORKER_COUNT
@@ -280,14 +282,14 @@ def main(args):
     if args.attention_heads > 0:
         attention_configs += [
             {
-                "heads": args.attention_heads, "dtype": DTYPE, "flash_attention": args.flash_attention,
+                "heads": args.attention_heads, "dtype": ATTN_DTYPE, "flash_attention": args.flash_attention,
                 "use_projection": args.use_projection, "use_self_and_cross": args.use_self_and_cross,
                 "only_pure_attention": args.only_pure_attention,    
             },
         ] * (len(args.feature_depths) - 2)
         attention_configs += [
             {
-                "heads": args.attention_heads, "dtype": DTYPE, "flash_attention": False,
+                "heads": args.attention_heads, "dtype": ATTN_DTYPE, "flash_attention": False,
                 "use_projection": False, "use_self_and_cross": args.use_self_and_cross,
                 "only_pure_attention": args.only_pure_attention
             },

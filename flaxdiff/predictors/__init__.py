@@ -1,6 +1,6 @@
 from typing import Union
 import jax.numpy as jnp
-from ..schedulers import NoiseScheduler, GeneralizedNoiseScheduler
+from ..schedulers import NoiseScheduler, GeneralizedNoiseScheduler, get_coeff_shapes_tuple
 
 ############################################################################################################
 # Prediction Transforms
@@ -11,7 +11,7 @@ class DiffusionPredictionTransform():
         return preds
     
     def __call__(self, x_t, preds, current_step, noise_schedule:NoiseScheduler) -> Union[jnp.ndarray, jnp.ndarray]:
-        rates = noise_schedule.get_rates(current_step)
+        rates = noise_schedule.get_rates(current_step, shape=get_coeff_shapes_tuple(x_t))
         preds = self.pred_transform(x_t, preds, rates)
         x_0, epsilon = self.backward_diffusion(x_t, preds, rates)
         return x_0, epsilon
@@ -85,8 +85,8 @@ class KarrasPredictionTransform(DiffusionPredictionTransform):
         _, sigma = rates
         c_out = sigma * self.sigma_data / (jnp.sqrt(self.sigma_data ** 2 + sigma ** 2) + epsilon)
         c_skip = self.sigma_data ** 2 / (self.sigma_data ** 2 + sigma ** 2 + epsilon)
-        c_out = c_out.reshape((-1, 1, 1, 1))
-        c_skip = c_skip.reshape((-1, 1, 1, 1))
+        c_out = c_out.reshape(get_coeff_shapes_tuple(preds))
+        c_skip = c_skip.reshape(get_coeff_shapes_tuple(x_t))
         x_0 = c_out * preds + c_skip * x_t
         return x_0
     
