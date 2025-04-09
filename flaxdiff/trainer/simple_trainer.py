@@ -403,7 +403,6 @@ class SimpleTrainer:
         rng_state
     ):
         global_device_count = jax.device_count()
-        local_device_count = jax.local_device_count()
         process_index = jax.process_index()
         if self.distributed_training:
             global_device_indexes = jnp.arange(global_device_count)
@@ -434,11 +433,16 @@ class SimpleTrainer:
                 # loss = jax.experimental.multihost_utils.process_allgather(loss)
                 loss = jnp.mean(loss) # Just to make sure its a scaler value
                     
-            if loss <= 1e-6:
+            if loss <= 1e-8:
                 # If the loss is too low, we can assume the model has diverged
                 print(colored(f"Loss too low at step {current_step} => {loss}", 'red'))
                 # Reset the model to the old state
-                exit(1)
+                if self.best_state is not None:
+                    print(colored(f"Resetting model to best state", 'red'))
+                    train_state = self.best_state
+                    loss = self.best_loss
+                else:
+                    exit(1)
                             
             epoch_loss += loss
             current_step += 1
