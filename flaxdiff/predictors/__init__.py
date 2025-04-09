@@ -81,16 +81,16 @@ class KarrasPredictionTransform(DiffusionPredictionTransform):
         epsilon = (x_t - x_0 * signal_rate) / noise_rate
         return x_0, epsilon
     
-    def pred_transform(self, x_t, preds, rates: tuple[jnp.ndarray, jnp.ndarray]) -> jnp.ndarray:
+    def pred_transform(self, x_t, preds, rates: tuple[jnp.ndarray, jnp.ndarray], epsilon=1e-8) -> jnp.ndarray:
         _, sigma = rates
-        c_out = sigma * self.sigma_data / jnp.sqrt(self.sigma_data ** 2 + sigma ** 2)
-        c_skip = self.sigma_data ** 2 / (self.sigma_data ** 2 + sigma ** 2)
+        c_out = sigma * self.sigma_data / (jnp.sqrt(self.sigma_data ** 2 + sigma ** 2) + epsilon)
+        c_skip = self.sigma_data ** 2 / (self.sigma_data ** 2 + sigma ** 2 + epsilon)
         c_out = c_out.reshape((-1, 1, 1, 1))
         c_skip = c_skip.reshape((-1, 1, 1, 1))
         x_0 = c_out * preds + c_skip * x_t
         return x_0
     
-    def get_input_scale(self, rates: tuple[jnp.ndarray, jnp.ndarray]) -> jnp.ndarray:
+    def get_input_scale(self, rates: tuple[jnp.ndarray, jnp.ndarray], epsilon=1e-8) -> jnp.ndarray:
         _, sigma = rates
-        c_in = 1 / jnp.sqrt(self.sigma_data ** 2 + sigma ** 2)
+        c_in = 1 / (jnp.sqrt(self.sigma_data ** 2 + sigma ** 2) + epsilon)
         return c_in

@@ -167,7 +167,10 @@ class DiffusionTrainer(SimpleTrainer):
             noise_level, local_rng_state = noise_schedule.generate_timesteps(images.shape[0], local_rng_state)
             
             local_rng_state, rngs = local_rng_state.get_random_key()
-            noise: jax.Array = jax.random.normal(rngs, shape=images.shape)
+            noise: jax.Array = jax.random.normal(rngs, shape=images.shape, dtype=jnp.float32)
+            
+            # Make sure image is also float32
+            images = images.astype(jnp.float32)
             
             rates = noise_schedule.get_rates(noise_level)
             noisy_images, c_in, expected_output = model_output_transform.forward_diffusion(
@@ -197,8 +200,23 @@ class DiffusionTrainer(SimpleTrainer):
                 loss, grads = grad_fn(train_state.params)
                 if distributed_training:
                     grads = jax.lax.pmean(grads, "data")
+                    
+            # # check gradients for NaN/Inf
+            # has_nan_or_inf = jax.tree_util.tree_reduce(
+            #     lambda acc, x: jnp.logical_or(acc, jnp.logical_or(jnp.isnan(x).any(), jnp.isinf(x).any())),
+            #     grads,
+            #     initializer=False
+            # )
             
-            new_state = train_state.apply_gradients(grads=grads)
+            # # Only apply gradients if they're valid
+            # new_state = jax.lax.cond(
+            #     has_nan_or_inf,
+            #     lambda _: train_state,  # Skip gradient update
+            #     lambda _: train_state.apply_gradients(grads=grads),
+            #     operand=None
+            # )
+    
+            # new_state = train_state.apply_gradients(grads=grads)
             
             if train_state.dynamic_scale is not None:
                 # if is_fin == False the gradients contain Inf/NaNs and optimizer state and
