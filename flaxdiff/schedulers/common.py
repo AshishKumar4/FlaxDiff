@@ -34,7 +34,7 @@ class NoiseScheduler():
         timesteps = self.timestep_generator(rng, batch_size, self.max_timesteps)
         return timesteps, state
     
-    def get_weights(self, steps):
+    def get_weights(self, steps, shape=(-1, 1, 1, 1)):
         raise NotImplementedError
     
     def get_rates(self, steps, shape=(-1, 1, 1, 1)) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -86,7 +86,7 @@ class GeneralizedNoiseScheduler(NoiseScheduler):
     
     def get_rates(self, steps, shape=(-1, 1, 1, 1)) -> tuple[jnp.ndarray, jnp.ndarray]:
         sigmas = self.get_sigmas(steps)
-        signal_rates = 1
+        signal_rates = jnp.ones_like(sigmas)
         noise_rates = sigmas
         return reshape_rates((signal_rates, noise_rates), shape=shape)
     
