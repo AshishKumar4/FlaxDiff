@@ -11,7 +11,7 @@ from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
 from typing import Dict, Callable, Sequence, Any, Union, Tuple, Type
 
-from ..schedulers import NoiseScheduler
+from ..schedulers import NoiseScheduler, get_coeff_shapes_tuple
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
 from ..samplers.common import DiffusionSampler
 from ..samplers.ddim import DDIMSampler
@@ -174,17 +174,15 @@ class DiffusionTrainer(SimpleTrainer):
             # Make sure image is also float32
             images = images.astype(jnp.float32)
             
-            rates = noise_schedule.get_rates(noise_level)
-            noisy_images, c_in, expected_output = model_output_transform.forward_diffusion(
-                images, noise, rates)
+            rates = noise_schedule.get_rates(noise_level, get_coeff_shapes_tuple(images))
+            noisy_images, c_in, expected_output = model_output_transform.forward_diffusion(images, noise, rates)
 
             def model_loss(params):
                 preds = model.apply(params, *noise_schedule.transform_inputs(noisy_images*c_in, noise_level), label_seq)
-                preds = model_output_transform.pred_transform(
-                    noisy_images, preds, rates)
+                preds = model_output_transform.pred_transform(noisy_images, preds, rates)
                 nloss = loss_fn(preds, expected_output)
                 # Ignore the loss contribution of images with zero standard deviation
-                nloss *= noise_schedule.get_weights(noise_level)
+                nloss *= noise_schedule.get_weights(noise_level, get_coeff_shapes_tuple(nloss))
                 nloss = jnp.mean(nloss)
                 loss = nloss
                 return loss
@@ -240,9 +238,16 @@ class DiffusionTrainer(SimpleTrainer):
             return train_state, loss, rng_state
 
         if distributed_training:
-            train_step = shard_map(train_step, mesh=self.mesh, in_specs=(P(), P(), P('data'), P('data')), 
-                                   out_specs=(P(), P(), P()))
-        train_step = jax.jit(train_step)
+            train_step = shard_map(
+                train_step, 
+                mesh=self.mesh, 
+                in_specs=(P(), P(), P('data'), P('data')), 
+                out_specs=(P(), P(), P()),
+            )
+        train_step = jax.jit(
+            train_step,
+            donate_argnums=(2)
+        )
             
         return train_step
 
