@@ -5,8 +5,7 @@ def linear_beta_schedule(timesteps, beta_start=0.0001, beta_end=0.02):
     scale = 1000 / timesteps
     beta_start = scale * beta_start
     beta_end = scale * beta_end
-    betas = np.linspace(
-        beta_start, beta_end, timesteps, dtype=np.float64)
+    betas = np.linspace(beta_start, beta_end, timesteps, dtype=np.float64)
     return betas
 
 class LinearNoiseSchedule(DiscreteNoiseScheduler):
