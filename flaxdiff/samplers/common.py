@@ -133,7 +133,7 @@ class DiffusionSampler():
             
         params = params if params is not None else self.params
         
-        @jax.jit
+        # @jax.jit
         def sample_model_fn(x_t, t, *additional_inputs):
             return self.sample_model(params, x_t, t, *additional_inputs)
 
