@@ -3,6 +3,16 @@ import jax.numpy as jnp
 from typing import Union
 from ..utils import RandomMarkovState  
 
+def get_coeff_shapes_tuple(array):
+    shape_tuple = (-1,) + (1,) * (array.ndim - 1)
+    return shape_tuple
+
+def reshape_rates(rates:tuple[jnp.ndarray, jnp.ndarray], shape=(-1, 1, 1, 1)) -> tuple[jnp.ndarray, jnp.ndarray]:
+    signal_rates, noise_rates = rates
+    signal_rates = jnp.reshape(signal_rates, shape)
+    noise_rates = jnp.reshape(noise_rates, shape)
+    return signal_rates, noise_rates
+
 class NoiseScheduler():
     def __init__(self, timesteps,
                     dtype=jnp.float32,
@@ -24,24 +34,18 @@ class NoiseScheduler():
         timesteps = self.timestep_generator(rng, batch_size, self.max_timesteps)
         return timesteps, state
     
-    def get_weights(self, steps):
+    def get_weights(self, steps, shape=(-1, 1, 1, 1)):
         raise NotImplementedError
-    
-    def reshape_rates(self, rates:tuple[jnp.ndarray, jnp.ndarray], shape=(-1, 1, 1, 1)) -> tuple[jnp.ndarray, jnp.ndarray]:
-        signal_rates, noise_rates = rates
-        signal_rates = jnp.reshape(signal_rates, shape)
-        noise_rates = jnp.reshape(noise_rates, shape)
-        return signal_rates, noise_rates
     
     def get_rates(self, steps, shape=(-1, 1, 1, 1)) -> tuple[jnp.ndarray, jnp.ndarray]:
         raise NotImplementedError
     
     def add_noise(self, images, noise, steps) -> jnp.ndarray:
-        signal_rates, noise_rates = self.get_rates(steps)
+        signal_rates, noise_rates = self.get_rates(steps, shape=get_coeff_shapes_tuple(images))
         return signal_rates * images + noise_rates * noise
     
     def remove_all_noise(self, noisy_images, noise, steps, clip_denoised=True, rates=None):
-        signal_rates, noise_rates = self.get_rates(steps)
+        signal_rates, noise_rates = self.get_rates(steps, shape=get_coeff_shapes_tuple(noisy_images))
         x_0 = (noisy_images - noise * noise_rates) / signal_rates
         return x_0
     
@@ -54,8 +58,8 @@ class NoiseScheduler():
     def get_posterior_variance(self, steps, shape=(-1, 1, 1, 1)):
         raise NotImplementedError
 
-    def get_max_variance(self):
-        alpha_n, sigma_n = self.get_rates(self.max_timesteps)
+    def get_max_variance(self, shape=(-1, 1, 1, 1)):
+        alpha_n, sigma_n = self.get_rates(self.max_timesteps, shape=shape)
         variance = jnp.sqrt(alpha_n ** 2 + sigma_n ** 2) 
         return variance
 
@@ -82,9 +86,9 @@ class GeneralizedNoiseScheduler(NoiseScheduler):
     
     def get_rates(self, steps, shape=(-1, 1, 1, 1)) -> tuple[jnp.ndarray, jnp.ndarray]:
         sigmas = self.get_sigmas(steps)
-        signal_rates = 1
+        signal_rates = jnp.ones_like(sigmas)
         noise_rates = sigmas
-        return self.reshape_rates((signal_rates, noise_rates), shape=shape)
+        return reshape_rates((signal_rates, noise_rates), shape=shape)
     
     def transform_inputs(self, x, steps, num_discrete_chunks=1000):
         sigmas_discrete = (steps / self.max_timesteps) * num_discrete_chunks

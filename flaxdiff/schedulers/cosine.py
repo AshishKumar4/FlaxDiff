@@ -3,7 +3,7 @@ import numpy as np
 import jax.numpy as jnp
 from .discrete import DiscreteNoiseScheduler
 from .continuous import ContinuousNoiseScheduler
-from .common import GeneralizedNoiseScheduler
+from .common import GeneralizedNoiseScheduler, reshape_rates
 
 def cosine_beta_schedule(timesteps, start_angle=0.008, end_angle=0.999):
     ts = np.linspace(0, 1, timesteps + 1, dtype=np.float64)
@@ -32,9 +32,9 @@ class CosineContinuousNoiseScheduler(ContinuousNoiseScheduler):
     def get_rates(self, steps, shape=(-1, 1, 1, 1)) -> tuple[jnp.ndarray, jnp.ndarray]:
         signal_rates = jnp.cos((jnp.pi * steps) / (2 * self.max_timesteps))
         noise_rates = jnp.sin((jnp.pi * steps) / (2 * self.max_timesteps))
-        return self.reshape_rates((signal_rates, noise_rates), shape=shape)
+        return reshape_rates((signal_rates, noise_rates), shape=shape)
     
-    def get_weights(self, steps):
-        alpha, sigma = self.get_rates(steps, shape=())
+    def get_weights(self, steps, shape=(-1, 1, 1, 1)) -> jnp.ndarray:
+        alpha, sigma = self.get_rates(steps, shape=shape)
         return 1 / (1 + (alpha ** 2 / sigma ** 2))
     

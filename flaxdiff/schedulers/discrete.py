@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from typing import Union
 from ..utils import RandomMarkovState  
-from .common import NoiseScheduler
+from .common import NoiseScheduler, reshape_rates, get_coeff_shapes_tuple
 
 class DiscreteNoiseScheduler(NoiseScheduler):
     """
@@ -53,17 +53,15 @@ class DiscreteNoiseScheduler(NoiseScheduler):
 
     def get_rates(self, steps, shape=(-1, 1, 1, 1)) -> tuple[jnp.ndarray, jnp.ndarray]:
         steps = jnp.int16(steps)
-        signal_rate = self.sqrt_alpha_cumprod[steps]
-        noise_rate = self.sqrt_one_minus_alpha_cumprod[steps]
-        signal_rate = jnp.reshape(signal_rate, shape)
-        noise_rate = jnp.reshape(noise_rate, shape)
-        return signal_rate, noise_rate
+        signal_rates = self.sqrt_alpha_cumprod[steps]
+        noise_rates = self.sqrt_one_minus_alpha_cumprod[steps]
+        return reshape_rates((signal_rates, noise_rates), shape=shape)
     
     def get_posterior_mean(self, x_0, x_t, steps):
         steps = jnp.int16(steps)
         x_0_coeff = self.posterior_mean_coef1[steps]
         x_t_coeff = self.posterior_mean_coef2[steps]
-        x_0_coeff, x_t_coeff = self.reshape_rates((x_0_coeff, x_t_coeff))
+        x_0_coeff, x_t_coeff = reshape_rates((x_0_coeff, x_t_coeff), shape=get_coeff_shapes_tuple(x_0))
         mean = x_0_coeff * x_0 + x_t_coeff * x_t
         return mean
     
