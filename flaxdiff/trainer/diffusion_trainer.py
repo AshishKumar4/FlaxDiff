@@ -144,6 +144,8 @@ class DiffusionTrainer(SimpleTrainer):
             
             images = batch['image']
             
+            local_batch_size = images.shape[0]
+            
             # First get the standard deviation of the images
             # std = jnp.std(images, axis=(1, 2, 3))
             # is_non_zero = (std > 0)
@@ -164,7 +166,7 @@ class DiffusionTrainer(SimpleTrainer):
             label_seq = jnp.concat(
                 [null_labels_seq[:num_unconditional], label_seq[num_unconditional:]], axis=0)
 
-            noise_level, local_rng_state = noise_schedule.generate_timesteps(batch_size, local_rng_state)
+            noise_level, local_rng_state = noise_schedule.generate_timesteps(local_batch_size, local_rng_state)
             
             local_rng_state, rngs = local_rng_state.get_random_key()
             noise: jax.Array = jax.random.normal(rngs, shape=images.shape, dtype=jnp.float32)
