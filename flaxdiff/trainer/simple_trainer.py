@@ -159,7 +159,7 @@ class SimpleTrainer:
             self.best_loss = 1e9
 
     def get_input_ones(self):
-        return {k: jnp.ones((1, *v)) for k, v in self.input_shapes.items()}
+        return {k: jnp.ones((1, *v), dtype=self.model.dtype) for k, v in self.input_shapes.items()}
 
     def generate_states(
         self,
@@ -437,12 +437,30 @@ class SimpleTrainer:
                 # If the loss is too low, we can assume the model has diverged
                 print(colored(f"Loss too low at step {current_step} => {loss}", 'red'))
                 # Reset the model to the old state
-                if self.best_state is not None:
-                    print(colored(f"Resetting model to best state", 'red'))
-                    train_state = self.best_state
-                    loss = self.best_loss
+                # if self.best_state is not None:
+                #     print(colored(f"Resetting model to best state", 'red'))
+                #     train_state = self.best_state
+                #     loss = self.best_loss
+                # else:
+                #     exit(1)
+                
+                # Check if there are any NaN/inf values in the train_state.params
+                params = train_state.params
+                if isinstance(params, dict):
+                    for key, value in params.items():
+                        if isinstance(value, jnp.ndarray):
+                            if jnp.isnan(value).any() or jnp.isinf(value).any():
+                                print(colored(f"NaN/inf values found in params at step {current_step}", 'red'))
+                                # Reset the model to the old state
+                                # train_state = self.best_state
+                                # loss = self.best_loss
+                                # break
+                            else:
+                                print(colored(f"Params are fine at step {current_step}", 'green'))
                 else:
-                    exit(1)
+                    print(colored(f"Params are not a dict at step {current_step}", 'red'))
+                
+                exit(1)
                             
             epoch_loss += loss
             current_step += 1
