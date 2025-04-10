@@ -23,7 +23,6 @@ class PatchEmbedding(nn.Module):
     embedding_dim: int
     dtype: Any = jnp.float32
     precision: Any = jax.lax.Precision.HIGH
-    kernel_init: Callable = partial(kernel_init, 1.0)
 
     @nn.compact
     def __call__(self, x):
@@ -34,7 +33,6 @@ class PatchEmbedding(nn.Module):
                     kernel_size=(self.patch_size, self.patch_size), 
                     strides=(self.patch_size, self.patch_size),
                     dtype=self.dtype,
-                    kernel_init=self.kernel_init(),
                     precision=self.precision)(x)
         x = jnp.reshape(x, (batch, -1, self.embedding_dim))
         return x
@@ -67,7 +65,7 @@ class UViT(nn.Module):
     norm_groups:int=8
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    kernel_init: Callable = partial(kernel_init, scale=1.0)
+    # kernel_init: Callable = partial(kernel_init, scale=1.0)
     add_residualblock_output: bool = False
     norm_inputs: bool = False
     explicitly_add_residual: bool = True
@@ -88,10 +86,10 @@ class UViT(nn.Module):
 
         # Patch embedding
         x = PatchEmbedding(patch_size=self.patch_size, embedding_dim=self.emb_features, 
-                           dtype=self.dtype, precision=self.precision, kernel_init=self.kernel_init)(x)
+                           dtype=self.dtype, precision=self.precision)(x)
         num_patches = x.shape[1]
         
-        context_emb = nn.DenseGeneral(features=self.emb_features, kernel_init=self.kernel_init(), 
+        context_emb = nn.DenseGeneral(features=self.emb_features, 
                                dtype=self.dtype, precision=self.precision)(textcontext)
         num_text_tokens = textcontext.shape[1]
         
@@ -116,7 +114,7 @@ class UViT(nn.Module):
                                  only_pure_attention=False,
                                  norm_inputs=self.norm_inputs,
                                  explicitly_add_residual=self.explicitly_add_residual,
-                                 kernel_init=self.kernel_init())(x)
+                                 )(x)
             skips.append(x)
             
         # Middle block
@@ -126,12 +124,12 @@ class UViT(nn.Module):
                              only_pure_attention=False,
                             norm_inputs=self.norm_inputs,
                             explicitly_add_residual=self.explicitly_add_residual,
-                             kernel_init=self.kernel_init())(x)
+                            )(x)
         
         # # Out blocks
         for i in range(self.num_layers // 2):
             x = jnp.concatenate([x, skips.pop()], axis=-1)
-            x = nn.DenseGeneral(features=self.emb_features, kernel_init=self.kernel_init(), 
+            x = nn.DenseGeneral(features=self.emb_features, 
                                    dtype=self.dtype, precision=self.precision)(x)
             x = TransformerBlock(heads=self.num_heads, dim_head=self.emb_features // self.num_heads, 
                                  dtype=self.dtype, precision=self.precision, use_projection=self.use_projection, 
@@ -139,13 +137,13 @@ class UViT(nn.Module):
                                  only_pure_attention=False,
                                  norm_inputs=self.norm_inputs,
                                  explicitly_add_residual=self.explicitly_add_residual,
-                                 kernel_init=self.kernel_init())(x)
+                                 )(x)
         
         # print(f'Shape of x after transformer blocks: {x.shape}')
         x = self.norm()(x)
         
         patch_dim = self.patch_size ** 2 * self.output_channels
-        x = nn.Dense(features=patch_dim, dtype=self.dtype, precision=self.precision, kernel_init=self.kernel_init())(x)
+        x = nn.Dense(features=patch_dim, dtype=self.dtype, precision=self.precision)(x)
         x = x[:, 1 + num_text_tokens:, :]
         x = unpatchify(x, channels=self.output_channels)
         
@@ -159,7 +157,6 @@ class UViT(nn.Module):
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 # activation=jax.nn.mish
-                kernel_init=self.kernel_init(scale=0.0),
                 dtype=self.dtype,
                 precision=self.precision
             )(x)
@@ -173,7 +170,6 @@ class UViT(nn.Module):
             kernel_size=(3, 3),
             strides=(1, 1),
             # activation=jax.nn.mish
-            kernel_init=self.kernel_init(scale=0.0),
             dtype=self.dtype,
             precision=self.precision
         )(x)

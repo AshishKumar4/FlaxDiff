@@ -23,7 +23,7 @@ class EfficientAttention(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     use_bias: bool = True
-    kernel_init: Callable = kernel_init(1.0)
+    # kernel_init: Callable = kernel_init(1.0)
     force_fp32_for_softmax: bool = True
 
     def setup(self):
@@ -34,15 +34,21 @@ class EfficientAttention(nn.Module):
             self.heads * self.dim_head,
             precision=self.precision, 
             use_bias=self.use_bias, 
-            kernel_init=self.kernel_init, 
+            # kernel_init=self.kernel_init, 
             dtype=self.dtype
         )
         self.query = dense(name="to_q")
         self.key = dense(name="to_k")
         self.value = dense(name="to_v")
         
-        self.proj_attn = nn.DenseGeneral(self.query_dim, use_bias=False, precision=self.precision, 
-                                     kernel_init=self.kernel_init, dtype=self.dtype, name="to_out_0")
+        self.proj_attn = nn.DenseGeneral(
+            self.query_dim, 
+            use_bias=False, 
+            precision=self.precision, 
+            # kernel_init=self.kernel_init,
+            dtype=self.dtype,
+            name="to_out_0"
+        )
         # self.attnfn = make_fast_generalized_attention(qkv_dim=inner_dim, lax_scan_unroll=16)
     
     def _reshape_tensor_to_head_dim(self, tensor):
@@ -115,7 +121,7 @@ class NormalAttention(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     use_bias: bool = True
-    kernel_init: Callable = kernel_init(1.0)
+    # kernel_init: Callable = kernel_init(1.0)
     force_fp32_for_softmax: bool = True
 
     def setup(self):
@@ -126,7 +132,7 @@ class NormalAttention(nn.Module):
             axis=-1, 
             precision=self.precision, 
             use_bias=self.use_bias, 
-            kernel_init=self.kernel_init, 
+            # kernel_init=self.kernel_init, 
             dtype=self.dtype
         )
         self.query = dense(name="to_q")
@@ -140,7 +146,7 @@ class NormalAttention(nn.Module):
             use_bias=self.use_bias, 
             dtype=self.dtype, 
             name="to_out_0",
-            kernel_init=self.kernel_init
+            # kernel_init=self.kernel_init
             # kernel_init=jax.nn.initializers.xavier_uniform()
         )
 
@@ -236,7 +242,7 @@ class BasicTransformerBlock(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     use_bias: bool = True
-    kernel_init: Callable = kernel_init(1.0)
+    # kernel_init: Callable = kernel_init(1.0)
     use_flash_attention:bool = False
     use_cross_only:bool = False
     only_pure_attention:bool = False
@@ -256,7 +262,7 @@ class BasicTransformerBlock(nn.Module):
             precision=self.precision,
             use_bias=self.use_bias,
             dtype=self.dtype,
-            kernel_init=self.kernel_init,
+            # kernel_init=self.kernel_init,
             force_fp32_for_softmax=self.force_fp32_for_softmax
         )
         self.attention2 = attenBlock(
@@ -267,7 +273,7 @@ class BasicTransformerBlock(nn.Module):
             precision=self.precision,
             use_bias=self.use_bias,
             dtype=self.dtype,
-            kernel_init=self.kernel_init,
+            # kernel_init=self.kernel_init,
             force_fp32_for_softmax=self.force_fp32_for_softmax
         )
         
@@ -303,7 +309,7 @@ class TransformerBlock(nn.Module):
     use_self_and_cross:bool = True
     only_pure_attention:bool = False
     force_fp32_for_softmax: bool = True
-    kernel_init: Callable = kernel_init(1.0)
+    # kernel_init: Callable = kernel_init(1.0)
     norm_inputs: bool = True
     explicitly_add_residual: bool = True
 
@@ -317,12 +323,12 @@ class TransformerBlock(nn.Module):
             if self.use_linear_attention:
                 projected_x = nn.Dense(features=inner_dim, 
                                        use_bias=False, precision=self.precision, 
-                                       kernel_init=self.kernel_init,
+                                    #    kernel_init=self.kernel_init,
                                        dtype=self.dtype, name=f'project_in')(x)
             else:
                 projected_x = nn.Conv(
                     features=inner_dim, kernel_size=(1, 1),
-                    kernel_init=self.kernel_init,
+                    # kernel_init=self.kernel_init,
                     strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
                     precision=self.precision, name=f'project_in_conv',
                 )(x)
@@ -344,19 +350,19 @@ class TransformerBlock(nn.Module):
             use_cross_only=(not self.use_self_and_cross),
             only_pure_attention=self.only_pure_attention,
             force_fp32_for_softmax=self.force_fp32_for_softmax,
-            kernel_init=self.kernel_init
+            # kernel_init=self.kernel_init
         )(projected_x, context)
         
         if self.use_projection == True:
             if self.use_linear_attention:
                 projected_x = nn.Dense(features=C, precision=self.precision, 
                                        dtype=self.dtype, use_bias=False, 
-                                       kernel_init=self.kernel_init,
+                                    #    kernel_init=self.kernel_init,
                                        name=f'project_out')(projected_x)
             else:
                 projected_x = nn.Conv(
                     features=C, kernel_size=(1, 1),
-                    kernel_init=self.kernel_init,
+                    # kernel_init=self.kernel_i nit,
                     strides=(1, 1), padding='VALID', use_bias=False, dtype=self.dtype,
                     precision=self.precision, name=f'project_out_conv',
                 )(projected_x)
