@@ -231,11 +231,11 @@ class DiffusionTrainer(SimpleTrainer):
                     ),
                 )
     
-            train_state = new_state.apply_ema(self.ema_decay)
+            new_state = new_state.apply_ema(self.ema_decay)
             
             if distributed_training:
                 loss = jax.lax.pmean(loss, "data")
-            return train_state, loss, rng_state
+            return new_state, loss, rng_state
 
         if distributed_training:
             train_step = shard_map(
