@@ -108,13 +108,16 @@ class FourierEmbedding(nn.Module):
 class TimeProjection(nn.Module):
     features:int
     activation:Callable=jax.nn.gelu
-    kernel_init:Callable=kernel_init(1.0)
 
     @nn.compact
     def __call__(self, x):
-        x = nn.DenseGeneral(self.features, kernel_init=self.kernel_init)(x)
+        x = nn.DenseGeneral(
+            self.features, 
+        )(x)
         x = self.activation(x)
-        x = nn.DenseGeneral(self.features, kernel_init=self.kernel_init)(x)
+        x = nn.DenseGeneral(
+            self.features, 
+        )(x)
         x = self.activation(x)
         return x
 
@@ -123,7 +126,6 @@ class SeparableConv(nn.Module):
     kernel_size:tuple=(3, 3)
     strides:tuple=(1, 1)
     use_bias:bool=False
-    kernel_init:Callable=kernel_init(1.0)
     padding:str="SAME"
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
@@ -133,7 +135,7 @@ class SeparableConv(nn.Module):
         in_features = x.shape[-1]
         depthwise = nn.Conv(
             features=in_features, kernel_size=self.kernel_size,
-            strides=self.strides, kernel_init=self.kernel_init,
+            strides=self.strides,
             feature_group_count=in_features, use_bias=self.use_bias,
             padding=self.padding,
             dtype=self.dtype,
@@ -141,7 +143,7 @@ class SeparableConv(nn.Module):
         )(x)
         pointwise = nn.Conv(
             features=self.features, kernel_size=(1, 1),
-            strides=(1, 1), kernel_init=self.kernel_init,
+            strides=(1, 1),
             use_bias=self.use_bias,
             dtype=self.dtype,
             precision=self.precision
@@ -153,7 +155,6 @@ class ConvLayer(nn.Module):
     features:int
     kernel_size:tuple=(3, 3)
     strides:tuple=(1, 1)
-    kernel_init:Callable=kernel_init(1.0)
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
 
@@ -164,7 +165,6 @@ class ConvLayer(nn.Module):
                 features=self.features,
                 kernel_size=self.kernel_size,
                 strides=self.strides,
-                kernel_init=self.kernel_init,
                 dtype=self.dtype,
                 precision=self.precision
             )
@@ -183,7 +183,6 @@ class ConvLayer(nn.Module):
                 features=self.features,
                 kernel_size=self.kernel_size,
                 strides=self.strides,
-                kernel_init=self.kernel_init,
                 dtype=self.dtype,
                 precision=self.precision
             )
@@ -192,7 +191,6 @@ class ConvLayer(nn.Module):
                 features=self.features,
                 kernel_size=self.kernel_size,
                 strides=self.strides,
-                kernel_init=self.kernel_init,
                 dtype=self.dtype,
                 precision=self.precision
             )
@@ -206,7 +204,6 @@ class Upsample(nn.Module):
     activation:Callable=jax.nn.swish
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    kernel_init:Callable=kernel_init(1.0)
 
     @nn.compact
     def __call__(self, x, residual=None):
@@ -221,7 +218,6 @@ class Upsample(nn.Module):
             strides=(1, 1),
             dtype=self.dtype,
             precision=self.precision,
-            kernel_init=self.kernel_init
         )(out)
         if residual is not None:
             out = jnp.concatenate([out, residual], axis=-1)
@@ -233,7 +229,6 @@ class Downsample(nn.Module):
     activation:Callable=jax.nn.swish
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    kernel_init:Callable=kernel_init(1.0)
 
     @nn.compact
     def __call__(self, x, residual=None):
@@ -244,7 +239,6 @@ class Downsample(nn.Module):
             strides=(2, 2),
             dtype=self.dtype,
             precision=self.precision,
-            kernel_init=self.kernel_init
         )(x)
         if residual is not None:
             if residual.shape[1] > out.shape[1]:
@@ -269,7 +263,6 @@ class ResidualBlock(nn.Module):
     direction:str=None
     res:int=2
     norm_groups:int=8
-    kernel_init:Callable=kernel_init(1.0)
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     named_norms:bool=False
@@ -296,7 +289,6 @@ class ResidualBlock(nn.Module):
             features=self.features,
             kernel_size=self.kernel_size,
             strides=self.strides,
-            kernel_init=self.kernel_init,
             name="conv1",
             dtype=self.dtype,
             precision=self.precision
@@ -321,7 +313,6 @@ class ResidualBlock(nn.Module):
             features=self.features,
             kernel_size=self.kernel_size,
             strides=self.strides,
-            kernel_init=self.kernel_init,
             name="conv2",
             dtype=self.dtype,
             precision=self.precision
@@ -333,7 +324,6 @@ class ResidualBlock(nn.Module):
                 features=self.features,
                 kernel_size=(1, 1),
                 strides=1,
-                kernel_init=self.kernel_init,
                 name="residual_conv",
                 dtype=self.dtype,
                 precision=self.precision

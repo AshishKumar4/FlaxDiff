@@ -50,13 +50,12 @@ def tfds_augmenters(image_scale, method):
     else:
         interpolation = cv2.INTER_AREA
         
-    augments = augmax.Chain(
-        augmax.HorizontalFlip(0.5),
-        augmax.RandomContrast((-0.05, 0.05), 1.),
-        augmax.RandomBrightness((-0.2, 0.2), 1.)
-    )
+    from torchvision.transforms import v2
 
-    augments = jax.jit(augments, backend="cpu")
+    augments = v2.Compose([
+        v2.RandomHorizontalFlip(p=0.5),
+        v2.ColorJitter(brightness=0.2, contrast=0.05, saturation=0.2)
+    ])
         
     class augmenters(pygrain.MapTransform):
         def __init__(self, *args, **kwargs):
@@ -67,8 +66,9 @@ def tfds_augmenters(image_scale, method):
             image = element['image']
             image = cv2.resize(image, (image_scale, image_scale),
                             interpolation=interpolation)
-            # image = augments(image)
+            image = augments(image)
             # image = (image - 127.5) / 127.5
+            
             caption = labelizer(element)
             results = self.tokenize(caption)
             return {
