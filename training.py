@@ -1,15 +1,7 @@
 from typing import Any, Tuple, Mapping, Callable, List, Dict
 from functools import partial
-import flax.experimental
-import flax.jax_utils
-import flax.training
 import flax.training.dynamic_scale
 import jax.experimental.multihost_utils
-import orbax
-import orbax.checkpoint
-import flax.jax_utils
-import wandb.util
-import wandb.wandb_run
 from flaxdiff.models.common import kernel_init
 from flaxdiff.models.simple_unet import Unet
 from flaxdiff.models.simple_vit import UViT
@@ -17,43 +9,24 @@ import jax.experimental.pallas.ops.tpu.flash_attention
 from flaxdiff.predictors import VPredictionTransform, EpsilonPredictionTransform, DiffusionPredictionTransform, DirectPredictionTransform, KarrasPredictionTransform
 from flaxdiff.schedulers import CosineNoiseScheduler, NoiseScheduler, GeneralizedNoiseScheduler, KarrasVENoiseScheduler, EDMNoiseScheduler
 
+from flaxdiff.samplers.euler import EulerAncestralSampler
 import struct as st
 import flax
 import tqdm
-from flax import linen as nn
 import jax
-from typing import Dict, Callable, Sequence, Any, Union
-from dataclasses import field
 import jax.numpy as jnp
-import grain.python as pygrain
-import numpy as np
-import augmax
 
-import matplotlib.pyplot as plt
-from clu import metrics
-from flax.training import train_state  # Useful dataclass to keep train state
 import optax
-from flax import struct                # Flax dataclasses
 import time
 import os
 from datetime import datetime
-from flax.training import orbax_utils
-import functools
 
 import json
 # For CLIP
-from transformers import AutoTokenizer, FlaxCLIPTextModel, CLIPTextModel
-import wandb
-import cv2
 import argparse
 from dataclasses import dataclass
 import resource
 
-from jax.sharding import Mesh, PartitionSpec as P
-from jax.experimental import mesh_utils
-from jax.experimental.shard_map import shard_map
-from orbax.checkpoint.utils import fully_replicated_host_local_array_to_global_array
-from termcolor import colored
 from flaxdiff.data.datasets import get_dataset_grain, get_dataset_online
 
 import warnings
@@ -61,6 +34,7 @@ import traceback
 from flaxdiff.utils import defaultTextEncodeModel
 
 warnings.filterwarnings("ignore")
+
 
 #####################################################################################################################
 ################################################# Initialization ####################################################
@@ -115,19 +89,9 @@ parser.add_argument('--GRAIN_READ_BUFFER_SIZE', type=int,
 parser.add_argument('--GRAIN_WORKER_BUFFER_SIZE', type=int,
                     default=50, help='Grain worker buffer size')
 
-parser.add_argument('--dtype', type=str, default=None, help='dtype to use')
-parser.add_argument('--attn_dtype', type=str, default=None, help='dtype to use for attention')
-parser.add_argument('--precision', type=str, default=None, help='precision to use', choices=['high', 'default', 'highest', 'None', None])
-
-parser.add_argument('--wandb_project', type=str, default='flaxdiff', help='Wandb project name')
-parser.add_argument('--distributed_training', type=boolean_string, default=True, help='Should use distributed training or not')
-parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
-parser.add_argument('--load_from_checkpoint', type=str,
-                    default=None, help='Load from the best previously stored checkpoint. The checkpoint path should be provided')
-
-parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
 parser.add_argument('--image_size', type=int, default=128, help='Image size')
-parser.add_argument('--epochs', type=int, default=20, help='Number of epochs')
+parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
 parser.add_argument('--steps_per_epoch', type=int,
                     default=None, help='Steps per epoch')
 parser.add_argument('--dataset', type=str,
@@ -144,7 +108,7 @@ parser.add_argument('--feature_depths', type=int, nargs='+', default=[64, 128, 2
 parser.add_argument('--attention_heads', type=int, default=8, help='Number of attention heads')
 parser.add_argument('--flash_attention', type=boolean_string, default=False, help='Use Flash Attention')
 parser.add_argument('--use_projection', type=boolean_string, default=False, help='Use projection')
-parser.add_argument('--use_self_and_cross', type=boolean_string, default=False, help='Use self and cross attention')
+parser.add_argument('--use_self_and_cross', type=boolean_string, default=True, help='Use self and cross attention')
 parser.add_argument('--only_pure_attention', type=boolean_string, default=True, help='Use only pure attention or proper transformer in the attention blocks') 
 parser.add_argument('--norm_groups', type=int, default=8, help='Number of normalization groups. 0 for RMSNorm')
 
@@ -159,6 +123,15 @@ parser.add_argument('--num_layers', type=int, default=12, help='Number of layers
 parser.add_argument('--num_heads', type=int, default=12, help='Number of heads in the transformer if using UViT')
 parser.add_argument('--mlp_ratio', type=int, default=4, help='MLP ratio in the transformer if using UViT')
 
+parser.add_argument('--dtype', type=str, default=None, help='dtype to use')
+parser.add_argument('--precision', type=str, default=None, help='precision to use', choices=['high', 'default', 'highest', 'None', None])
+
+parser.add_argument('--distributed_training', type=boolean_string, default=True, help='Should use distributed training or not')
+parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
+parser.add_argument('--load_from_checkpoint', type=str,
+                    default=None, help='Load from the best previously stored checkpoint. The checkpoint path should be provided')
+parser.add_argument('--resume_last_run', type=boolean_string,
+                    default=False, help='Resume the last run from the experiment name')
 parser.add_argument('--dataset_seed', type=int, default=0, help='Dataset starting seed')
 
 parser.add_argument('--dataset_test', type=boolean_string,
@@ -181,13 +154,15 @@ parser.add_argument('--learning_rate_decay_epochs', type=int, default=1, help='L
 parser.add_argument('--autoencoder', type=str, default=None, help='Autoencoder model for Latend Diffusion technique',
                     choices=[None, 'stable_diffusion'])
 parser.add_argument('--autoencoder_opts', type=str, 
-                    default='{"modelname":"CompVis/stable-diffusion-v1-4"}', help='Autoencoder options as a dictionary')
+                    default='{"modelname":"stabilityai/sd-vae-ft-mse"}', help='Autoencoder options as a dictionary')
 
 parser.add_argument('--use_dynamic_scale', type=boolean_string, default=False, help='Use dynamic scale for training')
 parser.add_argument('--clip_grads', type=float, default=0, help='Clip gradients to this value')
 parser.add_argument('--add_residualblock_output', type=boolean_string, default=False, help='Add a residual block stage to the final output')
 parser.add_argument('--kernel_init', type=None, default=1.0, help='Kernel initialization value')
 
+parser.add_argument('--wandb_project', type=str, default='flaxdiff', help='Wandb project name')
+parser.add_argument('--wandb_entity', type=str, default='ashishkumar4', help='Wandb entity name')
 
 def main(args):
     resource.setrlimit(
@@ -236,7 +211,6 @@ def main(args):
         CHECKPOINT_DIR = f"gs://{CHECKPOINT_DIR}"
 
     DTYPE = DTYPE_MAP[args.dtype]
-    ATTN_DTYPE = DTYPE_MAP[args.attn_dtype if args.attn_dtype is not None else args.dtype]
     PRECISION = PRECISION_MAP[args.precision]
 
     GRAIN_WORKER_COUNT = args.GRAIN_WORKER_COUNT
@@ -282,14 +256,14 @@ def main(args):
     if args.attention_heads > 0:
         attention_configs += [
             {
-                "heads": args.attention_heads, "dtype": ATTN_DTYPE, "flash_attention": args.flash_attention,
+                "heads": args.attention_heads, "dtype": DTYPE, "flash_attention": args.flash_attention,
                 "use_projection": args.use_projection, "use_self_and_cross": args.use_self_and_cross,
                 "only_pure_attention": args.only_pure_attention,    
             },
         ] * (len(args.feature_depths) - 2)
         attention_configs += [
             {
-                "heads": args.attention_heads, "dtype": ATTN_DTYPE, "flash_attention": False,
+                "heads": args.attention_heads, "dtype": DTYPE, "flash_attention": False,
                 "use_projection": False, "use_self_and_cross": args.use_self_and_cross,
                 "only_pure_attention": args.only_pure_attention
             },
@@ -321,6 +295,9 @@ def main(args):
         "norm_groups": args.norm_groups,
     }
     
+    if 'diffusers' in args.architecture:
+        from diffusers import FlaxUNet2DConditionModel
+    
     MODEL_ARCHITECUTRES = {
         "unet": {
             "class": Unet,
@@ -342,6 +319,19 @@ def main(args):
                 "use_projection": False,
                 "add_residualblock_output": args.add_residualblock_output,
             },
+        },
+        "diffusers_unet_simple": {
+            "class": FlaxUNet2DConditionModel,
+            "kwargs": {
+                "sample_size": DIFFUSION_INPUT_SIZE,
+                "in_channels": INPUT_CHANNELS,
+                "out_channels": INPUT_CHANNELS,
+                "layers_per_block": args.num_res_blocks,
+                "block_out_channels":args.feature_depths,
+                "cross_attention_dim":args.emb_features,
+                "dtype": DTYPE,
+                "use_memory_efficient_attention": args.flash_attention,
+            },
         }
     }
     
@@ -350,6 +340,9 @@ def main(args):
     
     if args.architecture == 'uvit':
         model_config['emb_features'] = 768
+        
+    sorted_args_json = json.dumps(vars(args), sort_keys=True)
+    arguments_hash = hash(sorted_args_json)
     
     CONFIG = {
         "model": model_config,
@@ -370,6 +363,7 @@ def main(args):
         "arguments": vars(args),
         "autoencoder": args.autoencoder,
         "autoencoder_opts": args.autoencoder_opts,
+        "arguments_hash": arguments_hash,
     }
     
     if args.kernel_init is not None:
@@ -383,12 +377,20 @@ def main(args):
 
     if args.experiment_name and args.experiment_name != "":
         experiment_name = args.experiment_name
+        if not args.resume_last_run:
+            experiment_name = f"{experiment_name}/" + "arguments_hash-{arguments_hash}/date-{date}"
+        else:
+            # TODO: Add logic to load the last run from wandb
+            pass
     else:
         experiment_name = "{name}_{date}".format(
             name="Diffusion_SDE_VE_TEXT", date=datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
         )
         
-    experiment_name = experiment_name.format(**CONFIG['arguments'])
+    conf_args = CONFIG['arguments']
+    conf_args['date'] = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+    conf_args['arguments_hash'] = arguments_hash
+    experiment_name = experiment_name.format(**conf_args)
         
     print("Experiment_Name:", experiment_name)
 
@@ -413,6 +415,7 @@ def main(args):
 
     wandb_config = {
         "project": args.wandb_project,
+        "entity": args.wandb_entity,
         "config": CONFIG,
         "name": experiment_name,
     }
@@ -443,12 +446,45 @@ def main(args):
     batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
     print(f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
     
-    final_state = trainer.fit(data, batches, epochs=CONFIG['epochs'])
+
+    # data['test'] = data['train']
+    # data['test_len'] = data['train_len']
+    
+    # Construct a validation set by the prompts
+    val_prompts = ['water tulip', ' a water lily', ' a water lily', ' a photo of a rose', ' a photo of a rose', ' a water lily', ' a water lily', ' a photo of a marigold', ' a photo of a marigold', ' a photo of a marigold', ' a water lily', ' a photo of a sunflower', ' a photo of a lotus', ' columbine', ' columbine', ' an orchid', ' an orchid', ' an orchid', ' a water lily', ' a water lily', ' a water lily', ' columbine', ' columbine', ' a photo of a sunflower', ' a photo of a sunflower', ' a photo of a sunflower', ' a photo of a lotus', ' a photo of a lotus', ' a photo of a marigold', ' a photo of a marigold', ' a photo of a rose', ' a photo of a rose', ' a photo of a rose', ' orange dahlia', ' orange dahlia', ' a lenten rose', ' a lenten rose', ' a water lily', ' a water lily', ' a water lily', ' a water lily', ' an orchid', ' an orchid', ' an orchid', ' hard-leaved pocket orchid', ' bird of paradise', ' bird of paradise', ' a photo of a lovely rose', ' a photo of a lovely rose', ' a photo of a globe-flower', ' a photo of a globe-flower', ' a photo of a lovely rose', ' a photo of a lovely rose', ' a photo of a ruby-lipped cattleya', ' a photo of a ruby-lipped cattleya', ' a photo of a lovely rose', ' a water lily', ' a osteospermum', ' a osteospermum', ' a water lily', ' a water lily', ' a water lily', ' a red rose', ' a red rose']
+
+    def get_val_dataset(batch_size=8):
+        for i in range(0, len(val_prompts), batch_size):
+            prompts = val_prompts[i:i + batch_size]
+            tokens = text_encoder.tokenize(prompts)
+            yield tokens
+
+    data['test'] = get_val_dataset
+    data['test_len'] = len(val_prompts)
+
+    final_state = trainer.fit(
+        data, 
+        batches, 
+        epochs=CONFIG['epochs'], 
+        sampler_class=EulerAncestralSampler, 
+        sampling_noise_schedule=karas_ve_schedule,
+    )
     
 if __name__ == '__main__':
     args = parser.parse_args()
     main(args)
 
+"""
+New -->
+
+python3 training/training.py --dataset=oxford_flowers102\
+            --checkpoint_dir='./checkpoints/' --checkpoint_fs='local'\
+            --epochs=2000 --batch_size=32 --image_size=128 \
+            --learning_rate=2e-4 --num_res_blocks=2 \
+            --use_self_and_cross=True --dtype=bfloat16 --precision=default --attention_heads=8\
+            --experiment_name='dataset-{dataset}/image_size-{image_size}/batch-{batch_size}/schd-{noise_schedule}/dtype-{dtype}/arch-{architecture}/lr-{learning_rate}/resblks-{num_res_blocks}/emb-{emb_features}/pure-attn-{only_pure_attention}'\
+            --optimizer=adamw --use_dynamic_scale=True --norm_groups 0 --only_pure_attention=True --use_projection=False
+"""
 """
 New -->
 
