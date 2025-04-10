@@ -1,3 +1,6 @@
+import jax
+jax.config.update("jax_enable_x64", True)
+
 from typing import Any, Tuple, Mapping, Callable, List, Dict
 from functools import partial
 import flax.training.dynamic_scale
@@ -13,7 +16,6 @@ from flaxdiff.samplers.euler import EulerAncestralSampler
 import struct as st
 import flax
 import tqdm
-import jax
 import jax.numpy as jnp
 
 import optax
