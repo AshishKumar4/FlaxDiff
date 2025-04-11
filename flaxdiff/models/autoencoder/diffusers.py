@@ -63,29 +63,42 @@ class StableDiffusionVAE(AutoEncoder):
             dtype=vae.dtype,
         )
         
-        self.enc = enc
-        self.dec = dec
-        self.post_quant_conv = post_quant_conv
-        self.quant_conv = quant_conv
-        self.params = params
-        self.scaling_factor = vae.scaling_factor
+        # self.enc = enc
+        # self.dec = dec
+        # self.post_quant_conv = post_quant_conv
+        # self.quant_conv = quant_conv
+        # self.params = params
+        # self.scaling_factor = vae.scaling_factor
+        scaling_factor = vae.scaling_factor
         
+        @jax.jit
+        def encode(images, rngkey: jax.random.PRNGKey = None):
+            latents = enc.apply({"params": params['encoder']}, images, deterministic=True)
+            latents = quant_conv.apply({"params": params['quant_conv']}, latents)
+            if rngkey is not None:
+                mean, log_std = jnp.split(latents, 2, axis=-1)
+                log_std = jnp.clip(log_std, -30, 20)
+                std = jnp.exp(0.5 * log_std)
+                latents = mean + std * jax.random.normal(rngkey, mean.shape, dtype=mean.dtype)
+                # print("Sampled")
+            else:
+                # return the mean
+                latents, _ = jnp.split(latents, 2, axis=-1)
+            latents *= scaling_factor
+            return latents
+        
+        @jax.jit
+        def decode(latents):
+            latents = (1.0 / scaling_factor) * latents
+            latents = post_quant_conv.apply({"params": params['post_quant_conv']}, latents)
+            return dec.apply({"params": params['decoder']}, latents)
+        
+        self.encode_func = encode
+        self.decode_func = decode
+
+            
     def encode(self, images, rngkey: jax.random.PRNGKey = None):
-        latents = self.enc.apply({"params": self.params["vae"]['encoder']}, images, deterministic=True)
-        latents = self.quant_conv.apply({"params": self.params["vae"]['quant_conv']}, latents)
-        if rngkey is not None:
-            mean, log_std = jnp.split(latents, 2, axis=-1)
-            log_std = jnp.clip(log_std, -30, 20)
-            std = jnp.exp(0.5 * log_std)
-            latents = mean + std * jax.random.normal(rngkey, mean.shape, dtype=mean.dtype)
-            # print("Sampled")
-        else:
-            # return the mean
-            latents, _ = jnp.split(latents, 2, axis=-1)
-        latents *= self.scaling_factor
-        return latents
+        return self.encode_func(images, rngkey)
     
     def decode(self, latents):
-        latents = (1.0 / self.scaling_factor) * latents
-        latents = self.post_quant_conv.apply({"params": self.params["vae"]['post_quant_conv']}, latents)
-        return self.dec.apply({"params": self.params["vae"]['decoder']}, latents)
+        return self.decode_func(latents)
