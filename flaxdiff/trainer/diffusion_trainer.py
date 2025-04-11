@@ -42,6 +42,7 @@ class DiffusionTrainer(SimpleTrainer):
     noise_schedule: NoiseScheduler
     model_output_transform: DiffusionPredictionTransform
     ema_decay: float = 0.999
+    native_resolution: int = None
 
     def __init__(self,
                  model: nn.Module,
@@ -54,6 +55,7 @@ class DiffusionTrainer(SimpleTrainer):
                  model_output_transform: DiffusionPredictionTransform = EpsilonPredictionTransform(),
                  autoencoder: AutoEncoder = None,
                  encoder: ConditioningEncoder = None,
+                 native_resolution: int = None,
                  **kwargs
                  ):
         super().__init__(
@@ -67,6 +69,20 @@ class DiffusionTrainer(SimpleTrainer):
         self.noise_schedule = noise_schedule
         self.model_output_transform = model_output_transform
         self.unconditional_prob = unconditional_prob
+        
+        if native_resolution is None:
+            if 'image' in input_shapes:
+                native_resolution = input_shapes['image'][1]
+            elif 'x' in input_shapes:
+                native_resolution = input_shapes['x'][1]
+            elif 'sample' in input_shapes:
+                native_resolution = input_shapes['sample'][1]
+            else:
+                raise ValueError("No image input shape found in input shapes")
+            if autoencoder is not None:
+                native_resolution = native_resolution * 8
+                
+        self.native_resolution = native_resolution
         
         self.autoencoder = autoencoder
         self.encoder = encoder
@@ -200,21 +216,6 @@ class DiffusionTrainer(SimpleTrainer):
                 loss, grads = grad_fn(train_state.params)
                 if distributed_training:
                     grads = jax.lax.pmean(grads, "data")
-                    
-            # # check gradients for NaN/Inf
-            # has_nan_or_inf = jax.tree_util.tree_reduce(
-            #     lambda acc, x: jnp.logical_or(acc, jnp.logical_or(jnp.isnan(x).any(), jnp.isinf(x).any())),
-            #     grads,
-            #     initializer=False
-            # )
-            
-            # # Only apply gradients if they're valid
-            # new_state = jax.lax.cond(
-            #     has_nan_or_inf,
-            #     lambda _: train_state,  # Skip gradient update
-            #     lambda _: train_state.apply_gradients(grads=grads),
-            #     operand=None
-            # )
     
             new_state = train_state.apply_gradients(grads=grads)
             
@@ -260,7 +261,9 @@ class DiffusionTrainer(SimpleTrainer):
         null_labels_full = null_labels_full.astype(jnp.float16)
         # null_labels_seq = jnp.array(null_labels_full[0], dtype=jnp.float16)
         
-        if 'image' in self.input_shapes:
+        if self.native_resolution is not None:
+            image_size = self.native_resolution
+        elif 'image' in self.input_shapes:
             image_size = self.input_shapes['image'][1]
         elif 'x' in self.input_shapes:
             image_size = self.input_shapes['x'][1]

@@ -25,6 +25,7 @@ from typing import Dict, Callable, Sequence, Any, Union, Tuple
 from flax.training.dynamic_scale import DynamicScale
 from flaxdiff.utils import RandomMarkovState
 from flax.training import dynamic_scale as dynamic_scale_lib
+from dataclasses import dataclass
 
 PROCESS_COLOR_MAP = {
     0: "green",
@@ -71,6 +72,7 @@ class SimpleTrainState(train_state.TrainState):
     metrics: Metrics
     dynamic_scale: dynamic_scale_lib.DynamicScale
 
+@dataclass
 class SimpleTrainer:
     state: SimpleTrainState
     best_state: SimpleTrainState
@@ -159,7 +161,7 @@ class SimpleTrainer:
             self.best_loss = 1e9
 
     def get_input_ones(self):
-        return {k: jnp.ones((1, *v), dtype=self.model.dtype) for k, v in self.input_shapes.items()}
+        return {k: jnp.ones((1, *v)) for k, v in self.input_shapes.items()}
 
     def generate_states(
         self,
