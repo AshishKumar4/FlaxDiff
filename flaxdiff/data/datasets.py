@@ -91,8 +91,10 @@ def generate_collate_fn():
             images = np.stack([sample["image"] for sample in batch], axis=0)
             return {
                 "image": images,
-                "input_ids": results['input_ids'],
-                "attention_mask": results['attention_mask'],
+                "text": {
+                    "input_ids": results['input_ids'],
+                    "attention_mask": results['attention_mask'],
+                }
             }
         except Exception as e:
             print("Error in collate function", e, [sample["image"].shape for sample in batch])

@@ -75,7 +75,9 @@ def gcs_augmenters(image_scale, method):
             results = self.auto_tokenize(caption)
             return {
                 "image": image,
-                "input_ids": results['input_ids'][0],
-                "attention_mask": results['attention_mask'][0],
+                "text": {
+                    "input_ids": results['input_ids'][0],
+                    "attention_mask": results['attention_mask'][0],
+                }
             }
     return augmenters

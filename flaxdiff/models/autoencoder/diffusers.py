@@ -22,8 +22,6 @@ class StableDiffusionVAE(AutoEncoder):
             dtype=dtype,
         )
         
-        # vae = pipeline.vae
-        
         enc = FlaxEncoder(
             in_channels=vae.config.in_channels,
             out_channels=vae.config.latent_channels,
@@ -63,16 +61,9 @@ class StableDiffusionVAE(AutoEncoder):
             dtype=vae.dtype,
         )
         
-        # self.enc = enc
-        # self.dec = dec
-        # self.post_quant_conv = post_quant_conv
-        # self.quant_conv = quant_conv
-        # self.params = params
-        # self.scaling_factor = vae.scaling_factor
         scaling_factor = vae.scaling_factor
         
-        @jax.jit
-        def encode(images, rngkey: jax.random.PRNGKey = None):
+        def encode_single_frame(images, rngkey: jax.random.PRNGKey = None):
             latents = enc.apply({"params": params['encoder']}, images, deterministic=True)
             latents = quant_conv.apply({"params": params['quant_conv']}, latents)
             if rngkey is not None:
@@ -80,25 +71,65 @@ class StableDiffusionVAE(AutoEncoder):
                 log_std = jnp.clip(log_std, -30, 20)
                 std = jnp.exp(0.5 * log_std)
                 latents = mean + std * jax.random.normal(rngkey, mean.shape, dtype=mean.dtype)
-                # print("Sampled")
             else:
-                # return the mean
                 latents, _ = jnp.split(latents, 2, axis=-1)
             latents *= scaling_factor
             return latents
         
-        @jax.jit
-        def decode(latents):
+        def decode_single_frame(latents):
             latents = (1.0 / scaling_factor) * latents
             latents = post_quant_conv.apply({"params": params['post_quant_conv']}, latents)
             return dec.apply({"params": params['decoder']}, latents)
         
-        self.encode_func = encode
-        self.decode_func = decode
+        self.encode_single_frame = jax.jit(encode_single_frame)
+        self.decode_single_frame = jax.jit(decode_single_frame)
+        
+        # Calculate downscale factor by passing a dummy input through the encoder
+        print("Calculating downscale factor...")
+        dummy_input = jnp.ones((1, 128, 128, 3), dtype=dtype)
+        dummy_latents = self.encode_single_frame(dummy_input)
+        _, h, w, c = dummy_latents.shape
+        _, H, W, C = dummy_input.shape
+        self.__downscale_factor__ = H // h
+        self.__latent_channels__ = c
+        print(f"Downscale factor: {self.__downscale_factor__}")
+        print(f"Latent channels: {self.__latent_channels__}")
 
+    def __encode__(self, images, key: jax.random.PRNGKey = None, **kwargs):
+        """Encode a batch of images to latent representations.
+        
+        Implements the abstract method from the parent class.
+        
+        Args:
+            images: Image tensor of shape [B, H, W, C]
+            key: Optional random key for stochastic encoding
+            **kwargs: Additional arguments (unused)
             
-    def encode(self, images, rngkey: jax.random.PRNGKey = None):
-        return self.encode_func(images, rngkey)
+        Returns:
+            Latent representations of shape [B, h, w, c]
+        """
+        return self.encode_single_frame(images, key)
     
-    def decode(self, latents):
-        return self.decode_func(latents)
+    def __decode__(self, latents, **kwargs):
+        """Decode latent representations to images.
+        
+        Implements the abstract method from the parent class.
+        
+        Args:
+            latents: Latent tensor of shape [B, h, w, c]
+            **kwargs: Additional arguments (unused)
+            
+        Returns:
+            Decoded images of shape [B, H, W, C]
+        """
+        return self.decode_single_frame(latents)
+
+    @property
+    def downscale_factor(self) -> int:
+        """Returns the downscale factor for the encoder."""
+        return self.__downscale_factor__
+    
+    @property
+    def latent_channels(self) -> int:
+        """Returns the number of channels in the latent space."""
+        return self.__latent_channels__

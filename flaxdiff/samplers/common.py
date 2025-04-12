@@ -10,7 +10,7 @@ from ..schedulers import NoiseScheduler
 from ..utils import RandomMarkovState, MarkovState, clip_images
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, PartitionSpec as P
-
+from flaxdiff.models.autoencoder import AutoEncoder
 
 class DiffusionSampler:
     """Base class for diffusion samplers."""
@@ -23,12 +23,8 @@ class DiffusionSampler:
         model_output_transform: DiffusionPredictionTransform,
         guidance_scale: float = 0.0,
         null_labels_seq: jax.Array = None,
-        autoencoder=None,
+        autoencoder: AutoEncoder =None,
         image_size=256,
-        autoenc_scale_reduction=8,
-        autoenc_latent_channels=4,
-        
-        # device_mesh: jax.sharding.Mesh = None,
     ):
         """Initialize the diffusion sampler.
         
@@ -41,8 +37,6 @@ class DiffusionSampler:
             null_labels_seq: Unconditional sequence for guidance
             autoencoder: Optional autoencoder for latent diffusion
             image_size: Size of generated images
-            autoenc_scale_reduction: Scale reduction factor for autoencoder
-            autoenc_latent_channels: Number of channels in latent space
         """
         self.model = model
         self.noise_schedule = noise_schedule
@@ -50,10 +44,8 @@ class DiffusionSampler:
         self.model_output_transform = model_output_transform
         self.guidance_scale = guidance_scale
         self.image_size = image_size
-        self.autoenc_scale_reduction = autoenc_scale_reduction
-        self.autoenc_latent_channels = autoenc_latent_channels
         self.autoencoder = autoencoder
-
+        
         if self.guidance_scale > 0:
             # Classifier free guidance
             assert null_labels_seq is not None, "Null labels sequence is required for classifier-free guidance"
@@ -166,7 +158,7 @@ class DiffusionSampler:
         
         This method needs to be implemented by subclasses.
         """
-        return NotImplementedError
+        raise NotImplementedError("Subclasses must implement take_next_step method")
 
 
     def scale_steps(self, steps):
@@ -188,26 +180,12 @@ class DiffusionSampler:
         return steps
 
 
-    def get_initial_samples(self, num_images, rngs: jax.random.PRNGKey, start_step):
-        """Generate initial noisy samples for the diffusion process."""
-        start_step = self.scale_steps(start_step)
-        alpha_n, sigma_n = self.noise_schedule.get_rates(start_step)
-        variance = jnp.sqrt(alpha_n ** 2 + sigma_n ** 2)
-        
-        image_size = self.image_size
-        image_channels = 3
-        if self.autoencoder is not None:
-            image_size = image_size // self.autoenc_scale_reduction
-            image_channels = self.autoenc_latent_channels
-            
-        return jax.random.normal(rngs, (num_images, image_size, image_size, image_channels)) * variance
-
-
-    def generate_images(
+    def generate_samples(
         self,
         params: dict = None,
-        num_images=16,
-        diffusion_steps=1000,
+        batch_size: int = 4,
+        sequence_length: int = None,
+        diffusion_steps: int = 1000,
         start_step: int = None,
         end_step: int = 0,
         steps_override=None,
@@ -215,11 +193,17 @@ class DiffusionSampler:
         rngstate: RandomMarkovState = None,
         model_conditioning_inputs: tuple = ()
     ) -> jnp.ndarray:
-        """Generate images using the diffusion model.
+        """Generate samples using the diffusion model.
+        
+        Provides a unified interface for generating both images and videos.
+        For images, just specify batch_size.
+        For videos, specify both batch_size and sequence_length.
         
         Args:
             params: Model parameters (uses self.params if None)
-            num_images: Number of images to generate
+            batch_size: Number of samples to generate (videos or images)
+            sequence_length: Length of each sequence (for videos/audio/etc)
+                             If None, generates regular images
             diffusion_steps: Number of diffusion steps to perform
             start_step: Starting timestep (defaults to max)
             end_step: Ending timestep
@@ -229,17 +213,30 @@ class DiffusionSampler:
             model_conditioning_inputs: Conditioning inputs for the model
             
         Returns:
-            Generated images as a JAX array
+            Generated samples as a JAX array:
+            - For images: shape [batch_size, H, W, C]
+            - For videos: shape [batch_size, sequence_length, H, W, C]
         """
         if rngstate is None:
             rngstate = RandomMarkovState(jax.random.PRNGKey(42))
             
         if priors is None:
+            # Determine if we're generating videos or images based on sequence_length
+            is_video = sequence_length is not None
+            
             rngstate, newrngs = rngstate.get_random_key()
-            samples = self.get_initial_samples(num_images, newrngs, start_step)
+            
+            # Get sample shape based on whether we're generating video or images
+            if is_video:
+                samples = self._get_initial_sequence_samples(
+                    batch_size, sequence_length, newrngs, start_step
+                )
+            else:
+                samples = self._get_initial_samples(batch_size, newrngs, start_step)
         else:
             print("Using priors")
             if self.autoencoder is not None:
+                # Let the autoencoder handle both image and video priors
                 priors = self.autoencoder.encode(priors)
             samples = priors
 
@@ -267,8 +264,6 @@ class DiffusionSampler:
         else:
             steps = self.get_steps(start_step, end_step, diffusion_steps)
 
-        # print("Sample shape", samples.shape)
-
         for i in tqdm.tqdm(range(0, len(steps))):
             current_step = self.scale_steps(steps[i])
             next_step = self.scale_steps(steps[i+1] if i+1 < len(steps) else 0)
@@ -278,8 +273,52 @@ class DiffusionSampler:
                     sample_model_fn, rngstate, samples, current_step, next_step
                 )
             else:
-                step_ones = jnp.ones((num_images,), dtype=jnp.int32)
+                step_ones = jnp.ones((samples.shape[0],), dtype=jnp.int32)
                 samples, _, _ = sample_model_fn(
                     samples, current_step * step_ones, *model_conditioning_inputs
                 )
         return self.post_process(samples)
+    
+    def _get_noise_parameters(self, start_step):
+        """Calculate common noise parameters for sample generation.
+        
+        Args:
+            start_step: Starting timestep for noise generation
+            
+        Returns:
+            Tuple of (variance, image_size, image_channels)
+        """
+        start_step = self.scale_steps(start_step)
+        alpha_n, sigma_n = self.noise_schedule.get_rates(start_step)
+        variance = jnp.sqrt(alpha_n ** 2 + sigma_n ** 2)
+        
+        image_size = self.image_size
+        image_channels = 3
+        if self.autoencoder is not None:
+            image_size = image_size // self.autoencoder.downscale_factor
+            image_channels = self.autoencoder.latent_channels
+            
+        return variance, image_size, image_channels
+    
+    def _get_initial_samples(self, batch_size, rngs: jax.random.PRNGKey, start_step):
+        """Generate initial noisy samples for image generation."""
+        variance, image_size, image_channels = self._get_noise_parameters(start_step)
+        
+        # Standard image generation
+        return jax.random.normal(
+            rngs, 
+            (batch_size, image_size, image_size, image_channels)
+        ) * variance
+    
+    def _get_initial_sequence_samples(self, batch_size, sequence_length, rngs: jax.random.PRNGKey, start_step):
+        """Generate initial noisy samples for sequence data (video/audio)."""
+        variance, image_size, image_channels = self._get_noise_parameters(start_step)
+        
+        # Generate sequence data (like video)
+        return jax.random.normal(
+            rngs, 
+            (batch_size, sequence_length, image_size, image_size, image_channels)
+        ) * variance
+    
+    # Alias for backward compatibility
+    generate_images = generate_samples
