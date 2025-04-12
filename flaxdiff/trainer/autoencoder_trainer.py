@@ -114,8 +114,7 @@ class AutoEncoderTrainer(SimpleTrainer):
                 # normalize image
                 images = (images - 127.5) / 127.5
 
-            output = text_embedder(
-                input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
+            output = text_embedder.encode_from_tokens(batch['text'])
             label_seq = output.last_hidden_state
 
             # Generate random probabilities to decide how much of this batch will be unconditional

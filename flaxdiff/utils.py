@@ -2,12 +2,11 @@ import jax
 import jax.numpy as jnp
 import flax.struct as struct
 import flax.linen as nn
-from typing import Any, Callable
-from dataclasses import dataclass
+from typing import Any
 from functools import partial
 import numpy as np
 from jax.sharding import Mesh, PartitionSpec as P
-from abc import ABC, abstractmethod
+from flaxdiff.inputs import TextEncoder
 
 class MarkovState(struct.PyTreeNode):
     pass
@@ -116,45 +115,6 @@ class RMSNorm(nn.Module):
             mul *= scale
         y = mul * x
         return jnp.asarray(y, dtype)
-
-@dataclass
-class ConditioningEncoder(ABC):
-    model: nn.Module
-    tokenizer: Callable
-
-    def __call__(self, data):
-        tokens = self.tokenize(data)
-        outputs = self.encode_from_tokens(tokens)
-        return outputs
-        
-    def encode_from_tokens(self, tokens):
-        outputs = self.model(input_ids=tokens['input_ids'],
-                        attention_mask=tokens['attention_mask'])
-        last_hidden_state = outputs.last_hidden_state
-        return last_hidden_state
-    
-    def tokenize(self, data):
-        tokens = self.tokenizer(data, padding="max_length",
-                        max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="np")
-        return tokens
-    
-@dataclass
-class TextEncoder(ConditioningEncoder):
-    # def __call__(self, data):
-    #     tokens = self.tokenize(data)
-    #     outputs = self.encode_from_tokens(tokens)
-    #     return outputs
-        
-    # def encode_from_tokens(self, tokens):
-    #     outputs = self.model(input_ids=tokens['input_ids'],
-    #                     attention_mask=tokens['attention_mask'])
-    #     last_hidden_state = outputs.last_hidden_state
-    #     # pooler_output = outputs.pooler_output  # pooled (EOS token) states
-    #     # embed_pooled = pooler_output  # .astype(jnp.float16)
-    #     embed_labels_full = last_hidden_state  # .astype(jnp.float16)
-
-    #     return embed_labels_full
-    pass
 
 class AutoTextTokenizer:
     def __init__(self, tensor_type="pt", modelname="openai/clip-vit-large-patch14"):
