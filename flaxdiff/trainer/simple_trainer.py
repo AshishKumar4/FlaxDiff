@@ -313,7 +313,7 @@ class SimpleTrainer:
             train_step = jax.pmap(train_step)
         return train_step
 
-    def _define_vaidation_step(self):
+    def _define_validation_step(self):
         model = self.model
         loss_fn = self.loss_fn
         distributed_training = self.distributed_training
@@ -491,7 +491,7 @@ class SimpleTrainer:
     def fit(self, data, train_steps_per_epoch, epochs, train_step_args={}, val_steps_per_epoch=5, validation_step_args={}):
         train_ds = iter(data['train']())
         train_step = self._define_train_step(**train_step_args)
-        val_step = self._define_vaidation_step(**validation_step_args)
+        val_step = self._define_validation_step(**validation_step_args)
         train_state = self.state
         rng_state = self.rngstate
         process_index = jax.process_index()

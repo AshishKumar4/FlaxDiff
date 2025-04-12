@@ -22,7 +22,7 @@ from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics
 
 from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
 from flax.training import dynamic_scale as dynamic_scale_lib
-from flaxdiff.utils import TextEncoder, ConditioningEncoder
+from flaxdiff.inputs import TextEncoder, ConditioningEncoder
 
 class TrainState(SimpleTrainState):
     rngs: jax.random.PRNGKey
@@ -175,12 +175,11 @@ class DiffusionTrainer(SimpleTrainer):
                 local_rng_state, rngs = local_rng_state.get_random_key()
                 images = autoencoder.encode(images, rngs)
 
-            label_seq = conditioning_encoder.encode_from_tokens(batch)
+            label_seq = conditioning_encoder.encode_from_tokens(batch['text'])
 
             # Generate random probabilities to decide how much of this batch will be unconditional
 
-            label_seq = jnp.concat(
-                [null_labels_seq[:num_unconditional], label_seq[num_unconditional:]], axis=0)
+            label_seq = jnp.concatenate([null_labels_seq[:num_unconditional], label_seq[num_unconditional:]], axis=0)
 
             noise_level, local_rng_state = noise_schedule.generate_timesteps(local_batch_size, local_rng_state)
             
@@ -252,7 +251,7 @@ class DiffusionTrainer(SimpleTrainer):
             
         return train_step
 
-    def _define_vaidation_step(self, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
+    def _define_validation_step(self, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
         model = self.model
         encoder = self.encoder
         autoencoder = self.autoencoder
