@@ -57,29 +57,30 @@ class AutoEncoder():
         Returns:
             Encoded representation with the same batch and temporal dimensions as input
         """
-        # Check if we're dealing with video data (5D tensor)
-        if len(x.shape) == 5:  # [B, T, H, W, C]
-            batch_size, time_steps, height, width, channels = x.shape
+        # Check for video data (5D tensor)
+        is_video = len(x.shape) == 5
+        
+        if is_video:
+            # Extract dimensions for reshaping
+            batch_size, seq_len, height, width, channels = x.shape
             
-            # Reshape to [B*T, H, W, C] for frame-by-frame encoding
+            # Reshape to [B*T, H, W, C] to process as regular images
             x_reshaped = x.reshape(-1, height, width, channels)
             
-            # Encode each frame
-            encoded_frames = self.__encode__(x_reshaped, key=key, **kwargs)
+            # Encode all frames
+            latent = self.__encode__(x_reshaped, key=key, **kwargs)
             
-            # Get the new dimensions
-            _, enc_h, enc_w, enc_c = encoded_frames.shape
-            
-            # Reshape back to [B, T, enc_h, enc_w, enc_c]
-            return encoded_frames.reshape(batch_size, time_steps, enc_h, enc_w, enc_c)
+            # Reshape back to include temporal dimension [B, T, h, w, c]
+            latent_shape = latent.shape
+            return latent.reshape(batch_size, seq_len, *latent_shape[1:])
         else:
-            # Standard image encoding (4D tensor)
+            # Standard image processing
             return self.__encode__(x, key=key, **kwargs)
     
     def decode(self, z: jnp.ndarray, key: Optional[jax.random.PRNGKey] = None, **kwargs) -> jnp.ndarray:
-        """Decode latent representation, with special handling for video data.
+        """Decode latent representations, with special handling for video data.
         
-        This method handles both standard latent batches and video latents (5D tensors).
+        This method handles both standard image latents and video latents (5D tensors).
         For videos, it reshapes the input, processes each frame, and then restores
         the temporal dimension.
         
@@ -89,54 +90,54 @@ class AutoEncoder():
             **kwargs: Additional arguments passed to __decode__
             
         Returns:
-            Decoded data with the same batch and temporal dimensions as input
+            Decoded output with the same batch and temporal dimensions as input
         """
-        # Check if we're dealing with video data (5D tensor)
-        if len(z.shape) == 5:  # [B, T, h, w, c]
-            batch_size, time_steps, height, width, channels = z.shape
+        # Check for video data (5D tensor)
+        is_video = len(z.shape) == 5
+        
+        if is_video:
+            # Extract dimensions for reshaping
+            batch_size, seq_len, height, width, channels = z.shape
             
-            # Reshape to [B*T, h, w, c] for frame-by-frame decoding
+            # Reshape to [B*T, h, w, c] to process as regular latents
             z_reshaped = z.reshape(-1, height, width, channels)
             
-            # Decode each frame
-            decoded_frames = self.__decode__(z_reshaped, key=key, **kwargs)
+            # Decode all frames
+            decoded = self.__decode__(z_reshaped, key=key, **kwargs)
             
-            # Get the new dimensions
-            _, dec_h, dec_w, dec_c = decoded_frames.shape
-            
-            # Reshape back to [B, T, dec_h, dec_w, dec_c]
-            return decoded_frames.reshape(batch_size, time_steps, dec_h, dec_w, dec_c)
+            # Reshape back to include temporal dimension [B, T, H, W, C]
+            decoded_shape = decoded.shape
+            return decoded.reshape(batch_size, seq_len, *decoded_shape[1:])
         else:
-            # Standard latent decoding (4D tensor)
+            # Standard latent processing
             return self.__decode__(z, key=key, **kwargs)
     
     def __call__(self, x: jnp.ndarray, key: Optional[jax.random.PRNGKey] = None, **kwargs):
-        """Encode and then decode the input.
+        """Encode and then decode the input (autoencoder).
         
         Args:
-            x: Input tensor, either images or videos
-            key: Optional random key
-            **kwargs: Additional arguments
+            x: Input tensor, either [B, H, W, C] for images or [B, T, H, W, C] for videos
+            key: Optional random key for stochastic encoding/decoding
+            **kwargs: Additional arguments for encoding and decoding
             
         Returns:
-            Reconstructed data
+            Reconstructed output with the same dimensions as input
         """
-        # Split the key if provided
         if key is not None:
             encode_key, decode_key = jax.random.split(key)
         else:
-            encode_key, decode_key = None, None
+            encode_key = decode_key = None
             
-        latents = self.encode(x, key=encode_key, **kwargs)
-        reconstructions = self.decode(latents, key=decode_key, **kwargs)
-        return reconstructions
+        # Encode then decode
+        z = self.encode(x, key=encode_key, **kwargs)
+        return self.decode(z, key=decode_key, **kwargs)
     
     @property
-    def downscale_factor(self) -> int:
-        """Returns the downscale factor for the encoder."""
-        raise 8
+    def latent_dim(self) -> int:
+        """Get the latent dimension (number of channels in the latent space)."""
+        return getattr(self, "_latent_dim", None)
     
-    @property 
-    def latent_channels(self) -> int:
-        """Returns the number of channels in the latent space."""
-        raise 4
+    @property
+    def spatial_scale(self) -> int:
+        """Get the spatial scale factor between input and latent spaces."""
+        return getattr(self, "_spatial_scale", None)
