@@ -292,7 +292,7 @@ class DiffusionTrainer(SimpleTrainer):
             labels_seq = jnp.array(labels_seq, dtype=jnp.float16)
             samples = sampler.generate_images(
                 params=val_state.ema_params,
-                num_images=len(labels_seq),
+                batch_size=len(labels_seq),
                 diffusion_steps=diffusion_steps,
                 start_step=1000,
                 end_step=0,

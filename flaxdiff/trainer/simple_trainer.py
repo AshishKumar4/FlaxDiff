@@ -26,6 +26,7 @@ from flax.training.dynamic_scale import DynamicScale
 from flaxdiff.utils import RandomMarkovState
 from flax.training import dynamic_scale as dynamic_scale_lib
 from dataclasses import dataclass
+import gc
 
 PROCESS_COLOR_MAP = {
     0: "green",
@@ -96,6 +97,7 @@ class SimpleTrainer:
                  checkpoint_base_path: str = "./checkpoints",
                  checkpoint_step: int = None,
                  use_dynamic_scale: bool = False,
+                 max_checkpoints_to_keep: int = 2,
                  ):
         if distributed_training is None or distributed_training is True:
             # Auto-detect if we are running on multiple devices
@@ -132,7 +134,7 @@ class SimpleTrainer:
         async_checkpointer = orbax.checkpoint.AsyncCheckpointer(orbax.checkpoint.PyTreeCheckpointHandler(), timeout_secs=60)
 
         options = orbax.checkpoint.CheckpointManagerOptions(
-            max_to_keep=4, create=True)
+            max_to_keep=max_checkpoints_to_keep, create=True)
         self.checkpointer = orbax.checkpoint.CheckpointManager(
             self.checkpoint_path() + checkpoint_suffix, async_checkpointer, options)
 
@@ -435,34 +437,40 @@ class SimpleTrainer:
                 # loss = jax.experimental.multihost_utils.process_allgather(loss)
                 loss = jnp.mean(loss) # Just to make sure its a scaler value
                     
-            if loss <= 1e-8:
-                # If the loss is too low, we can assume the model has diverged
-                print(colored(f"Loss too low at step {current_step} => {loss}", 'red'))
-                # Reset the model to the old state
-                # if self.best_state is not None:
-                #     print(colored(f"Resetting model to best state", 'red'))
-                #     train_state = self.best_state
-                #     loss = self.best_loss
-                # else:
-                #     exit(1)
+            if loss <= 1e-8 or jnp.isnan(loss) or jnp.isinf(loss):
+                # If the loss is too low or NaN/Inf, log the issue and attempt recovery
+                print(colored(f"Abnormal loss at step {current_step}: {loss}", 'red'))
                 
-                # Check if there are any NaN/inf values in the train_state.params
+                # Check model parameters for NaN/Inf values
                 params = train_state.params
+                has_nan_or_inf = False
+                
                 if isinstance(params, dict):
                     for key, value in params.items():
                         if isinstance(value, jnp.ndarray):
                             if jnp.isnan(value).any() or jnp.isinf(value).any():
-                                print(colored(f"NaN/inf values found in params at step {current_step}", 'red'))
-                                # Reset the model to the old state
-                                # train_state = self.best_state
-                                # loss = self.best_loss
-                                # break
-                            else:
-                                print(colored(f"Params are fine at step {current_step}", 'green'))
-                else:
-                    print(colored(f"Params are not a dict at step {current_step}", 'red'))
+                                print(colored(f"NaN/inf values found in params[{key}] at step {current_step}", 'red'))
+                                has_nan_or_inf = True
+                                break
+                    
+                    if not has_nan_or_inf:
+                        print(colored(f"Model parameters seem valid despite abnormal loss", 'yellow'))
                 
-                exit(1)
+                # Try to recover - clear JAX caches and collect garbage
+                gc.collect()
+                if hasattr(jax, "clear_caches"):
+                    jax.clear_caches()
+                
+                # If we have a best state and the loss is truly invalid, consider restoring
+                if (loss <= 1e-8 or jnp.isnan(loss) or jnp.isinf(loss)) and self.best_state is not None:
+                    print(colored(f"Attempting recovery by resetting model to last best state", 'yellow'))
+                    train_state = self.best_state
+                    loss = self.best_loss
+                else:
+                    # If we can't recover, skip this step but continue training
+                    print(colored(f"Unable to recover - continuing with current state", 'yellow'))
+                    if loss <= 1e-8:
+                        loss = 1.0  # Set to a reasonable default to continue training
                             
             epoch_loss += loss
             current_step += 1
