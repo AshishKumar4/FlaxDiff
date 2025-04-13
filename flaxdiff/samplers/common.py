@@ -23,8 +23,9 @@ class DiffusionSampler:
         model_output_transform: DiffusionPredictionTransform,
         guidance_scale: float = 0.0,
         null_labels_seq: jax.Array = None,
-        autoencoder: AutoEncoder =None,
+        autoencoder: AutoEncoder = None,
         image_size=256,
+        timestep_spacing: str = 'linear',
     ):
         """Initialize the diffusion sampler.
         
@@ -37,6 +38,11 @@ class DiffusionSampler:
             null_labels_seq: Unconditional sequence for guidance
             autoencoder: Optional autoencoder for latent diffusion
             image_size: Size of generated images
+            timestep_spacing: Strategy for timestep spacing in sampling
+                             'linear' - Default equal spacing
+                             'quadratic' - Emphasizes early steps
+                             'karras' - Based on EDM paper, better with fewer steps
+                             'exponential' - Concentrates steps near the end
         """
         self.model = model
         self.noise_schedule = noise_schedule
@@ -45,6 +51,12 @@ class DiffusionSampler:
         self.guidance_scale = guidance_scale
         self.image_size = image_size
         self.autoencoder = autoencoder
+        self.timestep_spacing = timestep_spacing
+        
+        # For Karras spacing if needed
+        if hasattr(noise_schedule, 'min_inv_rho') and hasattr(noise_schedule, 'max_inv_rho'):
+            self.min_inv_rho = noise_schedule.min_inv_rho
+            self.max_inv_rho = noise_schedule.max_inv_rho
         
         if self.guidance_scale > 0:
             # Classifier free guidance
@@ -107,8 +119,8 @@ class DiffusionSampler:
         current_step, 
         model_conditioning_inputs, 
         next_step=None, 
-        state: MarkovState = None
-    ) -> tuple[jnp.ndarray, MarkovState]:
+        state: RandomMarkovState = None
+    ) -> tuple[jnp.ndarray, RandomMarkovState]:
         """Perform a single sampling step in the diffusion process.
         
         Args:
@@ -168,15 +180,66 @@ class DiffusionSampler:
 
 
     def get_steps(self, start_step, end_step, diffusion_steps):
-        """Get the sequence of timesteps for the diffusion process."""
+        """Get the sequence of timesteps for the diffusion process.
+        
+        Args:
+            start_step: Starting timestep (typically the max)
+            end_step: Ending timestep (typically 0)
+            diffusion_steps: Number of steps to use
+            
+        Returns:
+            Array of timesteps for sampling
+        """
         step_range = start_step - end_step
         if diffusion_steps is None or diffusion_steps == 0:
-            diffusion_steps = start_step - end_step
+            diffusion_steps = step_range
         diffusion_steps = min(diffusion_steps, step_range)
-        steps = jnp.linspace(
-            end_step, start_step,
-            diffusion_steps, dtype=jnp.int16
-        )[::-1]
+        
+        # Linear spacing (default)
+        if getattr(self, 'timestep_spacing', 'linear') == 'linear':
+            steps = jnp.linspace(
+                end_step, start_step,
+                diffusion_steps, dtype=jnp.int16
+            )[::-1]
+        
+        # Quadratic spacing (emphasizes early steps)
+        elif self.timestep_spacing == 'quadratic':
+            steps = jnp.linspace(0, 1, diffusion_steps) ** 2
+            steps = (start_step - end_step) * steps + end_step
+            steps = jnp.asarray(steps, dtype=jnp.int16)[::-1]
+            
+        # Karras spacing from the EDM paper - often gives better results with fewer steps
+        elif self.timestep_spacing == 'karras':
+            # Implementation based on the EDM paper's recommendations
+            sigma_min = end_step / start_step
+            sigma_max = 1.0
+            rho = 7.0  # Karras paper default, controls the distribution
+            
+            # Create log-spaced steps in sigma space
+            sigmas = jnp.exp(jnp.linspace(
+                jnp.log(sigma_max), jnp.log(sigma_min), diffusion_steps
+            ))
+            steps = jnp.clip(
+                (sigmas ** (1 / rho) - self.min_inv_rho) / 
+                (self.max_inv_rho - self.min_inv_rho), 
+                0, 1
+            ) * start_step
+            steps = jnp.asarray(steps, dtype=jnp.int16)
+            
+        # Exponential spacing (concentrates steps near the end)
+        elif self.timestep_spacing == 'exponential':
+            steps = jnp.linspace(0, 1, diffusion_steps)
+            steps = jnp.exp(steps * jnp.log((start_step + 1) / (end_step + 1))) * (end_step + 1) - 1
+            steps = jnp.clip(steps, end_step, start_step)
+            steps = jnp.asarray(steps, dtype=jnp.int16)[::-1]
+        
+        # Fallback to linear spacing
+        else:
+            steps = jnp.linspace(
+                end_step, start_step,
+                diffusion_steps, dtype=jnp.int16
+            )[::-1]
+            
         return steps
 
 

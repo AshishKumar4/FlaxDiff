@@ -62,6 +62,7 @@ class StableDiffusionVAE(AutoEncoder):
         )
         
         scaling_factor = vae.scaling_factor
+        print(f"Scaling factor: {scaling_factor}")
         
         def encode_single_frame(images, rngkey: jax.random.PRNGKey = None):
             latents = enc.apply({"params": params['encoder']}, images, deterministic=True)
