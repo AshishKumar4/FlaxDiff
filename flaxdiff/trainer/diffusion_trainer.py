@@ -134,9 +134,6 @@ class DiffusionTrainer(SimpleTrainer):
         model_output_transform = self.model_output_transform
         loss_fn = self.loss_fn
         unconditional_prob = self.unconditional_prob
-
-        # Determine the number of unconditional samples
-        num_unconditional = int(batch_size * unconditional_prob)
         
         null_labels_full = self.encoder([""])
         null_labels_seq = jnp.array(null_labels_full[0], dtype=jnp.float16)
@@ -178,6 +175,14 @@ class DiffusionTrainer(SimpleTrainer):
             label_seq = conditioning_encoder.encode_from_tokens(batch['text'])
 
             # Generate random probabilities to decide how much of this batch will be unconditional
+            local_rng_state, uncond_key = local_rng_state.get_random_key()
+            # Efficient way to determine unconditional samples for JIT compatibility
+            uncond_mask = jax.random.bernoulli(
+                uncond_key,
+                shape=(local_batch_size,),
+                p=unconditional_prob
+            )
+            num_unconditional = jnp.sum(uncond_mask).astype(jnp.int32)
 
             label_seq = jnp.concatenate([null_labels_seq[:num_unconditional], label_seq[num_unconditional:]], axis=0)
 
@@ -273,10 +278,8 @@ class DiffusionTrainer(SimpleTrainer):
         
         sampler = sampler_class(
             model=model,
-            params=None,
             noise_schedule=self.noise_schedule if sampling_noise_schedule is None else sampling_noise_schedule,
             model_output_transform=self.model_output_transform,
-            image_size=image_size,
             null_labels_seq=null_labels_full,
             autoencoder=autoencoder,
             guidance_scale=3.0,
@@ -292,7 +295,8 @@ class DiffusionTrainer(SimpleTrainer):
             labels_seq = jnp.array(labels_seq, dtype=jnp.float16)
             samples = sampler.generate_images(
                 params=val_state.ema_params,
-                batch_size=len(labels_seq),
+                resolution=image_size,
+                num_samples=len(labels_seq),
                 diffusion_steps=diffusion_steps,
                 start_step=1000,
                 end_step=0,

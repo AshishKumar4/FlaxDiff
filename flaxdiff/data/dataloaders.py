@@ -395,6 +395,7 @@ def get_media_dataset_grain(
     data_name: str,
     batch_size: int = 64,
     media_scale: int = 256,
+    sequence_length: int = 1,
     count: Optional[int] = None,
     num_epochs: Optional[int] = None,
     method: Any = cv2.INTER_AREA,
@@ -414,6 +415,7 @@ def get_media_dataset_grain(
         data_name: Name of the dataset in mediaDatasetMap.
         batch_size: Batch size for the dataset.
         media_scale: Size to scale media (image or video frames) to.
+        sequence_length: Length of the sequence for video data.
         count: Optional count limit for the dataset.
         num_epochs: Number of epochs to iterate.
         method: Interpolation method for resizing.
@@ -445,7 +447,8 @@ def get_media_dataset_grain(
     # Prepare transform kwargs
     transform_kwargs = {
         "image_scale" if media_type == "image" else "frame_size": media_scale,
-        "method": method
+        "method": method,
+        "sequence_length": sequence_length,
     }
     if additional_transform_kwargs:
         transform_kwargs.update(additional_transform_kwargs)

@@ -44,7 +44,6 @@ class DataSource(ABC):
         
         if source_type not in source_map:
             raise ValueError(f"Unknown source type: {source_type}")
-        
         return source_map[source_type](**kwargs)
 
 

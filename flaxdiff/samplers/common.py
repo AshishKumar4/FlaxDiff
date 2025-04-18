@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import tqdm
 from flax import linen as nn
+from typing import List, Tuple, Dict, Any, Optional
 
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
 from ..schedulers import NoiseScheduler
@@ -11,6 +12,7 @@ from ..utils import RandomMarkovState, MarkovState, clip_images
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, PartitionSpec as P
 from flaxdiff.models.autoencoder import AutoEncoder
+from flaxdiff.inputs import DiffusionInputConfig
 
 class DiffusionSampler:
     """Base class for diffusion samplers."""
@@ -18,13 +20,11 @@ class DiffusionSampler:
     def __init__(
         self,
         model: nn.Module,
-        params: dict,
         noise_schedule: NoiseScheduler,
         model_output_transform: DiffusionPredictionTransform,
+        input_config: DiffusionInputConfig,
         guidance_scale: float = 0.0,
-        null_labels_seq: jax.Array = None,
         autoencoder: AutoEncoder = None,
-        image_size=256,
         timestep_spacing: str = 'linear',
     ):
         """Initialize the diffusion sampler.
@@ -35,9 +35,7 @@ class DiffusionSampler:
             noise_schedule: Noise scheduler
             model_output_transform: Transform for model predictions
             guidance_scale: Scale for classifier-free guidance (0.0 means disabled)
-            null_labels_seq: Unconditional sequence for guidance
             autoencoder: Optional autoencoder for latent diffusion
-            image_size: Size of generated images
             timestep_spacing: Strategy for timestep spacing in sampling
                              'linear' - Default equal spacing
                              'quadratic' - Emphasizes early steps
@@ -46,12 +44,13 @@ class DiffusionSampler:
         """
         self.model = model
         self.noise_schedule = noise_schedule
-        self.params = params
         self.model_output_transform = model_output_transform
         self.guidance_scale = guidance_scale
-        self.image_size = image_size
         self.autoencoder = autoencoder
         self.timestep_spacing = timestep_spacing
+        self.input_config = input_config
+        
+        unconditionals = input_config.get_unconditionals()
         
         # For Karras spacing if needed
         if hasattr(noise_schedule, 'min_inv_rho') and hasattr(noise_schedule, 'max_inv_rho'):
@@ -60,25 +59,28 @@ class DiffusionSampler:
         
         if self.guidance_scale > 0:
             # Classifier free guidance
-            assert null_labels_seq is not None, "Null labels sequence is required for classifier-free guidance"
             print("Using classifier-free guidance")
 
-            def sample_model(params, x_t, t, *additional_inputs):
+            def sample_model(params, x_t, t, *conditioning_inputs):
                 # Concatenate unconditional and conditional inputs
                 x_t_cat = jnp.concatenate([x_t] * 2, axis=0)
                 t_cat = jnp.concatenate([t] * 2, axis=0)
                 rates_cat = self.noise_schedule.get_rates(t_cat)
                 c_in_cat = self.model_output_transform.get_input_scale(rates_cat)
-
-                text_labels_seq, = additional_inputs
-                text_labels_seq = jnp.concatenate(
-                    [text_labels_seq, jnp.broadcast_to(null_labels_seq, text_labels_seq.shape)], 
-                    axis=0
-                )
+                
+                final_conditionals = []
+                for conditional, unconditional in zip(conditioning_inputs, unconditionals):
+                    final = jnp.concatenate([
+                        conditional,
+                        jnp.broadcast_to(unconditional, conditional.shape)
+                    ], axis=0)
+                    final_conditionals.append(final)
+                final_conditionals = tuple(final_conditionals)
+                
                 model_output = self.model.apply(
                     params, 
                     *self.noise_schedule.transform_inputs(x_t_cat * c_in_cat, t_cat), 
-                    text_labels_seq
+                    *final_conditionals
                 )
                 
                 # Split model output into unconditional and conditional parts
@@ -89,13 +91,13 @@ class DiffusionSampler:
                 return x_0, eps, model_output
         else:
             # Unconditional sampling
-            def sample_model(params, x_t, t, *additional_inputs):
+            def sample_model(params, x_t, t, *conditioning_inputs):
                 rates = self.noise_schedule.get_rates(t)
                 c_in = self.model_output_transform.get_input_scale(rates)
                 model_output = self.model.apply(
                     params, 
                     *self.noise_schedule.transform_inputs(x_t * c_in, t), 
-                    *additional_inputs
+                    *conditioning_inputs
                 )
                 x_0, eps = self.model_output_transform(x_t, model_output, t, self.noise_schedule)
                 return x_0, eps, model_output
@@ -245,8 +247,9 @@ class DiffusionSampler:
 
     def generate_samples(
         self,
-        params: dict = None,
-        batch_size: int = 4,
+        params: dict,
+        num_samples: int,
+        resolution: int,
         sequence_length: int = None,
         diffusion_steps: int = 1000,
         start_step: int = None,
@@ -254,7 +257,8 @@ class DiffusionSampler:
         steps_override=None,
         priors=None,
         rngstate: RandomMarkovState = None,
-        model_conditioning_inputs: tuple = ()
+        conditioning: List[Union[Tuple, Dict]] = None,
+        model_conditioning_inputs: Tuple = None,
     ) -> jnp.ndarray:
         """Generate samples using the diffusion model.
         
@@ -264,7 +268,8 @@ class DiffusionSampler:
         
         Args:
             params: Model parameters (uses self.params if None)
-            batch_size: Number of samples to generate (videos or images)
+            num_samples: Number of samples to generate (videos or images)
+            resolution: Resolution of the generated samples (H, W)
             sequence_length: Length of each sequence (for videos/audio/etc)
                              If None, generates regular images
             diffusion_steps: Number of diffusion steps to perform
@@ -273,7 +278,8 @@ class DiffusionSampler:
             steps_override: Override default timestep sequence
             priors: Prior samples to start from instead of noise
             rngstate: Random state for reproducibility
-            model_conditioning_inputs: Conditioning inputs for the model
+            conditioning: (Optional) List of conditioning inputs for the model
+            model_conditioning_inputs: (Optional) Pre-processed conditioning inputs
             
         Returns:
             Generated samples as a JAX array:
@@ -282,6 +288,9 @@ class DiffusionSampler:
         """
         if rngstate is None:
             rngstate = RandomMarkovState(jax.random.PRNGKey(42))
+            
+        if start_step is None:
+            start_step = self.noise_schedule.max_timesteps
             
         if priors is None:
             # Determine if we're generating videos or images based on sequence_length
@@ -292,18 +301,55 @@ class DiffusionSampler:
             # Get sample shape based on whether we're generating video or images
             if is_video:
                 samples = self._get_initial_sequence_samples(
-                    batch_size, sequence_length, newrngs, start_step
+                    resolution, num_samples, sequence_length, newrngs, start_step
                 )
             else:
-                samples = self._get_initial_samples(batch_size, newrngs, start_step)
+                samples = self._get_initial_samples(resolution, num_samples, newrngs, start_step)
         else:
             print("Using priors")
             if self.autoencoder is not None:
                 # Let the autoencoder handle both image and video priors
                 priors = self.autoencoder.encode(priors)
             samples = priors
-
-        params = params if params is not None else self.params
+        
+        if conditioning is not None:
+            if model_conditioning_inputs is not None:
+                raise ValueError("Cannot provide both conditioning and model_conditioning_inputs")
+            print("Processing raw conditioning inputs to generate model conditioning inputs")
+            separated: Dict[str, List] = {}
+            for cond in self.input_config.conditions:
+                separated[cond.encoder.key] = []
+            # Separate the conditioning inputs, one for each condition
+            for vals in conditioning:
+                if isinstance(vals, tuple) or isinstance(vals, list): 
+                    # If its a tuple, assume that the ordering aligns with the ordering of the conditions
+                    # Thus, use the conditioning encoder key as the key
+                    for cond, val in zip(self.input_config.conditions, vals):
+                        separated[cond.encoder.key].append(val)
+                elif isinstance(vals, dict):
+                    # If its a dict, use the encoder key as the key
+                    for cond in self.input_config.conditions:
+                        if cond.encoder.key in vals:
+                            separated[cond.encoder.key].append(vals[cond.encoder.key])
+                        else:
+                            raise ValueError(f"Conditioning input {cond.encoder.key} not found in provided dictionary")
+                else:
+                    # If its a single value, use the encoder key as the key
+                    for cond in self.input_config.conditions:
+                        separated[cond.encoder.key].append(vals)
+                        
+            # Now we have a dictionary of lists, one for each condition, encode them
+            finals = []
+            for cond in self.input_config.conditions:
+                # Get the encoder for the condition
+                encoder = cond.encoder
+                encoded = encoder(separated[encoder.key])
+                finals.append(encoded)
+                
+            model_conditioning_inputs = tuple(finals)
+        
+        if model_conditioning_inputs is None:
+            model_conditioning_inputs = []
 
         def sample_model_fn(x_t, t, *additional_inputs):
             return self.sample_model(params, x_t, t, *additional_inputs)
@@ -342,7 +388,7 @@ class DiffusionSampler:
                 )
         return self.post_process(samples)
     
-    def _get_noise_parameters(self, start_step):
+    def _get_noise_parameters(self, resolution, start_step):
         """Calculate common noise parameters for sample generation.
         
         Args:
@@ -355,7 +401,7 @@ class DiffusionSampler:
         alpha_n, sigma_n = self.noise_schedule.get_rates(start_step)
         variance = jnp.sqrt(alpha_n ** 2 + sigma_n ** 2)
         
-        image_size = self.image_size
+        image_size = resolution
         image_channels = 3
         if self.autoencoder is not None:
             image_size = image_size // self.autoencoder.downscale_factor
@@ -363,9 +409,9 @@ class DiffusionSampler:
             
         return variance, image_size, image_channels
     
-    def _get_initial_samples(self, batch_size, rngs: jax.random.PRNGKey, start_step):
+    def _get_initial_samples(self, resolution, batch_size, rngs: jax.random.PRNGKey, start_step):
         """Generate initial noisy samples for image generation."""
-        variance, image_size, image_channels = self._get_noise_parameters(start_step)
+        variance, image_size, image_channels = self._get_noise_parameters(resolution, start_step)
         
         # Standard image generation
         return jax.random.normal(
@@ -373,9 +419,9 @@ class DiffusionSampler:
             (batch_size, image_size, image_size, image_channels)
         ) * variance
     
-    def _get_initial_sequence_samples(self, batch_size, sequence_length, rngs: jax.random.PRNGKey, start_step):
+    def _get_initial_sequence_samples(self, resolution, batch_size, sequence_length, rngs: jax.random.PRNGKey, start_step):
         """Generate initial noisy samples for sequence data (video/audio)."""
-        variance, image_size, image_channels = self._get_noise_parameters(start_step)
+        variance, image_size, image_channels = self._get_noise_parameters(resolution, start_step)
         
         # Generate sequence data (like video)
         return jax.random.normal(

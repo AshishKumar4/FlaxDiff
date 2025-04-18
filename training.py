@@ -29,11 +29,12 @@ import argparse
 from dataclasses import dataclass
 import resource
 
-from flaxdiff.data.datasets import get_dataset_grain, get_dataset_online
+from flaxdiff.data.dataloaders import get_dataset_grain, get_dataset_online
 
 import warnings
 import traceback
 from flaxdiff.utils import defaultTextEncodeModel
+from flaxdiff.inputs import DiffusionInputConfig, ConditionalInputConfig
 
 warnings.filterwarnings("ignore")
 
@@ -65,7 +66,7 @@ PROCESS_COLOR_MAP = {
 ############################################### Training Pipeline ###################################################
 #####################################################################################################################
 
-from flaxdiff.trainer.diffusion_trainer import DiffusionTrainer
+from flaxdiff.trainer.general_diffusion_trainer import GeneralDiffusionTrainer
 
 def boolean_string(s):
     if type(s) == bool:
@@ -354,6 +355,20 @@ def main(args):
     sorted_args_json = json.dumps(vars(args), sort_keys=True)
     arguments_hash = hash(sorted_args_json)
     
+    input_config = DiffusionInputConfig(
+        sample_data_key='image',
+        sample_data_shape=(IMAGE_SIZE, IMAGE_SIZE, 3),
+        conditions=[
+            ConditionalInputConfig(
+                encoder=text_encoder,
+                conditioning_data_key='text',
+                pretokenized=True,
+                unconditional_input="",
+                model_key_override="textcontext",
+            )
+        ]
+    )
+    
     CONFIG = {
         "model": model_config,
         "architecture": args.architecture,
@@ -365,20 +380,15 @@ def main(args):
         "learning_rate": args.learning_rate,
         "batch_size": BATCH_SIZE,
         "epochs": args.epochs,
-        "input_shapes": {
-            "x": (DIFFUSION_INPUT_SIZE, DIFFUSION_INPUT_SIZE, INPUT_CHANNELS),
-            "temb": (),
-            "textcontext": (77, 768)
-        },
+        "input_shapes": input_config.get_input_shapes(
+            autoencoder=autoencoder,
+        ),
+        "input_config": input_config.serialize(),
         "arguments": vars(args),
         "autoencoder": args.autoencoder,
         "autoencoder_opts": args.autoencoder_opts,
         "arguments_hash": arguments_hash,
     }
-    
-    # if 'diffusers' not in args.architecture and args.kernel_init is not None:
-    #     model_config['kernel_init'] = partial(kernel_init, scale=float(args.kernel_init))
-    #     print("Using custom kernel initialization with scale", args.kernel_init)
 
     cosine_schedule = CosineNoiseScheduler(1000, beta_end=1)
     karas_ve_schedule = KarrasVENoiseScheduler(
@@ -441,9 +451,9 @@ def main(args):
     
     text_encoder = defaultTextEncodeModel()
     
-    trainer = DiffusionTrainer(
+    trainer = GeneralDiffusionTrainer(
         model, optimizer=solver,
-        input_shapes=CONFIG['input_shapes'],
+        input_config=input_config,
         noise_schedule=edm_schedule,
         rngs=jax.random.PRNGKey(4),
         name=experiment_name,
@@ -463,10 +473,6 @@ def main(args):
         print("Distributed Training enabled")
     batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
     print(f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
-    
-
-    # data['test'] = data['train']
-    # data['test_len'] = data['train_len']
     
     # Construct a validation set by the prompts
     val_prompts = ['water tulip', ' a water lily', ' a water lily', ' a photo of a rose', ' a photo of a rose', ' a water lily', ' a water lily', ' a photo of a marigold', ' a photo of a marigold', ' a photo of a marigold', ' a water lily', ' a photo of a sunflower', ' a photo of a lotus', ' columbine', ' columbine', ' an orchid', ' an orchid', ' an orchid', ' a water lily', ' a water lily', ' a water lily', ' columbine', ' columbine', ' a photo of a sunflower', ' a photo of a sunflower', ' a photo of a sunflower', ' a photo of a lotus', ' a photo of a lotus', ' a photo of a marigold', ' a photo of a marigold', ' a photo of a rose', ' a photo of a rose', ' a photo of a rose', ' orange dahlia', ' orange dahlia', ' a lenten rose', ' a lenten rose', ' a water lily', ' a water lily', ' a water lily', ' a water lily', ' an orchid', ' an orchid', ' an orchid', ' hard-leaved pocket orchid', ' bird of paradise', ' bird of paradise', ' a photo of a lovely rose', ' a photo of a lovely rose', ' a photo of a globe-flower', ' a photo of a globe-flower', ' a photo of a lovely rose', ' a photo of a lovely rose', ' a photo of a ruby-lipped cattleya', ' a photo of a ruby-lipped cattleya', ' a photo of a lovely rose', ' a water lily', ' a osteospermum', ' a osteospermum', ' a water lily', ' a water lily', ' a water lily', ' a red rose', ' a red rose']
