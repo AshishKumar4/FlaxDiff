@@ -5,15 +5,17 @@ from typing import Dict, Callable, Sequence, Any, Union, Optional
 import einops
 from ..common import kernel_init, ConvLayer, Upsample, Downsample, PixelShuffle
 from dataclasses import dataclass
+from abc import ABC, abstractmethod
 
 @dataclass
-class AutoEncoder():
+class AutoEncoder(ABC):
     """Base class for autoencoder models with video support.
     
     This class defines the interface for autoencoders and provides
     video handling functionality, allowing child classes to focus
     on implementing the core encoding/decoding for individual frames.
     """
+    @abstractmethod
     def __encode__(self, x: jnp.ndarray, **kwargs) -> jnp.ndarray:
         """Abstract method for encoding a batch of images.
         
@@ -28,6 +30,7 @@ class AutoEncoder():
         """
         raise NotImplementedError
     
+    @abstractmethod
     def __decode__(self, z: jnp.ndarray, **kwargs) -> jnp.ndarray:
         """Abstract method for decoding a batch of latents.
         
@@ -133,11 +136,16 @@ class AutoEncoder():
         return self.decode(z, key=decode_key, **kwargs)
     
     @property
-    def latent_dim(self) -> int:
-        """Get the latent dimension (number of channels in the latent space)."""
-        return getattr(self, "_latent_dim", None)
-    
-    @property
     def spatial_scale(self) -> int:
         """Get the spatial scale factor between input and latent spaces."""
         return getattr(self, "_spatial_scale", None)
+    
+    @property
+    def name(self) -> str:
+        """Get the name of the autoencoder model."""
+        raise NotImplementedError
+    
+    @abstractmethod
+    def serialize(self) -> Dict[str, Any]:
+        """Serialize the model parameters and configuration."""
+        raise NotImplementedError

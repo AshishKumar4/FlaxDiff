@@ -1,7 +1,7 @@
 from .sources.base import MediaDataset, DataSource, DataAugmenter
 from .sources.images import ImageTFDSSource, ImageGCSSource, CombinedImageGCSSource
 from .sources.images import ImageTFDSAugmenter, ImageGCSAugmenter
-from .sources.videos import VideoTFDSSource, VideoLocalSource, VideoAugmenter
+from .sources.videos import VideoTFDSSource, VideoLocalSource, AudioVideoAugmenter
 
 # ---------------------------------------------------------------------------------
 # Legacy compatibility mappings
@@ -117,24 +117,10 @@ mediaDatasetMap = {
         media_type="image"
     ),
     
-    # Video datasets - add your video datasets here
-    "ucf101": MediaDataset(
-        source=VideoTFDSSource(name="ucf101", split="train"),
-        augmenter=VideoAugmenter(num_frames=16),
-        media_type="video"
-    ),
-    "robonet/robonet_sample_128": MediaDataset(
-        source=VideoTFDSSource(name="robonet/robonet_sample_128", split="train"),
-        augmenter=VideoAugmenter(num_frames=5),
-        media_type="video"
-    ),
-    # Example of a local video dataset
-    "local_videos": MediaDataset(
-        source=VideoLocalSource(
-            directory="/path/to/your/videos", 
-            caption_file="/path/to/your/captions.txt"
-        ),
-        augmenter=VideoAugmenter(num_frames=16),
+    # Video dataset
+    "voxceleb2": MediaDataset(
+        source=VideoLocalSource(),
+        augmenter=AudioVideoAugmenter(),
         media_type="video"
     ),
 }

@@ -22,6 +22,10 @@ class StableDiffusionVAE(AutoEncoder):
             dtype=dtype,
         )
         
+        self.modelname = modelname
+        self.revision = revision
+        self.dtype = dtype
+        
         enc = FlaxEncoder(
             in_channels=vae.config.in_channels,
             out_channels=vae.config.latent_channels,
@@ -134,3 +138,17 @@ class StableDiffusionVAE(AutoEncoder):
     def latent_channels(self) -> int:
         """Returns the number of channels in the latent space."""
         return self.__latent_channels__
+    
+    @property
+    def name(self) -> str:
+        """Get the name of the autoencoder model."""
+        return "stable_diffusion"
+    
+    def serialize(self):
+        """Serialize the model to a dictionary format."""
+        return {
+            "modelname": self.modelname,
+            "revision": self.revision,
+            "dtype": str(self.dtype),
+        }
+    
