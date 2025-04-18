@@ -113,10 +113,9 @@ class SimpleTrainer:
         self.input_shapes = input_shapes
         self.checkpoint_base_path = checkpoint_base_path
         
-        
         if wandb_config is not None and jax.process_index() == 0:
             import wandb
-            run = wandb.init(**wandb_config)
+            run = wandb.init(resume='allow', **wandb_config)
             self.wandb = run
             
             # define our custom x axis metric
@@ -252,6 +251,10 @@ class SimpleTrainer:
             step = checkpoint_step
         
         print("Loading model from checkpoint at step ", step)
+        loaded_checkpoint_path = os.path.join(
+            checkpoint_path if checkpoint_path else self.checkpoint_path(),
+            f"{step}")
+        self.loaded_checkpoint_path = loaded_checkpoint_path
         ckpt = checkpointer.restore(step)
         state = ckpt['state']
         best_state = ckpt['best_state']

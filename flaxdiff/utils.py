@@ -6,14 +6,85 @@ from typing import Any
 from functools import partial
 import numpy as np
 from jax.sharding import Mesh, PartitionSpec as P
-from flaxdiff.inputs import TextEncoder
+from flaxdiff.inputs import TextEncoder, CLIPTextEncoder
+
+# Setup mappings for dtype, precision, and activation
+DTYPE_MAP = {
+    'bfloat16': jnp.bfloat16,
+    'float32': jnp.float32,
+    'jax.numpy.float32': jnp.float32,
+    'jax.numpy.bfloat16': jnp.bfloat16,
+    'None': None,
+    None: None,
+}
+
+PRECISION_MAP = {
+    'high': jax.lax.Precision.HIGH,
+    'HIGH': jax.lax.Precision.HIGH,
+    'default': jax.lax.Precision.DEFAULT,
+    'DEFAULT': jax.lax.Precision.DEFAULT,
+    'highest': jax.lax.Precision.HIGHEST,
+    'HIGHEST': jax.lax.Precision.HIGHEST,
+    'None': None,
+    None: None,
+}
+
+ACTIVATION_MAP = {
+    'swish': jax.nn.swish,
+    'silu': jax.nn.silu,
+    'jax._src.nn.functions.silu': jax.nn.silu,
+    'mish': jax.nn.mish,
+}
+
+def map_nested_config(config):
+    new_config = {}
+    for key, value in config.items():
+        if isinstance(value, dict):
+            new_config[key] = map_nested_config(value)
+        elif isinstance(value, str):
+            if value in DTYPE_MAP:
+                new_config[key] = DTYPE_MAP[value]
+            elif value in PRECISION_MAP:
+                new_config[key] = PRECISION_MAP[value]
+            elif value in ACTIVATION_MAP:
+                new_config[key] = ACTIVATION_MAP[value]
+            elif value == 'None':
+                new_config[key] = None
+            elif '.' in value:
+                # Ignore any other string that contains a dot
+                print(
+                    f"Ignoring key {key} with value {value} as it contains a dot.")
+    return new_config
+
+def serialize_model(model: nn.Module):
+    """
+    Serializes the model to a dictionary format.
+    """
+    model_dict = model.__dict__
+    model_dict = {k: v for k, v in model_dict.items() if not k.startswith('_')}
+    # Convert all callable attributes to their string representation
+    def map(model_dict):
+        for k, v in model_dict.items():
+            if isinstance(v, dict):
+                # Recursively serialize nested dictionaries
+                model_dict[k] = map(v)
+            elif isinstance(v, list):
+                # Recursively serialize lists
+                [map(item) if isinstance(item, dict) else item for item in v]
+            elif callable(v):
+                # If the attribute has __name__, use that as the key
+                if hasattr(v, '__name__'):
+                    model_dict[k] = v.__name__
+                else:
+                    model_dict[k] = str(v).split('.')[-1]
+    map(model_dict)
+    return model_dict
 
 class MarkovState(struct.PyTreeNode):
     pass
 
 class RandomMarkovState(MarkovState):
     rng: jax.random.PRNGKey
-
     def get_random_key(self):
         rng, subkey = jax.random.split(self.rng)
         return RandomMarkovState(rng), subkey
@@ -175,18 +246,9 @@ class AutoTextTokenizer:
 
     def __repr__(self):
         return self.__class__.__name__ + '()'
+    
+# class AutoAudioTokenizer:
 
-def defaultTextEncodeModel(backend="jax"):
-    from transformers import (
-        CLIPTextModel,
-        FlaxCLIPTextModel,
-        AutoTokenizer,
-    )
-    modelname = "openai/clip-vit-large-patch14"
-    if backend == "jax":
-        model = FlaxCLIPTextModel.from_pretrained(
-            modelname, dtype=jnp.bfloat16)
-    else:
-        model = CLIPTextModel.from_pretrained(modelname)
-    tokenizer = AutoTokenizer.from_pretrained(modelname, dtype=jnp.float16)
-    return TextEncoder(model, tokenizer)
+def defaultTextEncodeModel(modelname = "openai/clip-vit-large-patch14", backend="jax"):
+    """Default text encoder model."""
+    return CLIPTextEncoder.from_modelname(modelname=modelname, backend=backend)

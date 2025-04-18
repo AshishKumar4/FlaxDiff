@@ -1,3 +1,4 @@
+import json
 import flax
 from flax import linen as nn
 import jax
@@ -14,7 +15,7 @@ from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransfor
 from ..samplers.common import DiffusionSampler
 from ..samplers.ddim import DDIMSampler
 
-from flaxdiff.utils import RandomMarkovState
+from flaxdiff.utils import RandomMarkovState, serialize_model
 from flaxdiff.inputs import ConditioningEncoder, ConditionalInputConfig, DiffusionInputConfig
 
 from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics
@@ -47,6 +48,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                  autoencoder: AutoEncoder = None,
                  native_resolution: int = None,
                  frames_per_sample: int = None,
+                 wandb_config: Dict[str, Any] = None,
                  **kwargs
                  ):
         """
@@ -56,7 +58,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             model: Neural network model
             optimizer: Optimization algorithm
             noise_schedule: Noise scheduler for diffusion process
-            input_config: Configuration for input data, inluding keys, shapes and conditioning inputs
+            input_config: Configuration for input data, including keys, shapes and conditioning inputs
             rngs: Random number generator keys
             unconditional_prob: Probability of training with unconditional samples
             name: Name of this trainer
@@ -71,6 +73,18 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             autoencoder=autoencoder,
         )
         self.input_config = input_config
+        
+        if wandb_config is not None:
+            # If input_config is not in wandb_config, add it
+            if 'input_config' not in wandb_config['config']:
+                wandb_config['config']['input_config'] = input_config.serialize()
+            # If model is not in wandb_config, add it
+            if 'model' not in wandb_config['config']:
+                wandb_config['config']['model'] = serialize_model(model)
+            if 'autoencoder' not in wandb_config['config'] and autoencoder is not None:
+                wandb_config['config']['autoencoder'] = autoencoder.name
+                wandb_config['config']['autoencoder_opts'] = json.dumps(autoencoder.serialize())
+        
         super().__init__(
             model=model,
             input_shapes=input_shapes,
@@ -83,6 +97,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             name=name,
             native_resolution=native_resolution,
             encoder=None,  # Don't use the default encoder from the parent class
+            wandb_config=wandb_config,
             **kwargs
         )
         
@@ -91,14 +106,6 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         
         # List of conditional inputs
         self.conditional_inputs = input_config.conditions
-        
-        # Cache for unconditional inputs
-        self.unconditional_cache = {}
-        
-        # Precompute unconditional inputs for efficiency
-        for cond_input in self.conditional_inputs:
-            self.unconditional_cache[cond_input.conditioning_data_key] = cond_input.get_unconditional()
-            
         # Determine if we're working with video or images
         self.is_video = self._is_video_data()
     
@@ -116,45 +123,20 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         model = self.model
         model_output_transform = self.model_output_transform
         loss_fn = self.loss_fn
-        unconditional_prob = self.unconditional_prob
-        num_unconditional = int(batch_size * unconditional_prob)
-        conditional_inputs = self.conditional_inputs
-        unconditional_cache = self.unconditional_cache
         distributed_training = self.distributed_training
         autoencoder = self.autoencoder
-        sample_data_key = self.input_config.sample_data_key
+        unconditional_prob = self.unconditional_prob
+        
+        input_config = self.input_config
+        sample_data_key = input_config.sample_data_key
         
         # JIT-optimized function for processing conditional inputs
         # @functools.partial(jax.jit, static_argnums=(2,))
-        def process_conditioning(batch, uncond_cache, num_uncond):
-            """Process conditioning inputs in a JIT-compatible way."""
-            results = []
-            
-            for cond_input in conditional_inputs:
-                # Apply encoder
-                cond_embeddings = cond_input(batch)
-                
-                # Handle classifier-free guidance with unconditional samples
-                if num_uncond > 0:
-                    # Get cached unconditional embedding
-                    uncond_embedding = uncond_cache[cond_input.encoder.key]
-                    
-                    # Ensure correct batch size via broadcasting
-                    uncond_embedding = jax.lax.broadcast_in_dim(
-                        uncond_embedding[:1],
-                        (num_uncond,) + uncond_embedding.shape[1:],
-                        (0,) + tuple(range(1, len(uncond_embedding.shape)))
-                    )
-                    
-                    # Concatenate unconditional and conditional embeddings
-                    cond_embeddings = jnp.concatenate(
-                        [uncond_embedding, cond_embeddings[num_uncond:]], 
-                        axis=0
-                    )
-                
-                results.append(cond_embeddings)
-                
-            return results
+        def process_conditioning(batch, uncond_mask):
+            return input_config.process_conditioning(
+                batch,
+                uncond_mask=uncond_mask,
+            )
 
         # Main training step function - optimized for JIT compilation and sharding
         def train_step(train_state: TrainState, rng_state: RandomMarkovState, batch, local_device_index):
@@ -174,8 +156,17 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                 local_rng_state, enc_key = local_rng_state.get_random_key()
                 data = autoencoder.encode(data, enc_key)
             
+            # Determine number of unconditional samples per mini batch randomly
+            local_rng_state, uncond_key = local_rng_state.get_random_key()
+            # Determine unconditional samples 
+            uncond_mask = jax.random.bernoulli(
+                uncond_key,
+                shape=(local_batch_size,),
+                p=unconditional_prob
+            )
+            
             # Process conditioning
-            all_conditional_inputs = process_conditioning(batch, unconditional_cache, num_unconditional)
+            all_conditional_inputs = process_conditioning(batch, uncond_mask)
             
             # Generate diffusion timesteps
             noise_level, local_rng_state = noise_schedule.generate_timesteps(local_batch_size, local_rng_state)
@@ -248,7 +239,8 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             )
             
         # Apply JIT compilation
-        return jax.jit(train_step, donate_argnums=(2))
+        train_step = jax.jit(train_step, donate_argnums=(2))
+        return train_step
 
     def _define_validation_step(self, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
         """
@@ -257,12 +249,12 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         # Setup for validation
         model = self.model
         autoencoder = self.autoencoder
+        input_config = self.input_config
         conditional_inputs = self.conditional_inputs
         is_video = self.is_video
         
         # Get necessary parameters
         image_size = self._get_image_size()
-        null_labels = self._get_null_labels()
         
         # Get sequence length only for video data
         sequence_length = self._get_sequence_length() if is_video else None
@@ -270,11 +262,9 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         # Initialize the sampler
         sampler = sampler_class(
             model=model,
-            params=None,
             noise_schedule=self.noise_schedule if sampling_noise_schedule is None else sampling_noise_schedule,
             model_output_transform=self.model_output_transform,
-            image_size=image_size,
-            null_labels_seq=null_labels,
+            input_config=input_config,
             autoencoder=autoencoder,
             guidance_scale=3.0,
         )
@@ -294,7 +284,8 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             # Generate samples - works for both images and videos
             return sampler.generate_samples(
                 params=val_state.ema_params,
-                batch_size=batch_size,
+                resolution=image_size,
+                num_samples=batch_size,
                 sequence_length=sequence_length,  # Will be None for images
                 diffusion_steps=diffusion_steps,
                 start_step=1000,
@@ -320,14 +311,6 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             
         sample_data_shape = self.input_config.sample_data_shape
         return sample_data_shape[1]  # Assuming [B,T,H,W,C] format
-        
-    def _get_null_labels(self):
-        """Helper to get unconditional inputs for classifier-free guidance."""
-        if self.conditional_inputs:
-            return self.conditional_inputs[0].get_unconditional()
-        
-        # Fallback if no conditional inputs are provided
-        return jnp.zeros((1, 1, 1), dtype=jnp.float16)
 
     def validation_loop(
         self,

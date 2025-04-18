@@ -10,11 +10,11 @@ from functools import partial
 
 class Unet(nn.Module):
     output_channels:int=3
-    emb_features:int=64*4,
-    feature_depths:list=[64, 128, 256, 512],
-    attention_configs:list=[{"heads":8}, {"heads":8}, {"heads":8}, {"heads":8}],
-    num_res_blocks:int=2,
-    num_middle_res_blocks:int=1,
+    emb_features:int=64*4
+    feature_depths:list=(64, 128, 256, 512)
+    attention_configs:list=({"heads":8}, {"heads":8}, {"heads":8}, {"heads":8})
+    num_res_blocks:int=2
+    num_middle_res_blocks:int=1
     activation:Callable = jax.nn.swish
     norm_groups:int=8
     dtype: Optional[Dtype] = None
