@@ -166,6 +166,8 @@ parser.add_argument('--clip_grads', type=float, default=0, help='Clip gradients 
 parser.add_argument('--add_residualblock_output', type=boolean_string, default=False, help='Add a residual block stage to the final output')
 # parser.add_argument('--kernel_init', type=None, default=1.0, help='Kernel initialization value')
 
+parser.add_argument('--max_checkpoints_to_keep', type=int, default=1, help='Max checkpoints to keep')
+
 parser.add_argument('--wandb_project', type=str, default='mlops-msml605-project', help='Wandb project name')
 parser.add_argument('--wandb_entity', type=str, default='umd-projects', help='Wandb entity name')
 
@@ -466,7 +468,8 @@ def main(args):
         autoencoder=autoencoder,
         use_dynamic_scale=args.use_dynamic_scale,
         encoder=text_encoder,
-        native_resolution=IMAGE_SIZE
+        native_resolution=IMAGE_SIZE,
+        max_checkpoints_to_keep=args.max_checkpoints_to_keep,
     )
     
     if trainer.distributed_training:
