@@ -13,11 +13,20 @@ from flaxdiff.models.common import kernel_init
 from flaxdiff.models.simple_unet import Unet
 from flaxdiff.models.simple_vit import UViT
 from flaxdiff.models.general import BCHWModelWrapper
-from flaxdiff.models.autoencoder import AutoEncoder
 from flaxdiff.models.autoencoder.diffusers import StableDiffusionVAE
 from flaxdiff.inputs import DiffusionInputConfig, ConditionalInputConfig
 from flaxdiff.utils import defaultTextEncodeModel
 from diffusers import FlaxUNet2DConditionModel
+import wandb
+from flaxdiff.models.simple_unet import Unet
+from flaxdiff.models.simple_vit import UViT
+from flaxdiff.models.general import BCHWModelWrapper
+from flaxdiff.models.autoencoder.diffusers import StableDiffusionVAE
+from flaxdiff.inputs import DiffusionInputConfig, ConditionalInputConfig
+from flaxdiff.utils import defaultTextEncodeModel
+
+from orbax.checkpoint import CheckpointManager, CheckpointManagerOptions, PyTreeCheckpointer
+import os
 
 import warnings
 
@@ -229,3 +238,83 @@ def parse_config(config, overrides=None):
     }
     
     return result
+
+def load_from_checkpoint(
+    checkpoint_dir: str,
+):
+    try:
+        checkpointer = PyTreeCheckpointer()
+        options = CheckpointManagerOptions(create=False)
+        # Convert checkpoint_dir to absolute path
+        checkpoint_dir = os.path.abspath(checkpoint_dir)
+        manager = CheckpointManager(checkpoint_dir, checkpointer, options)
+        ckpt = manager.restore(checkpoint_dir)
+        # Extract as above
+        state, best_state = None, None
+        if 'state' in ckpt:
+            state = ckpt['state']
+        if 'best_state' in ckpt:
+            best_state = ckpt['best_state']
+        print(f"Loaded checkpoint from local dir {checkpoint_dir}")
+        return state, best_state
+    except Exception as e:
+        print(f"Warning: Failed to load checkpoint from local dir: {e}")
+        return None, None
+    
+def load_from_wandb_run(
+    run,
+    project: str,
+    entity: str = None,
+):
+    """
+    Loads model from wandb model registry.
+    """
+    # Get the model version from wandb
+    states = None
+    config = None
+    try:
+        if isinstance(run, str):
+            run = get_wandb_run(run, project, entity)
+        # Search for model artifact
+        models = [i for i in run.logged_artifacts() if i.type == 'model']
+        if len(models) == 0:
+            raise ValueError(f"No model artifacts found in run {run.id}")
+        # Pick out any model artifact
+        highest_version = max([{'version':int(i.version[1:]), 'name': i.qualified_name} for i in models], key=lambda x: x['version'])
+        wandb_modelname = highest_version['name']
+        
+        print(f"Loading model from wandb: {wandb_modelname} out of versions {[i.version for i in models]}")
+        artifact = run.use_artifact(wandb.Api().artifact(wandb_modelname))
+        ckpt_dir = artifact.download()
+        print(f"Loaded model from wandb: {wandb_modelname} at path {ckpt_dir}")
+        # Load the model from the checkpoint directory
+        states = load_from_checkpoint(ckpt_dir)
+        config = run.config
+    except Exception as e:
+        print(f"Warning: Failed to load model from wandb: {e}")
+    return states, config
+
+def load_from_wandb_registry(
+    modelname: str,
+    project: str,
+    entity: str = None,
+    version: str = 'latest',
+    registry: str = 'wandb-registry-model',
+):
+    """
+    Loads model from wandb model registry.
+    """
+    # Get the model version from wandb
+    states = None
+    config = None
+    try:
+        artifact = wandb.Api().artifact(f"{registry}/{modelname}:{version}")
+        ckpt_dir = artifact.download()
+        print(f"Loaded model from wandb registry: {modelname} at path {ckpt_dir}")
+        # Load the model from the checkpoint directory
+        states = load_from_checkpoint(ckpt_dir)
+        run = artifact.logged_by()
+        config = run.config
+    except Exception as e:
+        print(f"Warning: Failed to load model from wandb: {e}")
+    return states, config

@@ -89,7 +89,6 @@ class SimpleTrainer:
                  train_state: SimpleTrainState = None,
                  name: str = "Simple",
                  load_from_checkpoint: str = None,
-                 checkpoint_suffix: str = "",
                  loss_fn=optax.l2_loss,
                  param_transforms: Callable = None,
                  wandb_config: Dict[str, Any] = None,
@@ -129,13 +128,18 @@ class SimpleTrainer:
             self.wandb.define_metric("train/avg_loss", step_metric="train/epoch")
             self.wandb.define_metric("train/best_loss", step_metric="train/epoch")
             
+            if self.wandb.sweep_id:
+                api = wandb.Api()
+                self.wandb_sweep = api.sweep(f"{self.wandb.entity}/{self.wandb.project}/{self.wandb.sweep_id}")
+                print(f"Running sweep {self.wandb_sweep.id} with id {self.wandb.sweep_id}")
+            
         # checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         async_checkpointer = orbax.checkpoint.AsyncCheckpointer(orbax.checkpoint.PyTreeCheckpointHandler(), timeout_secs=60)
 
         options = orbax.checkpoint.CheckpointManagerOptions(
             max_to_keep=max_checkpoints_to_keep, create=True)
         self.checkpointer = orbax.checkpoint.CheckpointManager(
-            self.checkpoint_path() + checkpoint_suffix, async_checkpointer, options)
+            self.checkpoint_path(), async_checkpointer, options)
 
         if load_from_checkpoint is not None:
             latest_epoch, latest_step, old_state, old_best_state, rngstate = self.load(load_from_checkpoint, checkpoint_step)

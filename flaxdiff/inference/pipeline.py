@@ -1,17 +1,11 @@
 import jax
-import jax.numpy as jnp
-import flax
 import flax.linen as nn
-import json
-import wandb
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, Union, Callable, List, Tuple, Type
+from typing import Optional, Dict, Any, Union, List, Tuple, Type
 
 from flaxdiff.trainer import (
-    SimpleTrainer,
     SimpleTrainState,
     TrainState,
-    DiffusionTrainer,
 )
 from flaxdiff.samplers import (
     DiffusionSampler,
@@ -22,19 +16,11 @@ from flaxdiff.schedulers import (
 from flaxdiff.predictors import (
     DiffusionPredictionTransform,
 )
-from flaxdiff.models.common import kernel_init
-from flaxdiff.models.simple_unet import Unet
-from flaxdiff.models.simple_vit import UViT
-from flaxdiff.models.general import BCHWModelWrapper
 from flaxdiff.models.autoencoder import AutoEncoder
-from flaxdiff.models.autoencoder.diffusers import StableDiffusionVAE
-from flaxdiff.inputs import DiffusionInputConfig, ConditionalInputConfig
+from flaxdiff.inputs import DiffusionInputConfig
 from flaxdiff.utils import defaultTextEncodeModel, RandomMarkovState
 from flaxdiff.samplers.euler import EulerAncestralSampler
-
-from orbax.checkpoint import CheckpointManager, CheckpointManagerOptions, PyTreeCheckpointer
-import os
-from .utils import get_wandb_run, parse_config
+from .utils import parse_config, load_from_wandb_run, load_from_wandb_registry
 
 @dataclass
 class InferencePipeline:
@@ -50,64 +36,6 @@ class InferencePipeline:
         wandb_entity: str,
     ):
         raise NotImplementedError("InferencePipeline does not support from_wandb.")    
-    
-def get_latest_checkpoint(checkpoint_path):
-    checkpoint_files = os.listdir(checkpoint_path)
-    # Sort files by step number
-    checkpoint_files = sorted([int(i) for i in checkpoint_files])
-    latest_step = checkpoint_files[-1]
-    latest_checkpoint = os.path.join(checkpoint_path, str(latest_step))
-    return latest_checkpoint
-
-def load_from_checkpoint(
-    checkpoint_dir: str,
-):
-    try:
-        checkpointer = PyTreeCheckpointer()
-        options = CheckpointManagerOptions(create=False)
-        # Convert checkpoint_dir to absolute path
-        checkpoint_dir = os.path.abspath(checkpoint_dir)
-        manager = CheckpointManager(checkpoint_dir, checkpointer, options)
-        ckpt = manager.restore(checkpoint_dir)
-        # Extract as above
-        state, best_state = None, None
-        if 'state' in ckpt:
-            state = ckpt['state']
-        if 'best_state' in ckpt:
-            best_state = ckpt['best_state']
-        print(f"Loaded checkpoint from local dir {checkpoint_dir}")
-        return state, best_state
-    except Exception as e:
-        print(f"Warning: Failed to load checkpoint from local dir: {e}")
-        return None, None
-
-def load_from_wandb(
-    wandb_project: str,
-    wandb_modelname: str,
-    wandb_entity: str = None,
-    version: str = 'latest',
-    wandb_run_id: str = None,
-):
-    """
-    Loads model from wandb model registry.
-    """
-    # Get the model version from wandb
-    try:
-        run = wandb.init(
-            id=wandb_run_id,
-            project=wandb_project,
-            entity=wandb_entity,
-            resume='allow'
-        )
-        print(f"Loading model from wandb: {wandb_modelname}:{version}")
-        ckpt_dir = run.use_model(f"{wandb_modelname}:{version}")
-        print(f"Loaded model from wandb: {wandb_modelname}:{version} at path {ckpt_dir}")
-        # Load the model from the checkpoint directory
-        states = load_from_checkpoint(ckpt_dir)
-    except Exception as e:
-        print(f"Warning: Failed to load model from wandb: {e}")
-        states = None, None
-    return states
 
 @dataclass
 class DiffusionInferencePipeline(InferencePipeline):
@@ -127,22 +55,18 @@ class DiffusionInferencePipeline(InferencePipeline):
     config: Dict[str, Any] = field(default_factory=dict)
     
     @classmethod
-    def from_wandb(
+    def from_wandb_run(
         cls,
         wandb_run: str,
-        wandb_project: str = "mlops-msml605-project",
-        wandb_entity: str = "umd-projects",
-        wandb_modelname: str = None,
-        checkpoint_step: int = None,
-        checkpoint_base_path: str = None,
-        config_overrides: Dict = None,
+        project: str,
+        entity: str,
     ):
         """Create an inference pipeline from a wandb run.
         
         Args:
             wandb_run: Run ID or display name
-            wandb_project: Wandb project name
-            wandb_entity: Wandb entity name
+            project: Wandb project name
+            entity: Wandb entity name
             wandb_modelname: Model name in wandb registry (if None, loads from checkpoint)
             checkpoint_step: Specific checkpoint step to load (if None, loads latest)
             config_overrides: Optional dictionary to override config values
@@ -151,39 +75,62 @@ class DiffusionInferencePipeline(InferencePipeline):
         Returns:
             DiffusionInferencePipeline instance
         """
-        # Get wandb run
-        run = get_wandb_run(wandb_run, wandb_project, wandb_entity)
-        if run is None:
-            raise ValueError(f"Run {wandb_run} not found in project {wandb_project}.")
-        
-        # Load run configuration
-        run_config = run.config
-        
-        # Parse the configuration
-        parsed_config = parse_config(run_config, config_overrides)
-        
-        # Load model
-        if checkpoint_base_path is not None and os.path.exists(checkpoint_base_path):
-            print(f"Loading model from wandb run {wandb_run} with config: {parsed_config}")
-            if checkpoint_step is None:
-                checkpoint_dir = get_latest_checkpoint(checkpoint_base_path)
-            else:
-                checkpoint_dir = os.path.join(checkpoint_base_path, checkpoint_step)
-                
-            state, best_state = load_from_checkpoint(checkpoint_dir)
-        else:
-            if wandb_modelname is None:
-                raise ValueError("No wandb_modelname provided and checkpoint_base_path is None.")
-            print(f"Loading model from wandb model registry {wandb_modelname}")
-            state, best_state = load_from_wandb(
-                wandb_project=wandb_project,
-                wandb_modelname=wandb_modelname,
-                wandb_entity=wandb_entity,
-                wandb_run_id=run.id,
-            )
+        states, config = load_from_wandb_run(
+            wandb_run,
+            project=project,
+            entity=entity,
+        )
             
-        if state is None:
+        if states is None:
             raise ValueError("Failed to load model parameters from wandb.")
+        
+        state, best_state = states
+        parsed_config = parse_config(config)
+        
+        # Create the pipeline
+        pipeline = cls.create(
+            config=parsed_config,
+            state=state,
+            best_state=best_state,
+            rngstate=RandomMarkovState(jax.random.PRNGKey(42)),
+        )
+        return pipeline
+    
+    @classmethod
+    def from_wandb_registry(
+        cls,
+        modelname: str,
+        project: str,
+        entity: str = None,
+        version: str = 'latest',
+        registry: str = 'wandb-registry-model',
+    ):
+        """Create an inference pipeline from a wandb model registry.
+        
+        Args:
+            modelname: Model name in wandb registry
+            project: Wandb project name
+            entity: Wandb entity name
+            version: Version of the model to load (default is 'latest')
+            registry: Registry name (default is 'wandb-registry-model')
+            
+        Returns:
+            DiffusionInferencePipeline instance
+        """
+        states, config = load_from_wandb_registry(
+            modelname=modelname,
+            project=project,
+            entity=entity,
+            version=version,
+            registry=registry,
+        )
+        
+        if states is None:
+            raise ValueError("Failed to load model parameters from wandb.")
+        
+        state, best_state = states
+        parsed_config = parse_config(config)
+        
         # Create the pipeline
         pipeline = cls.create(
             config=parsed_config,

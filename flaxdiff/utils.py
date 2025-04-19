@@ -5,6 +5,7 @@ import flax.linen as nn
 from typing import Any
 from functools import partial
 import numpy as np
+import os
 from jax.sharding import Mesh, PartitionSpec as P
 from flaxdiff.inputs import TextEncoder, CLIPTextEncoder
 
@@ -79,6 +80,14 @@ def serialize_model(model: nn.Module):
                     model_dict[k] = str(v).split('.')[-1]
     map(model_dict)
     return model_dict
+
+def get_latest_checkpoint(checkpoint_path):
+    checkpoint_files = os.listdir(checkpoint_path)
+    # Sort files by step number
+    checkpoint_files = sorted([int(i) for i in checkpoint_files])
+    latest_step = checkpoint_files[-1]
+    latest_checkpoint = os.path.join(checkpoint_path, str(latest_step))
+    return latest_checkpoint
 
 class MarkovState(struct.PyTreeNode):
     pass

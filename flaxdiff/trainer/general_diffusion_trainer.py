@@ -15,7 +15,7 @@ from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransfor
 from ..samplers.common import DiffusionSampler
 from ..samplers.ddim import DDIMSampler
 
-from flaxdiff.utils import RandomMarkovState, serialize_model
+from flaxdiff.utils import RandomMarkovState, serialize_model, get_latest_checkpoint
 from flaxdiff.inputs import ConditioningEncoder, ConditionalInputConfig, DiffusionInputConfig
 
 from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics
@@ -25,6 +25,82 @@ from flax.training import dynamic_scale as dynamic_scale_lib
 
 # Reuse the TrainState from the DiffusionTrainer
 from flaxdiff.trainer.diffusion_trainer import TrainState, DiffusionTrainer
+
+def generate_modelname(
+    dataset_name: str,
+    noise_schedule_name: str,
+    architecture_name: str,
+    model: nn.Module,
+    input_config: DiffusionInputConfig,
+    autoencoder: AutoEncoder = None,
+    frames_per_sample: int = None,
+) -> str:
+    """
+    Generate a model name based on the configuration.
+    
+    Args:
+        config: Configuration dictionary.
+        
+    Returns:
+        A string representing the model name.
+    """
+    import hashlib
+    import json
+    
+    # Extract key components for the name
+    
+    model_name = f"diffusion-{dataset_name}-res{input_config.sample_data_shape[-2]}"
+    
+    # model_name = f"diffusion-{dataset_name}-res{input_config.sample_data_shape[-2]}-{noise_schedule_name}-{architecture_name}"
+    
+    # if autoencoder is not None:
+    #     model_name += f"-vae"
+        
+    # if frames_per_sample is not None:
+    #     model_name += f"-frames_{frames_per_sample}"
+    
+    # model_name += f"-{'.'.join([cond.encoder.key for cond in input_config.conditions])}"
+    
+    # # Create a sorted representation of model config for consistent hashing
+    # def sort_dict_recursively(d):
+    #     if isinstance(d, dict):
+    #         return {k: sort_dict_recursively(d[k]) for k in sorted(d.keys())}
+    #     elif isinstance(d, list):
+    #         return [sort_dict_recursively(v) for v in d]
+    #     else:
+    #         return d
+    
+    # # Extract model config and sort it
+    # model_config = serialize_model(model)
+    # sorted_model_config = sort_dict_recursively(model_config)
+    
+    # # Convert to JSON string with sorted keys for consistent hash
+    # try:
+    #     config_json = json.dumps(sorted_model_config)
+    # except TypeError:
+    #     # Handle non-serializable objects
+    #     def make_serializable(obj):
+    #         if isinstance(obj, dict):
+    #             return {k: make_serializable(v) for k, v in obj.items()}
+    #         elif isinstance(obj, list):
+    #             return [make_serializable(v) for v in obj]
+    #         else:
+    #             try:
+    #                 # Test if object is JSON serializable
+    #                 json.dumps(obj)
+    #                 return obj
+    #             except TypeError:
+    #                 return str(obj)
+        
+    #     serializable_config = make_serializable(sorted_model_config)
+    #     config_json = json.dumps(serializable_config)
+    
+    # # Generate a hash of the configuration
+    # config_hash = hashlib.md5(config_json.encode('utf-8')).hexdigest()[:8]
+    
+    # # Construct the model name
+    # model_name = f"{model_name}-{config_hash}"
+    return model_name
 
 class GeneralDiffusionTrainer(DiffusionTrainer):
     """
@@ -84,6 +160,20 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             if 'autoencoder' not in wandb_config['config'] and autoencoder is not None:
                 wandb_config['config']['autoencoder'] = autoencoder.name
                 wandb_config['config']['autoencoder_opts'] = json.dumps(autoencoder.serialize())
+                
+            # Generate a model name based on the configuration
+            modelname = generate_modelname(
+                dataset_name=wandb_config['config']['arguments']['dataset'],
+                noise_schedule_name=wandb_config['config']['arguments']['noise_schedule'],
+                architecture_name=wandb_config['config']['arguments']['architecture'],
+                model=model,
+                input_config=input_config,
+                autoencoder=autoencoder,
+                frames_per_sample=frames_per_sample,
+            )
+            print("Model name:", modelname)
+            self.modelname = modelname
+            wandb_config['config']['modelname'] = modelname
         
         super().__init__(
             model=model,
@@ -389,3 +479,88 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                     caption=f"Sample {i} at step {current_step}"
                 )
             }, step=current_step)
+            
+    def push_to_registry(
+        self,
+        registry_name: str = 'wandb-registry-model',
+    ):
+        """
+        Push the model to wandb registry.
+        Args:
+            registry_name: Name of the model registry.
+        """
+        if self.wandb is None:
+            raise ValueError("Wandb is not initialized. Cannot push to registry.")
+        
+        latest_checkpoint_path = get_latest_checkpoint(self.checkpoint_path())
+        logged_artifact = self.wandb.log_artifact(
+            artifact_or_path=latest_checkpoint_path,
+            name=self.modelname,
+            type="model",
+        )
+        
+        target_path = f"{registry_name}/{self.modelname}"
+        
+        self.wandb.link_artifact(
+            artifact=logged_artifact,
+            target_path=target_path,
+        )
+        print(f"Model pushed to registry at {target_path}")
+        return logged_artifact
+    
+    def __get_best_sweep_runs__(
+        self,
+        metric: str = "train/best_loss",
+        top_k: int = 5,
+    ):
+        """
+        Get the best runs from a wandb sweep.
+        Args:
+            metric: Metric to sort by.
+            top_k: Number of top runs to return.
+        """
+        if self.wandb is None:
+            raise ValueError("Wandb is not initialized. Cannot get best runs.")
+        
+        if not hasattr(self, "wandb_sweep"):
+            raise ValueError("Wandb sweep is not initialized. Cannot get best runs.")
+        
+        # Get the sweep runs
+        runs = sorted(self.wandb_sweep.runs, key=lambda x: x.summary.get(metric, float('inf')))
+        best_runs = runs[:top_k]
+        lower_bound = best_runs[-1].summary.get(metric, float('inf'))
+        upper_bound = best_runs[0].summary.get(metric, float('inf'))
+        print(f"Best runs from sweep {self.wandb_sweep.id}:")
+        return best_runs, (min(lower_bound, upper_bound), max(lower_bound, upper_bound))
+    
+    def __compare_run_against_best__(
+        self,
+        top_k: int = 2,
+        metric: str = "train/best_loss",
+    ):
+        """
+        Compare the current run against the best runs from a wandb sweep.
+        Args:
+            top_k: Number of top runs to compare against.
+        """
+        if self.wandb is None:
+            raise ValueError("Wandb is not initialized. Cannot compare runs.")
+        
+        if not hasattr(self, "wandb_sweep"):
+            raise ValueError("Wandb sweep is not initialized. Cannot compare runs.")
+        
+        current_run_metric = self.wandb.summary.get(metric, float('inf'))
+        
+        # Get the best runs
+        best_runs, bounds = self.__get_best_sweep_runs__(metric=metric, top_k=top_k)
+        
+        # Check if current run is within the bounds of the best runs
+        # if current_run_metric < bounds[1]:
+        for run in best_runs:
+            if run.id == self.wandb.id:
+                print(f"Current run {self.wandb.id} is one of the best runs.")
+                
+                # If so, push to registry
+                self.push_to_registry()
+                break
+        
