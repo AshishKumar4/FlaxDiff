@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import numpy as np
 from typing import Tuple, Optional, Union, List
-from video_reader import PyVideoReader
 from .audio_utils import read_audio
 
 def get_video_fps(video_path: str):
@@ -113,6 +112,7 @@ def read_av_improved(
     Returns:
         Tuple of (audio_data, video_frames) where video_frames is a numpy array.
     """
+    from video_reader import PyVideoReader
     # Calculate time information for audio extraction
     start_time = start / fps if start > 0 else 0
     duration = None
