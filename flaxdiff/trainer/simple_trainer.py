@@ -429,8 +429,8 @@ class SimpleTrainer:
             
         for i in range(train_steps_per_epoch):
             batch = next(train_ds)
-            if i == 0:
-                print(f"First batch loaded at step {current_step}")
+            # if i == 0:
+            #     print(f"First batch loaded at step {current_step}")
                 
             if self.distributed_training and global_device_count > 1:
             #     # Convert the local device batches to a unified global jax.Array 
