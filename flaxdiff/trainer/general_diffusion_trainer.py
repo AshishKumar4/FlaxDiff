@@ -484,7 +484,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
     def push_to_registry(
         self,
         registry_name: str = 'wandb-registry-model',
-        aliases: List[str] = ['latest'],
+        aliases: List[str] = [],
     ):
         """
         Push the model to wandb registry.
@@ -504,7 +504,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             artifact_or_path=latest_checkpoint_path,
             name=modelname,
             type="model",
-            aliases=aliases,
+            aliases=['latest'] + aliases,
         )
         
         target_path = f"{registry_name}/{modelname}"
@@ -512,6 +512,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         self.wandb.link_artifact(
             artifact=logged_artifact,
             target_path=target_path,
+            aliases=aliases,
         )
         print(f"Model pushed to registry at {target_path}")
         return logged_artifact
@@ -582,7 +583,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                 is_good, is_best = self.__compare_run_against_best__(top_k=5, metric="train/best_loss")
                 if is_good:
                     # Push to registry with appropriate aliases
-                    aliases = ["latest"]
+                    aliases = []
                     if is_best:
                         aliases.append("best")
                     self.push_to_registry(aliases=aliases)
