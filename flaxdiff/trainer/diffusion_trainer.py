@@ -22,7 +22,7 @@ from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics
 
 from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
 from flax.training import dynamic_scale as dynamic_scale_lib
-from flaxdiff.utils import TextEncoder, ConditioningEncoder
+from flaxdiff.inputs import TextEncoder, ConditioningEncoder
 
 class TrainState(SimpleTrainState):
     rngs: jax.random.PRNGKey
@@ -42,6 +42,7 @@ class DiffusionTrainer(SimpleTrainer):
     noise_schedule: NoiseScheduler
     model_output_transform: DiffusionPredictionTransform
     ema_decay: float = 0.999
+    native_resolution: int = None
 
     def __init__(self,
                  model: nn.Module,
@@ -54,6 +55,7 @@ class DiffusionTrainer(SimpleTrainer):
                  model_output_transform: DiffusionPredictionTransform = EpsilonPredictionTransform(),
                  autoencoder: AutoEncoder = None,
                  encoder: ConditioningEncoder = None,
+                 native_resolution: int = None,
                  **kwargs
                  ):
         super().__init__(
@@ -67,6 +69,20 @@ class DiffusionTrainer(SimpleTrainer):
         self.noise_schedule = noise_schedule
         self.model_output_transform = model_output_transform
         self.unconditional_prob = unconditional_prob
+        
+        if native_resolution is None:
+            if 'image' in input_shapes:
+                native_resolution = input_shapes['image'][1]
+            elif 'x' in input_shapes:
+                native_resolution = input_shapes['x'][1]
+            elif 'sample' in input_shapes:
+                native_resolution = input_shapes['sample'][1]
+            else:
+                raise ValueError("No image input shape found in input shapes")
+            if autoencoder is not None:
+                native_resolution = native_resolution * 8
+                
+        self.native_resolution = native_resolution
         
         self.autoencoder = autoencoder
         self.encoder = encoder
@@ -118,9 +134,6 @@ class DiffusionTrainer(SimpleTrainer):
         model_output_transform = self.model_output_transform
         loss_fn = self.loss_fn
         unconditional_prob = self.unconditional_prob
-
-        # Determine the number of unconditional samples
-        num_unconditional = int(batch_size * unconditional_prob)
         
         null_labels_full = self.encoder([""])
         null_labels_seq = jnp.array(null_labels_full[0], dtype=jnp.float16)
@@ -159,12 +172,19 @@ class DiffusionTrainer(SimpleTrainer):
                 local_rng_state, rngs = local_rng_state.get_random_key()
                 images = autoencoder.encode(images, rngs)
 
-            label_seq = conditioning_encoder.encode_from_tokens(batch)
+            label_seq = conditioning_encoder.encode_from_tokens(batch['text'])
 
             # Generate random probabilities to decide how much of this batch will be unconditional
+            local_rng_state, uncond_key = local_rng_state.get_random_key()
+            # Efficient way to determine unconditional samples for JIT compatibility
+            uncond_mask = jax.random.bernoulli(
+                uncond_key,
+                shape=(local_batch_size,),
+                p=unconditional_prob
+            )
+            num_unconditional = jnp.sum(uncond_mask).astype(jnp.int32)
 
-            label_seq = jnp.concat(
-                [null_labels_seq[:num_unconditional], label_seq[num_unconditional:]], axis=0)
+            label_seq = jnp.concatenate([null_labels_seq[:num_unconditional], label_seq[num_unconditional:]], axis=0)
 
             noise_level, local_rng_state = noise_schedule.generate_timesteps(local_batch_size, local_rng_state)
             
@@ -200,21 +220,6 @@ class DiffusionTrainer(SimpleTrainer):
                 loss, grads = grad_fn(train_state.params)
                 if distributed_training:
                     grads = jax.lax.pmean(grads, "data")
-                    
-            # # check gradients for NaN/Inf
-            # has_nan_or_inf = jax.tree_util.tree_reduce(
-            #     lambda acc, x: jnp.logical_or(acc, jnp.logical_or(jnp.isnan(x).any(), jnp.isinf(x).any())),
-            #     grads,
-            #     initializer=False
-            # )
-            
-            # # Only apply gradients if they're valid
-            # new_state = jax.lax.cond(
-            #     has_nan_or_inf,
-            #     lambda _: train_state,  # Skip gradient update
-            #     lambda _: train_state.apply_gradients(grads=grads),
-            #     operand=None
-            # )
     
             new_state = train_state.apply_gradients(grads=grads)
             
@@ -251,7 +256,7 @@ class DiffusionTrainer(SimpleTrainer):
             
         return train_step
 
-    def _define_vaidation_step(self, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
+    def _define_validation_step(self, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
         model = self.model
         encoder = self.encoder
         autoencoder = self.autoencoder
@@ -260,7 +265,9 @@ class DiffusionTrainer(SimpleTrainer):
         null_labels_full = null_labels_full.astype(jnp.float16)
         # null_labels_seq = jnp.array(null_labels_full[0], dtype=jnp.float16)
         
-        if 'image' in self.input_shapes:
+        if self.native_resolution is not None:
+            image_size = self.native_resolution
+        elif 'image' in self.input_shapes:
             image_size = self.input_shapes['image'][1]
         elif 'x' in self.input_shapes:
             image_size = self.input_shapes['x'][1]
@@ -271,10 +278,8 @@ class DiffusionTrainer(SimpleTrainer):
         
         sampler = sampler_class(
             model=model,
-            params=None,
             noise_schedule=self.noise_schedule if sampling_noise_schedule is None else sampling_noise_schedule,
             model_output_transform=self.model_output_transform,
-            image_size=image_size,
             null_labels_seq=null_labels_full,
             autoencoder=autoencoder,
             guidance_scale=3.0,
@@ -290,7 +295,8 @@ class DiffusionTrainer(SimpleTrainer):
             labels_seq = jnp.array(labels_seq, dtype=jnp.float16)
             samples = sampler.generate_images(
                 params=val_state.ema_params,
-                num_images=len(labels_seq),
+                resolution=image_size,
+                num_samples=len(labels_seq),
                 diffusion_steps=diffusion_steps,
                 start_step=1000,
                 end_step=0,

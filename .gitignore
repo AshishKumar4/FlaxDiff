@@ -20,3 +20,4 @@ gcsfuse.yml
 *.tsv
 *.parquet
 *.arrow
+artifacts

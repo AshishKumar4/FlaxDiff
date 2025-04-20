@@ -22,7 +22,9 @@ class StableDiffusionVAE(AutoEncoder):
             dtype=dtype,
         )
         
-        # vae = pipeline.vae
+        self.modelname = modelname
+        self.revision = revision
+        self.dtype = dtype
         
         enc = FlaxEncoder(
             in_channels=vae.config.in_channels,
@@ -63,29 +65,90 @@ class StableDiffusionVAE(AutoEncoder):
             dtype=vae.dtype,
         )
         
-        self.enc = enc
-        self.dec = dec
-        self.post_quant_conv = post_quant_conv
-        self.quant_conv = quant_conv
-        self.params = params
-        self.scaling_factor = vae.scaling_factor
+        scaling_factor = vae.scaling_factor
+        print(f"Scaling factor: {scaling_factor}")
         
-    def encode(self, images, rngkey: jax.random.PRNGKey = None):
-        latents = self.enc.apply({"params": self.params["vae"]['encoder']}, images, deterministic=True)
-        latents = self.quant_conv.apply({"params": self.params["vae"]['quant_conv']}, latents)
-        if rngkey is not None:
-            mean, log_std = jnp.split(latents, 2, axis=-1)
-            log_std = jnp.clip(log_std, -30, 20)
-            std = jnp.exp(0.5 * log_std)
-            latents = mean + std * jax.random.normal(rngkey, mean.shape, dtype=mean.dtype)
-            # print("Sampled")
-        else:
-            # return the mean
-            latents, _ = jnp.split(latents, 2, axis=-1)
-        latents *= self.scaling_factor
-        return latents
+        def encode_single_frame(images, rngkey: jax.random.PRNGKey = None):
+            latents = enc.apply({"params": params['encoder']}, images, deterministic=True)
+            latents = quant_conv.apply({"params": params['quant_conv']}, latents)
+            if rngkey is not None:
+                mean, log_std = jnp.split(latents, 2, axis=-1)
+                log_std = jnp.clip(log_std, -30, 20)
+                std = jnp.exp(0.5 * log_std)
+                latents = mean + std * jax.random.normal(rngkey, mean.shape, dtype=mean.dtype)
+            else:
+                latents, _ = jnp.split(latents, 2, axis=-1)
+            latents *= scaling_factor
+            return latents
+        
+        def decode_single_frame(latents):
+            latents = (1.0 / scaling_factor) * latents
+            latents = post_quant_conv.apply({"params": params['post_quant_conv']}, latents)
+            return dec.apply({"params": params['decoder']}, latents)
+        
+        self.encode_single_frame = jax.jit(encode_single_frame)
+        self.decode_single_frame = jax.jit(decode_single_frame)
+        
+        # Calculate downscale factor by passing a dummy input through the encoder
+        print("Calculating downscale factor...")
+        dummy_input = jnp.ones((1, 128, 128, 3), dtype=dtype)
+        dummy_latents = self.encode_single_frame(dummy_input)
+        _, h, w, c = dummy_latents.shape
+        _, H, W, C = dummy_input.shape
+        self.__downscale_factor__ = H // h
+        self.__latent_channels__ = c
+        print(f"Downscale factor: {self.__downscale_factor__}")
+        print(f"Latent channels: {self.__latent_channels__}")
+
+    def __encode__(self, images, key: jax.random.PRNGKey = None, **kwargs):
+        """Encode a batch of images to latent representations.
+        
+        Implements the abstract method from the parent class.
+        
+        Args:
+            images: Image tensor of shape [B, H, W, C]
+            key: Optional random key for stochastic encoding
+            **kwargs: Additional arguments (unused)
+            
+        Returns:
+            Latent representations of shape [B, h, w, c]
+        """
+        return self.encode_single_frame(images, key)
     
-    def decode(self, latents):
-        latents = (1.0 / self.scaling_factor) * latents
-        latents = self.post_quant_conv.apply({"params": self.params["vae"]['post_quant_conv']}, latents)
-        return self.dec.apply({"params": self.params["vae"]['decoder']}, latents)
+    def __decode__(self, latents, **kwargs):
+        """Decode latent representations to images.
+        
+        Implements the abstract method from the parent class.
+        
+        Args:
+            latents: Latent tensor of shape [B, h, w, c]
+            **kwargs: Additional arguments (unused)
+            
+        Returns:
+            Decoded images of shape [B, H, W, C]
+        """
+        return self.decode_single_frame(latents)
+
+    @property
+    def downscale_factor(self) -> int:
+        """Returns the downscale factor for the encoder."""
+        return self.__downscale_factor__
+    
+    @property
+    def latent_channels(self) -> int:
+        """Returns the number of channels in the latent space."""
+        return self.__latent_channels__
+    
+    @property
+    def name(self) -> str:
+        """Get the name of the autoencoder model."""
+        return "stable_diffusion"
+    
+    def serialize(self):
+        """Serialize the model to a dictionary format."""
+        return {
+            "modelname": self.modelname,
+            "revision": self.revision,
+            "dtype": str(self.dtype),
+        }
+    
