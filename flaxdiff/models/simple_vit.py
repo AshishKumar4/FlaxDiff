@@ -51,7 +51,7 @@ class PositionalEncoding(nn.Module):
 class UViT(nn.Module):
     output_channels:int=3
     patch_size: int = 16
-    emb_features:int=768,
+    emb_features:int=768
     num_layers: int = 12
     num_heads: int = 12
     dropout_rate: float = 0.1
