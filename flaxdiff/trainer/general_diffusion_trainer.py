@@ -484,11 +484,13 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
     def push_to_registry(
         self,
         registry_name: str = 'wandb-registry-model',
+        aliases: List[str] = ['latest'],
     ):
         """
         Push the model to wandb registry.
         Args:
             registry_name: Name of the model registry.
+            aliases: List of aliases for the model.
         """
         if self.wandb is None:
             raise ValueError("Wandb is not initialized. Cannot push to registry.")
@@ -502,6 +504,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             artifact_or_path=latest_checkpoint_path,
             name=modelname,
             type="model",
+            aliases=aliases,
         )
         
         target_path = f"{registry_name}/{modelname}"
@@ -541,6 +544,15 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         return best_runs, (min(lower_bound, upper_bound), max(lower_bound, upper_bound))
     
     def __compare_run_against_best__(self, top_k=2, metric="train/best_loss"):
+        """
+        Compare the current run against the best runs from the sweep.
+        Args:
+            top_k: Number of top runs to consider.
+            metric: Metric to compare against.
+        Returns:
+            is_good: Whether the current run is among the best.
+            is_best: Whether the current run is the best.
+        """
         # Get best runs
         best_runs, bounds = self.__get_best_sweep_runs__(metric=metric, top_k=top_k)
         
@@ -548,20 +560,18 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         is_lower_better = "loss" in metric.lower()
         
         # Check if current run is one of the best
-        current_run_metric = self.wandb.summary.get(metric, float('inf') if is_lower_better else float('-inf'))
-        
-        # Direct check if current run is in best runs
-        for run in best_runs:
-            if run.id == self.wandb.id:
-                print(f"Current run {self.wandb.id} is one of the best runs.")
-                return True
+        if metric == "train/best_loss":
+            current_run_metric = self.best_loss
+        else:
+            current_run_metric = self.wandb.summary.get(metric, float('inf') if is_lower_better else float('-inf'))
                 
-        # Backup check based on metric value
+        # Check based on bounds
         if (is_lower_better and current_run_metric < bounds[1]) or (not is_lower_better and current_run_metric > bounds[0]):
             print(f"Current run {self.wandb.id} meets performance criteria.")
-            return True
+            is_best = (is_lower_better and current_run_metric < bounds[0]) or (not is_lower_better and current_run_metric > bounds[1])
+            return True, is_best
             
-        return False
+        return False, False
             
     def save(self, epoch=0, step=0, state=None, rngstate=None):
         super().save(epoch=epoch, step=step, state=state, rngstate=rngstate)
@@ -569,9 +579,14 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         if self.wandb is not None and hasattr(self, "wandb_sweep"):
             checkpoint = get_latest_checkpoint(self.checkpoint_path())
             try:
-                if self.__compare_run_against_best__(top_k=5, metric="train/best_loss"):
-                    self.push_to_registry()
-                    print("Model pushed to registry successfully")
+                is_good, is_best = self.__compare_run_against_best__(top_k=5, metric="train/best_loss")
+                if is_good:
+                    # Push to registry with appropriate aliases
+                    aliases = ["latest"]
+                    if is_best:
+                        aliases.append("best")
+                    self.push_to_registry(aliases=aliases)
+                    print("Model pushed to registry successfully with aliases:", aliases)
                 else:
                     print("Current run is not one of the best runs. Not saving model.")
                 
