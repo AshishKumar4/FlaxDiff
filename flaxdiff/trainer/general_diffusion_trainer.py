@@ -25,6 +25,7 @@ from flax.training import dynamic_scale as dynamic_scale_lib
 
 # Reuse the TrainState from the DiffusionTrainer
 from flaxdiff.trainer.diffusion_trainer import TrainState, DiffusionTrainer
+import shutil
 
 def generate_modelname(
     dataset_name: str,
@@ -492,14 +493,18 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         if self.wandb is None:
             raise ValueError("Wandb is not initialized. Cannot push to registry.")
         
+        modelname = self.modelname
+        if hasattr(self, "wandb_sweep"):
+            modelname = f"{modelname}-sweep-{self.wandb_sweep.id}"
+        
         latest_checkpoint_path = get_latest_checkpoint(self.checkpoint_path())
         logged_artifact = self.wandb.log_artifact(
             artifact_or_path=latest_checkpoint_path,
-            name=self.modelname,
+            name=modelname,
             type="model",
         )
         
-        target_path = f"{registry_name}/{self.modelname}"
+        target_path = f"{registry_name}/{modelname}"
         
         self.wandb.link_artifact(
             artifact=logged_artifact,
@@ -531,36 +536,48 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         lower_bound = best_runs[-1].summary.get(metric, float('inf'))
         upper_bound = best_runs[0].summary.get(metric, float('inf'))
         print(f"Best runs from sweep {self.wandb_sweep.id}:")
+        for run in best_runs:
+            print(f"\t\tRun ID: {run.id}, Metric: {run.summary.get(metric, float('inf'))}")
         return best_runs, (min(lower_bound, upper_bound), max(lower_bound, upper_bound))
     
-    def __compare_run_against_best__(
-        self,
-        top_k: int = 2,
-        metric: str = "train/best_loss",
-    ):
-        """
-        Compare the current run against the best runs from a wandb sweep.
-        Args:
-            top_k: Number of top runs to compare against.
-        """
-        if self.wandb is None:
-            raise ValueError("Wandb is not initialized. Cannot compare runs.")
-        
-        if not hasattr(self, "wandb_sweep"):
-            raise ValueError("Wandb sweep is not initialized. Cannot compare runs.")
-        
-        current_run_metric = self.wandb.summary.get(metric, float('inf'))
-        
-        # Get the best runs
+    def __compare_run_against_best__(self, top_k=2, metric="train/best_loss"):
+        # Get best runs
         best_runs, bounds = self.__get_best_sweep_runs__(metric=metric, top_k=top_k)
         
-        # Check if current run is within the bounds of the best runs
-        # if current_run_metric < bounds[1]:
+        # Determine if lower or higher values are better (for loss, lower is better)
+        is_lower_better = "loss" in metric.lower()
+        
+        # Check if current run is one of the best
+        current_run_metric = self.wandb.summary.get(metric, float('inf') if is_lower_better else float('-inf'))
+        
+        # Direct check if current run is in best runs
         for run in best_runs:
             if run.id == self.wandb.id:
                 print(f"Current run {self.wandb.id} is one of the best runs.")
+                return True
                 
-                # If so, push to registry
-                self.push_to_registry()
-                break
+        # Backup check based on metric value
+        if (is_lower_better and current_run_metric < bounds[1]) or (not is_lower_better and current_run_metric > bounds[0]):
+            print(f"Current run {self.wandb.id} meets performance criteria.")
+            return True
+            
+        return False
+            
+    def save(self, epoch=0, step=0, state=None, rngstate=None):
+        super().save(epoch=epoch, step=step, state=state, rngstate=rngstate)
         
+        if self.wandb is not None and hasattr(self, "wandb_sweep"):
+            checkpoint = get_latest_checkpoint(self.checkpoint_path())
+            try:
+                if self.__compare_run_against_best__(top_k=5, metric="train/best_loss"):
+                    self.push_to_registry()
+                    print("Model pushed to registry successfully")
+                else:
+                    print("Current run is not one of the best runs. Not saving model.")
+                
+                # Only delete after successful registry push
+                shutil.rmtree(checkpoint, ignore_errors=True)
+                print(f"Checkpoint deleted at {checkpoint}")
+            except Exception as e:
+                print(f"Error during registry operations: {e}")
+                print(f"Checkpoint preserved at {checkpoint}")
