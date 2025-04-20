@@ -357,6 +357,8 @@ def main(args):
     sorted_args_json = json.dumps(vars(args), sort_keys=True)
     arguments_hash = hash(sorted_args_json)
     
+    text_encoder = defaultTextEncodeModel()
+    
     input_config = DiffusionInputConfig(
         sample_data_key='image',
         sample_data_shape=(IMAGE_SIZE, IMAGE_SIZE, 3),
@@ -451,8 +453,6 @@ def main(args):
     
     start_time = time.time()
     
-    text_encoder = defaultTextEncodeModel()
-    
     trainer = GeneralDiffusionTrainer(
         model, optimizer=solver,
         input_config=input_config,
@@ -467,7 +467,6 @@ def main(args):
         checkpoint_base_path=CHECKPOINT_DIR,
         autoencoder=autoencoder,
         use_dynamic_scale=args.use_dynamic_scale,
-        encoder=text_encoder,
         native_resolution=IMAGE_SIZE,
         max_checkpoints_to_keep=args.max_checkpoints_to_keep,
     )
@@ -484,7 +483,7 @@ def main(args):
         for i in range(0, len(val_prompts), batch_size):
             prompts = val_prompts[i:i + batch_size]
             tokens = text_encoder.tokenize(prompts)
-            yield tokens
+            yield {"text": tokens}
 
     data['test'] = get_val_dataset
     data['test_len'] = len(val_prompts)
