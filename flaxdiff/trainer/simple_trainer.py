@@ -25,6 +25,8 @@ from typing import Dict, Callable, Sequence, Any, Union, Tuple
 from flax.training.dynamic_scale import DynamicScale
 from flaxdiff.utils import RandomMarkovState
 from flax.training import dynamic_scale as dynamic_scale_lib
+from dataclasses import dataclass
+import gc
 
 PROCESS_COLOR_MAP = {
     0: "green",
@@ -71,6 +73,7 @@ class SimpleTrainState(train_state.TrainState):
     metrics: Metrics
     dynamic_scale: dynamic_scale_lib.DynamicScale
 
+@dataclass
 class SimpleTrainer:
     state: SimpleTrainState
     best_state: SimpleTrainState
@@ -86,7 +89,6 @@ class SimpleTrainer:
                  train_state: SimpleTrainState = None,
                  name: str = "Simple",
                  load_from_checkpoint: str = None,
-                 checkpoint_suffix: str = "",
                  loss_fn=optax.l2_loss,
                  param_transforms: Callable = None,
                  wandb_config: Dict[str, Any] = None,
@@ -94,6 +96,7 @@ class SimpleTrainer:
                  checkpoint_base_path: str = "./checkpoints",
                  checkpoint_step: int = None,
                  use_dynamic_scale: bool = False,
+                 max_checkpoints_to_keep: int = 2,
                  ):
         if distributed_training is None or distributed_training is True:
             # Auto-detect if we are running on multiple devices
@@ -109,10 +112,9 @@ class SimpleTrainer:
         self.input_shapes = input_shapes
         self.checkpoint_base_path = checkpoint_base_path
         
-        
         if wandb_config is not None and jax.process_index() == 0:
             import wandb
-            run = wandb.init(**wandb_config)
+            run = wandb.init(resume='allow', **wandb_config)
             self.wandb = run
             
             # define our custom x axis metric
@@ -126,13 +128,18 @@ class SimpleTrainer:
             self.wandb.define_metric("train/avg_loss", step_metric="train/epoch")
             self.wandb.define_metric("train/best_loss", step_metric="train/epoch")
             
+            if self.wandb.sweep_id:
+                api = wandb.Api()
+                self.wandb_sweep = api.sweep(f"{self.wandb.entity}/{self.wandb.project}/{self.wandb.sweep_id}")
+                print(f"Running sweep {self.wandb_sweep.id} with id {self.wandb.sweep_id}")
+            
         # checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         async_checkpointer = orbax.checkpoint.AsyncCheckpointer(orbax.checkpoint.PyTreeCheckpointHandler(), timeout_secs=60)
 
         options = orbax.checkpoint.CheckpointManagerOptions(
-            max_to_keep=4, create=True)
+            max_to_keep=max_checkpoints_to_keep, create=True)
         self.checkpointer = orbax.checkpoint.CheckpointManager(
-            self.checkpoint_path() + checkpoint_suffix, async_checkpointer, options)
+            self.checkpoint_path(), async_checkpointer, options)
 
         if load_from_checkpoint is not None:
             latest_epoch, latest_step, old_state, old_best_state, rngstate = self.load(load_from_checkpoint, checkpoint_step)
@@ -159,7 +166,7 @@ class SimpleTrainer:
             self.best_loss = 1e9
 
     def get_input_ones(self):
-        return {k: jnp.ones((1, *v), dtype=self.model.dtype) for k, v in self.input_shapes.items()}
+        return {k: jnp.ones((1, *v)) for k, v in self.input_shapes.items()}
 
     def generate_states(
         self,
@@ -248,6 +255,10 @@ class SimpleTrainer:
             step = checkpoint_step
         
         print("Loading model from checkpoint at step ", step)
+        loaded_checkpoint_path = os.path.join(
+            checkpoint_path if checkpoint_path else self.checkpoint_path(),
+            f"{step}")
+        self.loaded_checkpoint_path = loaded_checkpoint_path
         ckpt = checkpointer.restore(step)
         state = ckpt['state']
         best_state = ckpt['best_state']
@@ -311,7 +322,7 @@ class SimpleTrainer:
             train_step = jax.pmap(train_step)
         return train_step
 
-    def _define_vaidation_step(self):
+    def _define_validation_step(self):
         model = self.model
         loss_fn = self.loss_fn
         distributed_training = self.distributed_training
@@ -418,8 +429,8 @@ class SimpleTrainer:
             
         for i in range(train_steps_per_epoch):
             batch = next(train_ds)
-            if i == 0:
-                print(f"First batch loaded at step {current_step}")
+            # if i == 0:
+            #     print(f"First batch loaded at step {current_step}")
                 
             if self.distributed_training and global_device_count > 1:
             #     # Convert the local device batches to a unified global jax.Array 
@@ -433,34 +444,40 @@ class SimpleTrainer:
                 # loss = jax.experimental.multihost_utils.process_allgather(loss)
                 loss = jnp.mean(loss) # Just to make sure its a scaler value
                     
-            if loss <= 1e-8:
-                # If the loss is too low, we can assume the model has diverged
-                print(colored(f"Loss too low at step {current_step} => {loss}", 'red'))
-                # Reset the model to the old state
-                # if self.best_state is not None:
-                #     print(colored(f"Resetting model to best state", 'red'))
-                #     train_state = self.best_state
-                #     loss = self.best_loss
-                # else:
-                #     exit(1)
+            if loss <= 1e-8 or jnp.isnan(loss) or jnp.isinf(loss):
+                # If the loss is too low or NaN/Inf, log the issue and attempt recovery
+                print(colored(f"Abnormal loss at step {current_step}: {loss}", 'red'))
                 
-                # Check if there are any NaN/inf values in the train_state.params
+                # Check model parameters for NaN/Inf values
                 params = train_state.params
+                has_nan_or_inf = False
+                
                 if isinstance(params, dict):
                     for key, value in params.items():
                         if isinstance(value, jnp.ndarray):
                             if jnp.isnan(value).any() or jnp.isinf(value).any():
-                                print(colored(f"NaN/inf values found in params at step {current_step}", 'red'))
-                                # Reset the model to the old state
-                                # train_state = self.best_state
-                                # loss = self.best_loss
-                                # break
-                            else:
-                                print(colored(f"Params are fine at step {current_step}", 'green'))
-                else:
-                    print(colored(f"Params are not a dict at step {current_step}", 'red'))
+                                print(colored(f"NaN/inf values found in params[{key}] at step {current_step}", 'red'))
+                                has_nan_or_inf = True
+                                break
+                    
+                    if not has_nan_or_inf:
+                        print(colored(f"Model parameters seem valid despite abnormal loss", 'yellow'))
                 
-                exit(1)
+                # Try to recover - clear JAX caches and collect garbage
+                gc.collect()
+                if hasattr(jax, "clear_caches"):
+                    jax.clear_caches()
+                
+                # If we have a best state and the loss is truly invalid, consider restoring
+                if (loss <= 1e-8 or jnp.isnan(loss) or jnp.isinf(loss)) and self.best_state is not None:
+                    print(colored(f"Attempting recovery by resetting model to last best state", 'yellow'))
+                    train_state = self.best_state
+                    loss = self.best_loss
+                else:
+                    # If we can't recover, skip this step but continue training
+                    print(colored(f"Unable to recover - continuing with current state", 'yellow'))
+                    if loss <= 1e-8:
+                        loss = 1.0  # Set to a reasonable default to continue training
                             
             epoch_loss += loss
             current_step += 1
@@ -489,7 +506,7 @@ class SimpleTrainer:
     def fit(self, data, train_steps_per_epoch, epochs, train_step_args={}, val_steps_per_epoch=5, validation_step_args={}):
         train_ds = iter(data['train']())
         train_step = self._define_train_step(**train_step_args)
-        val_step = self._define_vaidation_step(**validation_step_args)
+        val_step = self._define_validation_step(**validation_step_args)
         train_state = self.state
         rng_state = self.rngstate
         process_index = jax.process_index()
