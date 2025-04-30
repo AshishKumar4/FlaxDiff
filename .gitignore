@@ -21,3 +21,5 @@ gcsfuse.yml
 *.parquet
 *.arrow
 artifacts
+*.parquet
+datasets/datasets
