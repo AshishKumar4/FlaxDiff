@@ -6,6 +6,8 @@ from flax.typing import Dtype, PrecisionLike
 from typing import Dict, Callable, Sequence, Any, Union
 import einops
 from functools import partial
+import math
+from einops import rearrange
 
 # Kernel initializer to use
 def kernel_init(scale=1.0, dtype=jnp.float32):
@@ -335,40 +337,71 @@ class ResidualBlock(nn.Module):
 
         return out
 
-class AdaRMSNormZero(nn.Module):
-    """RMSNorm modulated by conditional scale and shift, initialized near identity."""
-    dim: int
-    eps: float = 1e-6
-    dtype: Optional[Dtype] = None
-    param_dtype: Dtype = jnp.float32
+# Convert Hilbert index d to 2D coordinates (x, y) for an n x n grid
+def _d2xy(n, d):
+    x = 0
+    y = 0
+    t = d
+    s = 1
+    while s < n:
+        rx = (t // 2) & 1
+        ry = (t ^ rx) & 1
+        if ry == 0:
+            if rx == 1:
+                x = n - 1 - x
+                y = n - 1 - y
+            x, y = y, x
+        x += s * rx
+        y += s * ry
+        t //= 4
+        s *= 2
+    return x, y
 
-    @nn.compact
-    def __call__(self, x, conditioning):
-        # conditioning: [B, 6 * dim] -> split into scale/shift for norm1, norm2, norm3
-        # Or more simply, assume conditioning is [B, 2 * dim] for this specific norm layer
-        # Let's assume the conditioning MLP in the main model handles splitting.
-        # Here, conditioning should be [B, 2 * dim] -> [B, dim] for scale, [B, dim] for shift
-        assert conditioning.shape[-1] == 2 * self.dim, f"Conditioning shape mismatch: {conditioning.shape} vs {2 * self.dim}"
-        
-        scale, shift = jnp.split(conditioning, 2, axis=-1)
-        # Reshape scale/shift for broadcasting: [B, 1, dim] if x is [B, L, dim]
-        if x.ndim == 3:
-            scale = scale[:, None, :]
-            shift = shift[:, None, :]
-        # If x is [B, H, W, C], reshape to [B, H, W, dim]
-        elif x.ndim == 4:
-             scale = scale[:, None, None, :]
-             shift = shift[:, None, None, :]
-        else:
-            raise ValueError(f"Unsupported input rank: {x.ndim}")
+# Hilbert index mapping for a rectangular grid of patches H_P x W_P
 
-        # RMSNorm calculation
-        var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-        normed_x = x * jax.lax.rsqrt(var + self.eps)
+def hilbert_indices(H_P, W_P):
+    size = max(H_P, W_P)
+    order = math.ceil(math.log2(size))
+    n = 1 << order
+    coords = []
+    for d in range(n * n):
+        x, y = _d2xy(n, d)
+        # x is column index, y is row index
+        if x < W_P and y < H_P:
+            coords.append((y, x))  # (row, col)
+            if len(coords) == H_P * W_P:
+                break
+    # Convert (row, col) to linear indices row-major
+    indices = [r * W_P + c for r, c in coords]
+    return jnp.array(indices, dtype=jnp.int32)
 
-        # Apply modulation (scale is init to 1, shift to 0)
-        # The conditioning MLP should output scale = MLP(cond) and shift = MLP(cond)
-        # For AdaLN-Zero, the final layer of the MLP projecting to scale/shift is zero-initialized.
-        # So initially, scale=1, shift=0. Let's assume the conditioning input already reflects this.
-        # The 'Zero' part is handled by the MLP generating the conditioning signal.
-        return normed_x * (1 + scale) + shift
+# Inverse permutation: given idx where idx[i] = new position of element i, return inv such that inv[idx[i]] = i
+
+def inverse_permutation(idx):
+    inv = jnp.zeros_like(idx)
+    inv = inv.at[idx].set(jnp.arange(idx.shape[0], dtype=idx.dtype))
+    return inv
+
+# Patchify using Hilbert ordering: extract patches and reorder sequence
+
+def hilbert_patchify(x, patch_size):
+    B, H, W, C = x.shape
+    H_P = H // patch_size
+    W_P = W // patch_size
+    # Extract patches in row-major
+    patches = rearrange(x, 'b (h p1) (w p2) c -> b (h w) (p1 p2 c)', p1=patch_size, p2=patch_size)
+    idx = hilbert_indices(H_P, W_P)
+    return patches[:, idx, :]
+
+# Unpatchify from Hilbert ordering: reorder sequence back and reconstruct image
+
+def hilbert_unpatchify(patches, patch_size, H, W, C):
+    B, N, D = patches.shape
+    H_P = H // patch_size
+    W_P = W // patch_size
+    inv = inverse_permutation(hilbert_indices(H_P, W_P))
+    # Reorder back to row-major
+    linear = patches[:, inv, :]
+    # Reconstruct image
+    x = rearrange(linear, 'b (h w) (p1 p2 c) -> b (h p1) (w p2) c', h=H_P, w=W_P, p1=patch_size, p2=patch_size, c=C)
+    return x

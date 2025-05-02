@@ -10,6 +10,7 @@ from flaxdiff.models.simple_unet import FourierEmbedding, TimeProjection, ConvLa
 import einops
 from flax.typing import Dtype, PrecisionLike
 from functools import partial
+from .common import hilbert_indices, inverse_permutation
 
 def unpatchify(x, channels=3):
     patch_size = int((x.shape[2] // channels) ** 0.5)
@@ -67,6 +68,7 @@ class UViT(nn.Module):
     norm_inputs: bool = False
     explicitly_add_residual: bool = True
     norm_epsilon: float = 1e-4 # Added epsilon parameter, increased default
+    use_hilbert: bool = False # Toggle Hilbert patch reorder
 
     def setup(self):
         if self.norm_groups > 0:
@@ -81,27 +83,31 @@ class UViT(nn.Module):
         temb = TimeProjection(features=self.emb_features)(temb)
         
         original_img = x
+        B, H, W, C = original_img.shape
+        H_P = H // self.patch_size
+        W_P = W // self.patch_size
 
         # Patch embedding
         x = PatchEmbedding(patch_size=self.patch_size, embedding_dim=self.emb_features, 
                            dtype=self.dtype, precision=self.precision)(x)
         num_patches = x.shape[1]
-        
+
+        # Optional Hilbert reorder
+        if self.use_hilbert:
+            idx = hilbert_indices(H_P, W_P)
+            inv_idx = inverse_permutation(idx)
+            x = x[:, idx, :]
+
         context_emb = nn.DenseGeneral(features=self.emb_features, 
                                dtype=self.dtype, precision=self.precision)(textcontext)
         num_text_tokens = textcontext.shape[1]
         
-        # print(f'Shape of x after patch embedding: {x.shape}, numPatches: {num_patches}, temb: {temb.shape}, context_emb: {context_emb.shape}')
-        
         # Add time embedding
         temb = jnp.expand_dims(temb, axis=1)
         x = jnp.concatenate([x, temb, context_emb], axis=1)
-        # print(f'Shape of x after time embedding: {x.shape}')
-        
+
         # Add positional encoding
         x = PositionalEncoding(max_len=x.shape[1], embedding_dim=self.emb_features)(x)
-        
-        # print(f'Shape of x after positional encoding: {x.shape}')
         
         skips = []
         # In blocks
@@ -126,7 +132,7 @@ class UViT(nn.Module):
                             norm_epsilon=self.norm_epsilon, # Pass epsilon
                             )(x)
         
-        # # Out blocks
+        # Out blocks
         for i in range(self.num_layers // 2):
             x = jnp.concatenate([x, skips.pop()], axis=-1)
             x = nn.DenseGeneral(features=self.emb_features, 
@@ -140,11 +146,13 @@ class UViT(nn.Module):
                                  norm_epsilon=self.norm_epsilon, # Pass epsilon
                                  )(x)
         
-        # print(f'Shape of x after transformer blocks: {x.shape}')
         x = self.norm()(x) # Uses norm_epsilon defined in setup
         
         patch_dim = self.patch_size ** 2 * self.output_channels
         x = nn.Dense(features=patch_dim, dtype=self.dtype, precision=self.precision)(x)
+        # If Hilbert, restore original patch order
+        if self.use_hilbert:
+            x = x[:, inv_idx, :]
         # Extract only the image patch tokens (first num_patches tokens)
         x = x[:, :num_patches, :] 
         x = unpatchify(x, channels=self.output_channels)
