@@ -7,7 +7,7 @@ def get_clip_metric(
 ):
     from transformers import AutoProcessor, FlaxCLIPModel
     model = FlaxCLIPModel.from_pretrained(modelname, dtype=jnp.float16)
-    processor = AutoProcessor.from_pretrained(modelname, use_fast=True, dtype=jnp.float16)
+    processor = AutoProcessor.from_pretrained(modelname, use_fast=False, dtype=jnp.float16)
     
     @jax.jit
     def calc(pixel_values, input_ids, attention_mask):
