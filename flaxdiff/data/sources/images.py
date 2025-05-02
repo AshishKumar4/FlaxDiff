@@ -113,7 +113,7 @@ class ImageTFDSSource(DataSource):
 class ImageTFDSAugmenter(DataAugmenter):
     """Augmenter for TFDS image datasets."""
     
-    def __init__(self, label_path: str = "/home/mrwhite0racle/tensorflow_datasets/oxford_flowers102/2.1.1/label.labels.txt"):
+    def __init__(self, label_path: str = "~/tensorflow_datasets/oxford_flowers102/2.1.1/label.labels.txt"):
         """Initialize a TFDS image augmenter.
         
         Args:
