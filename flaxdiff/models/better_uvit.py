@@ -7,7 +7,7 @@ import einops
 from functools import partial
 
 # Re-use existing components if they are suitable
-from .common import kernel_init, FourierEmbedding, TimeProjection
+from .common import kernel_init, FourierEmbedding, TimeProjection, hilbert_indices, inverse_permutation
 from .attention import NormalAttention # Using NormalAttention for RoPE integration
 from flax.typing import Dtype, PrecisionLike
 
@@ -251,6 +251,7 @@ class BetterUViT(nn.Module):
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False # Option to predict sigma like in DiT paper
+    use_hilbert: bool = False  # Toggle Hilbert patch reorder
 
     def setup(self):
         self.patch_embed = PatchEmbedding(
@@ -324,8 +325,17 @@ class BetterUViT(nn.Module):
         assert H % self.patch_size == 0 and W % self.patch_size == 0, "Image dimensions must be divisible by patch size"
         
         # 1. Patch Embedding
-        x = self.patch_embed(x) # Shape: [B, num_patches, emb_features]
-        num_patches = x.shape[1]
+        patches = self.patch_embed(x) # Shape: [B, num_patches, emb_features]
+        num_patches = patches.shape[1]
+
+        # Optional Hilbert reorder
+        if self.use_hilbert:
+            idx = hilbert_indices(H // self.patch_size, W // self.patch_size)
+            inv_idx = inverse_permutation(idx)
+            patches = patches[:, idx, :]
+
+        # replace x with patches
+        x_seq = patches
 
         # 2. Prepare Conditioning Signal (Time + Text Context)
         t_emb = self.time_embed(temb) # Shape: [B, emb_features]
@@ -344,16 +354,20 @@ class BetterUViT(nn.Module):
 
         # 4. Apply Transformer Blocks with adaLN-Zero conditioning
         for block in self.blocks:
-            x = block(x, conditioning=cond_emb, freqs_cis=freqs_cis)
+            x_seq = block(x_seq, conditioning=cond_emb, freqs_cis=freqs_cis)
 
         # 5. Final Layer
-        x = self.final_norm(x)
-        x = self.final_proj(x) # Shape: [B, num_patches, patch_pixels (*2 if learn_sigma)]
+        x_out = self.final_norm(x_seq)
+        x_out = self.final_proj(x_out) # Shape: [B, num_patches, patch_pixels (*2 if learn_sigma)]
+
+        # Optional Hilbert inverse reorder
+        if self.use_hilbert:
+            x_out = x_out[:, inv_idx, :]
 
         # 6. Unpatchify
         if self.learn_sigma:
             # Split into mean and variance predictions
-            x_mean, x_logvar = jnp.split(x, 2, axis=-1)
+            x_mean, x_logvar = jnp.split(x_out, 2, axis=-1)
             x = unpatchify(x_mean, channels=self.output_channels)
             # Return both mean and logvar if needed by the loss function
             # For now, just returning the mean prediction like standard diffusion models
@@ -361,6 +375,6 @@ class BetterUViT(nn.Module):
             # return x, logvar 
             return x
         else:
-            x = unpatchify(x, channels=self.output_channels) # Shape: [B, H, W, C]
+            x = unpatchify(x_out, channels=self.output_channels) # Shape: [B, H, W, C]
             return x
 
