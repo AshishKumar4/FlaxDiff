@@ -208,7 +208,8 @@ class DiffusionInferencePipeline(InferencePipeline):
         self,
         num_samples: int,
         resolution: int,
-        conditioning_data: Optional[List[Union[Tuple, Dict]]] = None,  # one list per modality or list of tuples
+        conditioning_data: List[Union[Tuple, Dict]] = None,
+        conditioning_data_tokens: Tuple = None,
         sequence_length: Optional[int] = None,
         diffusion_steps: int = 50,
         guidance_scale: float = 1.0,
@@ -256,5 +257,6 @@ class DiffusionInferencePipeline(InferencePipeline):
             steps_override=steps_override,
             priors=priors,
             rngstate=rngstate,
-            conditioning=conditioning_data
+            conditioning=conditioning_data,
+            model_conditioning_inputs=conditioning_data_tokens,
         )
