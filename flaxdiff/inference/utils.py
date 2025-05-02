@@ -292,7 +292,7 @@ def load_from_wandb_run(
         config = run.config
     except Exception as e:
         print(f"Warning: Failed to load model from wandb: {e}")
-    return states, config, run
+    return states, config, run, artifact
 
 def load_from_wandb_registry(
     modelname: str,
@@ -318,4 +318,4 @@ def load_from_wandb_registry(
         config = run.config
     except Exception as e:
         print(f"Warning: Failed to load model from wandb: {e}")
-    return states, config, run
+    return states, config, run, artifact
