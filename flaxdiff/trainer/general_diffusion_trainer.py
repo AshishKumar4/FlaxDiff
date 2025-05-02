@@ -588,18 +588,46 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             print(f"\t\tRun ID: {run.id}, Metric: {run.summary.get(metric, float('inf'))}")
         return best_runs, (min(lower_bound, upper_bound), max(lower_bound, upper_bound))
     
-    def __compare_run_against_best__(self, top_k=2, metric="train/best_loss"):
+    def __get_best_general_runs__(
+        self,
+        metric: str = "train/best_loss",
+        top_k: int = 5,
+    ):
         """
-        Compare the current run against the best runs from the sweep.
+        Get the best runs from wandb.
+        Args:
+            metric: Metric to sort by.
+            top_k: Number of top runs to return.
+        """
+        if self.wandb is None:
+            raise ValueError("Wandb is not initialized. Cannot get best runs.")
+        
+        # Get the sweep runs
+        runs = sorted(self.wandb.runs, key=lambda x: x.summary.get(metric, float('inf')))
+        best_runs = runs[:top_k]
+        lower_bound = best_runs[-1].summary.get(metric, float('inf'))
+        upper_bound = best_runs[0].summary.get(metric, float('inf'))
+        print(f"Best runs from wandb {self.wandb.id}:")
+        for run in best_runs:
+            print(f"\t\tRun ID: {run.id}, Metric: {run.summary.get(metric, float('inf'))}")
+        return best_runs, (min(lower_bound, upper_bound), max(lower_bound, upper_bound))
+    
+    def __compare_run_against_best__(self, top_k=2, metric="train/best_loss", from_sweeps=False):
+        """
+        Compare the current run against the best runs from wandb.
         Args:
             top_k: Number of top runs to consider.
             metric: Metric to compare against.
+            from_sweeps: Whether to consider runs from sweeps.
         Returns:
             is_good: Whether the current run is among the best.
             is_best: Whether the current run is the best.
         """
         # Get best runs
-        best_runs, bounds = self.__get_best_sweep_runs__(metric=metric, top_k=top_k)
+        if from_sweeps:
+            best_runs, bounds = self.__get_best_sweep_runs__(metric=metric, top_k=top_k)
+        else:
+            best_runs, bounds = self.__get_best_general_runs__(metric=metric, top_k=top_k)
         
         # Determine if lower or higher values are better (for loss, lower is better)
         is_lower_better = "loss" in metric.lower()
@@ -621,10 +649,10 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
     def save(self, epoch=0, step=0, state=None, rngstate=None):
         super().save(epoch=epoch, step=step, state=state, rngstate=rngstate)
         
-        if self.wandb is not None and hasattr(self, "wandb_sweep"):
+        if self.wandb is not None:
             checkpoint = get_latest_checkpoint(self.checkpoint_path())
             try:
-                is_good, is_best = self.__compare_run_against_best__(top_k=5, metric="train/best_loss")
+                is_good, is_best = self.__compare_run_against_best__(top_k=5, metric="train/best_loss", from_sweeps=hasattr(self, "wandb_sweep"))
                 if is_good:
                     # Push to registry with appropriate aliases
                     aliases = []

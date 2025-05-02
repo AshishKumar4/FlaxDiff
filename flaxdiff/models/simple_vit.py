@@ -55,8 +55,6 @@ class UViT(nn.Module):
     num_layers: int = 12
     num_heads: int = 12
     dropout_rate: float = 0.1
-    dtype: Any = jnp.float32
-    precision: Any = jax.lax.Precision.HIGH
     use_projection: bool = False
     use_flash_attention: bool = False
     use_self_and_cross: bool = False
@@ -65,16 +63,16 @@ class UViT(nn.Module):
     norm_groups:int=8
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    # kernel_init: Callable = partial(kernel_init, scale=1.0)
     add_residualblock_output: bool = False
     norm_inputs: bool = False
     explicitly_add_residual: bool = True
+    norm_epsilon: float = 1e-4 # Added epsilon parameter, increased default
 
     def setup(self):
         if self.norm_groups > 0:
-            self.norm = partial(nn.GroupNorm, self.norm_groups)
+            self.norm = partial(nn.GroupNorm, self.norm_groups, epsilon=self.norm_epsilon)
         else:
-            self.norm = partial(nn.RMSNorm, 1e-5)
+            self.norm = partial(nn.RMSNorm, epsilon=self.norm_epsilon)
             
     @nn.compact
     def __call__(self, x, temb, textcontext=None):
@@ -114,6 +112,7 @@ class UViT(nn.Module):
                                  only_pure_attention=False,
                                  norm_inputs=self.norm_inputs,
                                  explicitly_add_residual=self.explicitly_add_residual,
+                                 norm_epsilon=self.norm_epsilon, # Pass epsilon
                                  )(x)
             skips.append(x)
             
@@ -124,6 +123,7 @@ class UViT(nn.Module):
                              only_pure_attention=False,
                             norm_inputs=self.norm_inputs,
                             explicitly_add_residual=self.explicitly_add_residual,
+                            norm_epsilon=self.norm_epsilon, # Pass epsilon
                             )(x)
         
         # # Out blocks
@@ -137,14 +137,16 @@ class UViT(nn.Module):
                                  only_pure_attention=False,
                                  norm_inputs=self.norm_inputs,
                                  explicitly_add_residual=self.explicitly_add_residual,
+                                 norm_epsilon=self.norm_epsilon, # Pass epsilon
                                  )(x)
         
         # print(f'Shape of x after transformer blocks: {x.shape}')
-        x = self.norm()(x)
+        x = self.norm()(x) # Uses norm_epsilon defined in setup
         
         patch_dim = self.patch_size ** 2 * self.output_channels
         x = nn.Dense(features=patch_dim, dtype=self.dtype, precision=self.precision)(x)
-        x = x[:, 1 + num_text_tokens:, :]
+        # Extract only the image patch tokens (first num_patches tokens)
+        x = x[:, :num_patches, :] 
         x = unpatchify(x, channels=self.output_channels)
         
         if self.add_residualblock_output:
