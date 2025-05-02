@@ -21,7 +21,7 @@ datasetMap = {
         "augmenter": gcs_augmenters,
     },
     "laiona_coco": {
-        "source": data_source_gcs('arrayrecord2/laion-aesthetics-12m+mscoco-2017'),
+        "source": data_source_gcs('datasets/laion12m+mscoco'),
         "augmenter": gcs_augmenters,
     },
     "aesthetic_coyo": {

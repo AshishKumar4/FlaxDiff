@@ -411,7 +411,9 @@ class SimpleTrainer:
         train_ds,
         train_steps_per_epoch,
         current_step,
-        rng_state
+        rng_state,
+        save_every:int=None,
+        val_every=None,
     ):
         global_device_count = jax.device_count()
         process_index = jax.process_index()
@@ -491,8 +493,8 @@ class SimpleTrainer:
                             "train/loss": loss,
                         }, step=current_step)
                 # Save the model every few steps
-                if i % 10000 == 0 and i > 0:
-                    print(f"Saving model after 10000 step {current_step}")
+                if save_every and i % save_every == 0 and i > 0:
+                    print(f"Saving model after {save_every} step {current_step}")
                     print(f"Devices: {len(jax.devices())}") # To sync the devices
                     self.save(current_epoch, current_step, train_state, rng_state)
                     print(f"Saving done by process index {process_index}")
@@ -518,7 +520,7 @@ class SimpleTrainer:
             self.validation_loop(
                 train_state,
                 val_step,
-                data.get('test', data.get('val', None)),
+                data.get('val', data.get('test', None)),
                 val_steps_per_epoch,
                 self.latest_step,
             )
@@ -569,7 +571,7 @@ class SimpleTrainer:
                 self.validation_loop(
                     train_state,
                     val_step,
-                    data.get('test', None),
+                    data.get('val', data.get('test', None)),
                     val_steps_per_epoch,
                     current_step,
                 )
