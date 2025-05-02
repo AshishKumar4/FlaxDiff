@@ -25,6 +25,7 @@ from flaxdiff.inference.utils import parse_config, load_from_wandb_run, load_fro
 @dataclass
 class InferencePipeline:
     """Inference pipeline for a general model."""
+    name: str = None
     model: nn.Module = None
     state: SimpleTrainState = None
     best_state: SimpleTrainState = None
@@ -44,6 +45,7 @@ class DiffusionInferencePipeline(InferencePipeline):
     This pipeline handles loading models from wandb and generating samples using the
     DiffusionSampler from FlaxDiff.
     """
+    artifact: Any = None
     state: TrainState = None
     best_state: TrainState = None
     rngstate: Optional[RandomMarkovState] = None
@@ -51,7 +53,6 @@ class DiffusionInferencePipeline(InferencePipeline):
     model_output_transform: DiffusionPredictionTransform = None
     autoencoder: AutoEncoder = None
     input_config: DiffusionInputConfig = None
-    wandb_run = None
     samplers: Dict[Type[DiffusionSampler], Dict[float, DiffusionSampler]] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
     
@@ -156,6 +157,7 @@ class DiffusionInferencePipeline(InferencePipeline):
             rngstate = RandomMarkovState(jax.random.PRNGKey(42))
         # Build and return pipeline
         return cls(
+            name=run.name if run else None,
             model=config['model'],
             state=state,
             best_state=best_state,
@@ -165,7 +167,6 @@ class DiffusionInferencePipeline(InferencePipeline):
             autoencoder=config['autoencoder'],
             input_config=config['input_config'],
             config=config,
-            wandb_run=run,
         )
     
     def get_sampler(
