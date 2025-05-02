@@ -113,12 +113,14 @@ class ImageTFDSSource(DataSource):
 class ImageTFDSAugmenter(DataAugmenter):
     """Augmenter for TFDS image datasets."""
     
-    def __init__(self, label_path: str = "~/tensorflow_datasets/oxford_flowers102/2.1.1/label.labels.txt"):
+    def __init__(self, label_path: str = None):
         """Initialize a TFDS image augmenter.
         
         Args:
             label_path: Path to the labels file for datasets like Oxford Flowers.
         """
+        if label_path is None:
+            label_path = os.path.join(os.path.expanduser("~"), "~/tensorflow_datasets/oxford_flowers102/2.1.1/label.labels.txt")
         self.label_path = label_path
     
     def create_transform(self, image_scale: int = 256, method: Any = None) -> Callable[[], pygrain.MapTransform]:
