@@ -77,7 +77,7 @@ class DiffusionInferencePipeline(InferencePipeline):
         Returns:
             DiffusionInferencePipeline instance
         """
-        states, config, run = load_from_wandb_run(
+        states, config, run, artifact = load_from_wandb_run(
             wandb_run,
             project=project,
             entity=entity,
@@ -96,6 +96,7 @@ class DiffusionInferencePipeline(InferencePipeline):
             best_state=best_state,
             rngstate=RandomMarkovState(jax.random.PRNGKey(42)),
             run=run,
+            artifact=artifact,
         )
         return pipeline
     
@@ -120,7 +121,7 @@ class DiffusionInferencePipeline(InferencePipeline):
         Returns:
             DiffusionInferencePipeline instance
         """
-        states, config, run = load_from_wandb_registry(
+        states, config, run, artifact = load_from_wandb_registry(
             modelname=modelname,
             project=project,
             entity=entity,
@@ -141,6 +142,7 @@ class DiffusionInferencePipeline(InferencePipeline):
             best_state=best_state,
             rngstate=RandomMarkovState(jax.random.PRNGKey(42)),
             run=run,
+            artifact=artifact,
         )
         return pipeline
             
@@ -152,12 +154,14 @@ class DiffusionInferencePipeline(InferencePipeline):
         best_state: Optional[Dict[str, Any]] = None,
         rngstate: Optional[RandomMarkovState] = None,
         run=None,
+        artifact=None,
     ):
         if rngstate is None:
             rngstate = RandomMarkovState(jax.random.PRNGKey(42))
         # Build and return pipeline
         return cls(
             name=run.name if run else None,
+            artifact=artifact,
             model=config['model'],
             state=state,
             best_state=best_state,
