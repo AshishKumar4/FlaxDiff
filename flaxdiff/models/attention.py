@@ -247,6 +247,7 @@ class BasicTransformerBlock(nn.Module):
     use_cross_only:bool = False
     only_pure_attention:bool = False
     force_fp32_for_softmax: bool = True
+    norm_epsilon: float = 1e-4
     
     def setup(self):
         if self.use_flash_attention:
@@ -278,9 +279,9 @@ class BasicTransformerBlock(nn.Module):
         )
         
         self.ff = FlaxFeedForward(dim=self.query_dim)
-        self.norm1 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
-        self.norm2 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
-        self.norm3 = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)
+        self.norm1 = nn.RMSNorm(epsilon=self.norm_epsilon, dtype=self.dtype)
+        self.norm2 = nn.RMSNorm(epsilon=self.norm_epsilon, dtype=self.dtype)
+        self.norm3 = nn.RMSNorm(epsilon=self.norm_epsilon, dtype=self.dtype)
         
     @nn.compact
     def __call__(self, hidden_states, context=None):
@@ -312,13 +313,14 @@ class TransformerBlock(nn.Module):
     # kernel_init: Callable = kernel_init(1.0)
     norm_inputs: bool = True
     explicitly_add_residual: bool = True
+    norm_epsilon: float = 1e-4
 
     @nn.compact
     def __call__(self, x, context=None):
         inner_dim = self.heads * self.dim_head
         C = x.shape[-1]
         if self.norm_inputs:
-            x = nn.RMSNorm(epsilon=1e-5, dtype=self.dtype)(x)
+            x = nn.RMSNorm(epsilon=self.norm_epsilon, dtype=self.dtype)(x)
         if self.use_projection == True:
             if self.use_linear_attention:
                 projected_x = nn.Dense(features=inner_dim, 
@@ -350,6 +352,7 @@ class TransformerBlock(nn.Module):
             use_cross_only=(not self.use_self_and_cross),
             only_pure_attention=self.only_pure_attention,
             force_fp32_for_softmax=self.force_fp32_for_softmax,
+            norm_epsilon=self.norm_epsilon
             # kernel_init=self.kernel_init
         )(projected_x, context)
         

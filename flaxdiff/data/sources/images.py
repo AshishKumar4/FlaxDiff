@@ -266,6 +266,12 @@ class ImageGCSAugmenter(DataAugmenter):
                 
         print(f"Using method: {method}")
         
+        from torchvision.transforms import v2
+        augments = v2.Compose([
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.ColorJitter(brightness=0.2, contrast=0.05, saturation=0.2)
+        ])
+        
         class GCSTransform(pygrain.MapTransform):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
@@ -277,6 +283,7 @@ class ImageGCSAugmenter(DataAugmenter):
                 image = np.asarray(bytearray(element['jpg']), dtype="uint8")
                 image = cv2.imdecode(image, cv2.IMREAD_UNCHANGED)
                 image = self.image_augmenter(image)
+                image = augments(image)
                 caption = labelizer(element).decode('utf-8')
                 results = self.auto_tokenize(caption)
                 return {

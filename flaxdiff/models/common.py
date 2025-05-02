@@ -247,7 +247,7 @@ class Downsample(nn.Module):
         return out
 
 
-def l2norm(t, axis=1, eps=1e-12):
+def l2norm(t, axis=1, eps=1e-6): # Increased epsilon from 1e-12
     denom = jnp.clip(jnp.linalg.norm(t, ord=2, axis=axis, keepdims=True), eps)
     out = t/denom
     return (out)
@@ -266,14 +266,15 @@ class ResidualBlock(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     named_norms:bool=False
+    norm_epsilon: float = 1e-4 # Added epsilon parameter, increased default
     
     def setup(self):
         if self.norm_groups > 0:
-            norm = partial(nn.GroupNorm, self.norm_groups)
+            norm = partial(nn.GroupNorm, self.norm_groups, epsilon=self.norm_epsilon)
             self.norm1 = norm(name="GroupNorm_0") if self.named_norms else norm()
             self.norm2 = norm(name="GroupNorm_1") if self.named_norms else norm()
         else:
-            norm = partial(nn.RMSNorm, 1e-5)
+            norm = partial(nn.RMSNorm, epsilon=self.norm_epsilon)
             self.norm1 = norm()
             self.norm2 = norm()
 
@@ -333,4 +334,41 @@ class ResidualBlock(nn.Module):
         out = jnp.concatenate([out, extra_features], axis=-1) if extra_features is not None else out
 
         return out
-    
+
+class AdaRMSNormZero(nn.Module):
+    """RMSNorm modulated by conditional scale and shift, initialized near identity."""
+    dim: int
+    eps: float = 1e-6
+    dtype: Optional[Dtype] = None
+    param_dtype: Dtype = jnp.float32
+
+    @nn.compact
+    def __call__(self, x, conditioning):
+        # conditioning: [B, 6 * dim] -> split into scale/shift for norm1, norm2, norm3
+        # Or more simply, assume conditioning is [B, 2 * dim] for this specific norm layer
+        # Let's assume the conditioning MLP in the main model handles splitting.
+        # Here, conditioning should be [B, 2 * dim] -> [B, dim] for scale, [B, dim] for shift
+        assert conditioning.shape[-1] == 2 * self.dim, f"Conditioning shape mismatch: {conditioning.shape} vs {2 * self.dim}"
+        
+        scale, shift = jnp.split(conditioning, 2, axis=-1)
+        # Reshape scale/shift for broadcasting: [B, 1, dim] if x is [B, L, dim]
+        if x.ndim == 3:
+            scale = scale[:, None, :]
+            shift = shift[:, None, :]
+        # If x is [B, H, W, C], reshape to [B, H, W, dim]
+        elif x.ndim == 4:
+             scale = scale[:, None, None, :]
+             shift = shift[:, None, None, :]
+        else:
+            raise ValueError(f"Unsupported input rank: {x.ndim}")
+
+        # RMSNorm calculation
+        var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
+        normed_x = x * jax.lax.rsqrt(var + self.eps)
+
+        # Apply modulation (scale is init to 1, shift to 0)
+        # The conditioning MLP should output scale = MLP(cond) and shift = MLP(cond)
+        # For AdaLN-Zero, the final layer of the MLP projecting to scale/shift is zero-initialized.
+        # So initially, scale=1, shift=0. Let's assume the conditioning input already reflects this.
+        # The 'Zero' part is handled by the MLP generating the conditioning signal.
+        return normed_x * (1 + scale) + shift
