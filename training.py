@@ -76,7 +76,7 @@ def boolean_string(s):
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Train a diffusion model')
 parser.add_argument('--GRAIN_WORKER_COUNT', type=int,
-                    default=64, help='Number of grain workers')
+                    default=32, help='Number of grain workers')
 # parser.add_argument('--GRAIN_READ_THREAD_COUNT', type=int,
 #                     default=512, help='Number of grain read threads')
 # parser.add_argument('--GRAIN_READ_BUFFER_SIZE', type=int,
@@ -86,7 +86,7 @@ parser.add_argument('--GRAIN_WORKER_COUNT', type=int,
 # parser.add_argument('--GRAIN_WORKER_COUNT', type=int,
 #                     default=32, help='Number of grain workers')
 parser.add_argument('--GRAIN_READ_THREAD_COUNT', type=int,
-                    default=196, help='Number of grain read threads')
+                    default=140, help='Number of grain read threads')
 parser.add_argument('--GRAIN_READ_BUFFER_SIZE', type=int,
                     default=96, help='Grain read buffer size')
 parser.add_argument('--GRAIN_WORKER_BUFFER_SIZE', type=int,
