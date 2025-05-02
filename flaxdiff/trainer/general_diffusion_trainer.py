@@ -27,6 +27,8 @@ from flax.training import dynamic_scale as dynamic_scale_lib
 from .diffusion_trainer import TrainState, DiffusionTrainer
 import shutil
 
+from flaxdiff.metrics.common import EvaluationMetric
+
 def generate_modelname(
     dataset_name: str,
     noise_schedule_name: str,
@@ -102,15 +104,6 @@ def generate_modelname(
     # # Construct the model name
     # model_name = f"{model_name}-{config_hash}"
     return model_name
-
-@dataclass
-class EvaluationMetric:
-    """
-    Evaluation metrics for the diffusion model.
-    The function is given generated samples batch [B, H, W, C] and the original batch.
-    """
-    function: Callable
-    name: str
 
 class GeneralDiffusionTrainer(DiffusionTrainer):
     """
