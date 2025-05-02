@@ -258,7 +258,7 @@ def get_dataset_grain(
     image_scale=256,
     count=None,
     num_epochs=None,
-    method=jax.image.ResizeMethod.LANCZOS3,
+    method=None, #jax.image.ResizeMethod.LANCZOS3,
     worker_count=32,
     read_thread_count=64,
     read_buffer_size=50,
