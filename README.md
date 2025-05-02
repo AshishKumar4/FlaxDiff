@@ -1,5 +1,7 @@
 # ![](images/logo.jpeg "FlaxDiff")
 
+**This project is being used for the UMD Course project MSML 605: MLOps**
+
 **This project is partially supported by [Google TPU Research Cloud](https://sites.research.google/trc/about/). I would like to thank the Google Cloud TPU team for providing me with the resources to train the bigger text-conditional models in multi-host distributed settings.**
 
 ## A Versatile and simple Diffusion Library

@@ -18,13 +18,13 @@ from ..samplers.ddim import DDIMSampler
 from flaxdiff.utils import RandomMarkovState, serialize_model, get_latest_checkpoint
 from flaxdiff.inputs import ConditioningEncoder, ConditionalInputConfig, DiffusionInputConfig
 
-from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics
+from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics, convert_to_global_tree
 
 from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
 from flax.training import dynamic_scale as dynamic_scale_lib
 
 # Reuse the TrainState from the DiffusionTrainer
-from flaxdiff.trainer.diffusion_trainer import TrainState, DiffusionTrainer
+from .diffusion_trainer import TrainState, DiffusionTrainer
 import shutil
 
 def generate_modelname(
@@ -103,6 +103,15 @@ def generate_modelname(
     # model_name = f"{model_name}-{config_hash}"
     return model_name
 
+@dataclass
+class EvaluationMetric:
+    """
+    Evaluation metrics for the diffusion model.
+    The function is given generated samples batch [B, H, W, C] and the original batch.
+    """
+    function: Callable
+    name: str
+
 class GeneralDiffusionTrainer(DiffusionTrainer):
     """
     General trainer for diffusion models supporting both images and videos.
@@ -126,6 +135,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                  native_resolution: int = None,
                  frames_per_sample: int = None,
                  wandb_config: Dict[str, Any] = None,
+                 eval_metrics: List[EvaluationMetric] = None,
                  **kwargs
                  ):
         """
@@ -150,6 +160,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             autoencoder=autoencoder,
         )
         self.input_config = input_config
+        self.eval_metrics = eval_metrics
         
         if wandb_config is not None:
             # If input_config is not in wandb_config, add it
@@ -363,7 +374,6 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         def generate_samples(
             val_state: TrainState,
             batch,
-            sampler: DiffusionSampler, 
             diffusion_steps: int,
         ):
             # Process all conditional inputs
@@ -385,7 +395,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                 model_conditioning_inputs=tuple(model_conditioning_inputs),
             )
         
-        return sampler, generate_samples
+        return generate_samples
         
     def _get_image_size(self):
         """Helper to determine image size from available information."""
@@ -415,32 +425,73 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         """
         Run validation and log samples for both image and video diffusion.
         """
-        sampler, generate_samples = val_step_fn
-        val_ds = iter(val_ds()) if val_ds else None
+        global_device_count = jax.device_count()
+        local_device_count = jax.local_device_count()
+        process_index = jax.process_index()
+        generate_samples = val_step_fn
         
+        val_ds = iter(val_ds()) if val_ds else None
+        # Evaluation step
         try:
-            # Generate samples
-            samples = generate_samples(
-                val_state,
-                next(val_ds),
-                sampler,
-                diffusion_steps,
-            )
-            
-            # Log samples to wandb
-            if getattr(self, 'wandb', None) is not None and self.wandb:
-                import numpy as np
+            metrics = {metric.name: [] for metric in self.eval_metrics} if self.eval_metrics else {}
+            for i in range(val_steps_per_epoch):
+                if val_ds is None:
+                    batch = None
+                else:
+                    batch = next(val_ds)
+                    if self.distributed_training and global_device_count > 1:
+                        batch = convert_to_global_tree(self.mesh, batch)
+                # Generate samples
+                samples = generate_samples(
+                    val_state,
+                    batch,
+                    diffusion_steps,
+                )
                 
-                # Process samples differently based on dimensionality
-                if len(samples.shape) == 5:  # [B,T,H,W,C] - Video data
-                    self._log_video_samples(samples, current_step)
-                else:  # [B,H,W,C] - Image data
-                    self._log_image_samples(samples, current_step)
+                if self.eval_metrics is not None:
+                    for metric in self.eval_metrics:
+                        try:
+                            # Evaluate metrics
+                            metric_val = metric.function(samples, batch)
+                            metrics[metric.name].append(metric_val)
+                        except Exception as e:
+                            print("Error in evaluation metrics:", e)
+                            import traceback
+                            traceback.print_exc()
+                            pass
                     
+                if i == 0:
+                    print(f"Evaluation started for process index {process_index}")
+                    # Log samples to wandb
+                    if getattr(self, 'wandb', None) is not None and self.wandb:
+                        import numpy as np
+                        
+                        # Process samples differently based on dimensionality
+                        if len(samples.shape) == 5:  # [B,T,H,W,C] - Video data
+                            self._log_video_samples(samples, current_step)
+                        else:  # [B,H,W,C] - Image data
+                            self._log_image_samples(samples, current_step)
+                    
+            if getattr(self, 'wandb', None) is not None and self.wandb:
+                # metrics is a dict of metrics
+                if metrics and type(metrics) == dict:
+                    # Flatten the metrics
+                    metrics = {k: np.mean(v) for k, v in metrics.items()}
+                    # Log the metrics
+                    for key, value in metrics.items():
+                        if isinstance(value, jnp.ndarray):
+                            value = np.array(value)
+                        self.wandb.log({
+                            f"val/{key}": value,
+                        }, step=current_step)
+                        
+        except StopIteration:
+            print(f"Validation dataset exhausted for process index {process_index}")
         except Exception as e:
-            print("Error in validation loop:", e)
+            print(f"Error during validation for process index {process_index}: {e}")
             import traceback
             traceback.print_exc()
+
             
     def _log_video_samples(self, samples, current_step):
         """Helper to log video samples to wandb."""
