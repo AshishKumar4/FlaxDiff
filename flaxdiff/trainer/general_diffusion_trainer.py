@@ -578,6 +578,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         if not hasattr(self, "wandb_sweep"):
             raise ValueError("Wandb sweep is not initialized. Cannot get best runs.")
         
+        print(f"Getting best runs from sweep {self.wandb_sweep.id}...")
         # Get the sweep runs
         runs = sorted(self.wandb_sweep.runs, key=lambda x: x.summary.get(metric, float('inf')))
         best_runs = runs[:top_k]
