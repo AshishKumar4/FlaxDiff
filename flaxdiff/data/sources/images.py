@@ -120,7 +120,7 @@ class ImageTFDSAugmenter(DataAugmenter):
             label_path: Path to the labels file for datasets like Oxford Flowers.
         """
         if label_path is None:
-            label_path = os.path.join(os.path.expanduser("~"), "~/tensorflow_datasets/oxford_flowers102/2.1.1/label.labels.txt")
+            label_path = os.path.join(os.path.expanduser("~"), "tensorflow_datasets/oxford_flowers102/2.1.1/label.labels.txt")
         self.label_path = label_path
     
     def create_transform(self, image_scale: int = 256, method: Any = None) -> Callable[[], pygrain.MapTransform]:
