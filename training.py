@@ -96,7 +96,9 @@ parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
 parser.add_argument('--image_size', type=int, default=128, help='Image size')
 parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
 parser.add_argument('--steps_per_epoch', type=int,
-                    default=None, help='Steps per epoch')
+                    default=None, help='Training Steps per epoch')
+parser.add_argument('--val_steps_per_epoch', type=int,
+                    default=4, help='Validation Steps per epoch')
 parser.add_argument('--dataset', type=str,
                     default='laiona_coco', help='Dataset to use')
 parser.add_argument('--dataset_path', type=str,
@@ -170,6 +172,8 @@ parser.add_argument('--max_checkpoints_to_keep', type=int, default=1, help='Max 
 
 parser.add_argument('--wandb_project', type=str, default='mlops-msml605-project', help='Wandb project name')
 parser.add_argument('--wandb_entity', type=str, default='umd-projects', help='Wandb entity name')
+
+parser.add_argument('--val_metrics', type=str, nargs='+', default=['clip'], help='Validation metrics to use')
 
 # parser.add_argument('--wandb_project', type=str, default='flaxdiff', help='Wandb project name')
 # parser.add_argument('--wandb_entity', type=str, default='ashishkumar4', help='Wandb entity name')
@@ -373,6 +377,14 @@ def main(args):
         ]
     )
     
+    eval_metrics = []
+    # Validation metrics 
+    if args.val_metrics is not None:
+        if 'clip' in args.val_metrics:
+            from flaxdiff.metrics.images import get_clip_metric
+            print("Using CLIP metric for validation")
+            eval_metrics.append(get_clip_metric())
+    
     CONFIG = {
         "model": model_config,
         "architecture": args.architecture,
@@ -410,6 +422,9 @@ def main(args):
         experiment_name = "{name}_{date}".format(
             name="Diffusion_SDE_VE_TEXT", date=datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
         )
+    
+    if autoencoder is not None:
+        experiment_name = f"LDM-{experiment_name}"
         
     conf_args = CONFIG['arguments']
     conf_args['date'] = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
@@ -469,6 +484,7 @@ def main(args):
         use_dynamic_scale=args.use_dynamic_scale,
         native_resolution=IMAGE_SIZE,
         max_checkpoints_to_keep=args.max_checkpoints_to_keep,
+        eval_metrics=eval_metrics,
     )
     
     if trainer.distributed_training:
@@ -489,11 +505,12 @@ def main(args):
     data['test_len'] = len(val_prompts)
 
     final_state = trainer.fit(
-        data, 
-        batches, 
+        data,
+        training_steps_per_epoch=batches,
         epochs=CONFIG['epochs'], 
         sampler_class=EulerAncestralSampler, 
         sampling_noise_schedule=karas_ve_schedule,
+        val_steps_per_epoch=args.val_steps_per_epoch,
     )
     
 if __name__ == '__main__':
