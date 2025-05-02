@@ -20,7 +20,7 @@ from flaxdiff.models.autoencoder import AutoEncoder
 from flaxdiff.inputs import DiffusionInputConfig
 from flaxdiff.utils import defaultTextEncodeModel, RandomMarkovState
 from flaxdiff.samplers.euler import EulerAncestralSampler
-from .utils import parse_config, load_from_wandb_run, load_from_wandb_registry
+from flaxdiff.inference.utils import parse_config, load_from_wandb_run, load_from_wandb_registry
 
 @dataclass
 class InferencePipeline:
@@ -51,9 +51,9 @@ class DiffusionInferencePipeline(InferencePipeline):
     model_output_transform: DiffusionPredictionTransform = None
     autoencoder: AutoEncoder = None
     input_config: DiffusionInputConfig = None
+    wandb_run = None
     samplers: Dict[Type[DiffusionSampler], Dict[float, DiffusionSampler]] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
-    wandb_run = None
     
     @classmethod
     def from_wandb_run(
