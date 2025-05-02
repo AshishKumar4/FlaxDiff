@@ -291,7 +291,7 @@ def get_dataset_grain(
 
     local_batch_size = batch_size // jax.process_count()
 
-    sampler = pygrain.IndexSampler(
+    train_sampler = pygrain.IndexSampler(
         num_records=len(data_source) if count is None else count,
         shuffle=True,
         seed=seed,
@@ -299,6 +299,14 @@ def get_dataset_grain(
         shard_options=pygrain.ShardByJaxProcess(),
     )
 
+    # val_sampler = pygrain.IndexSampler(
+    #     num_records=len(data_source) if count is None else count,
+    #     shuffle=False,
+    #     seed=seed,
+    #     num_epochs=num_epochs,
+    #     shard_options=pygrain.ShardByJaxProcess(),
+    # )
+    
     def get_trainset():
         transformations = [
             augmenter(),
@@ -307,7 +315,7 @@ def get_dataset_grain(
 
         loader = pygrain.DataLoader(
             data_source=data_source,
-            sampler=sampler,
+            sampler=train_sampler,
             operations=transformations,
             worker_count=worker_count,
             read_options=pygrain.ReadOptions(
@@ -316,10 +324,31 @@ def get_dataset_grain(
             worker_buffer_size=worker_buffer_size,
         )
         return loader
+    
+    # def get_valset():
+    #     transformations = [
+    #         augmenter(),
+    #         pygrain.Batch(local_batch_size, drop_remainder=True),
+    #     ]
+
+    #     loader = pygrain.DataLoader(
+    #         data_source=data_source,
+    #         sampler=val_sampler,
+    #         operations=transformations,
+    #         worker_count=worker_count,
+    #         read_options=pygrain.ReadOptions(
+    #             read_thread_count, read_buffer_size
+    #         ),
+    #         worker_buffer_size=worker_buffer_size,
+    #     )
+    #     return loader
+    get_valset = get_trainset  # For now, use the same function for validation
 
     return {
         "train": get_trainset,
         "train_len": len(data_source),
+        "val": get_valset,
+        "val_len": len(data_source),
         "local_batch_size": local_batch_size,
         "global_batch_size": batch_size,
     }

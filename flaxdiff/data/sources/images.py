@@ -167,6 +167,16 @@ class ImageTFDSAugmenter(DataAugmenter):
         
         return TFDSTransform
 
+"""
+Batch structure:
+{
+"image": image_batch,
+"text": {
+    "input_ids": input_ids_batch,
+    "attention_mask": attention_mask_batch,
+}
+
+"""
 
 # ----------------------------------------------------------------------------------
 # GCS Image Source
@@ -248,6 +258,13 @@ class ImageGCSAugmenter(DataAugmenter):
             A callable that returns a pygrain.MapTransform.
         """
         labelizer = self.labelizer
+        if method is None:
+            if image_scale > 256:
+                method = cv2.INTER_CUBIC
+            else:
+                method = cv2.INTER_AREA
+                
+        print(f"Using method: {method}")
         
         class GCSTransform(pygrain.MapTransform):
             def __init__(self, *args, **kwargs):

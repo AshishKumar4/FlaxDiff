@@ -98,9 +98,9 @@ parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
 parser.add_argument('--steps_per_epoch', type=int,
                     default=None, help='Steps per epoch')
 parser.add_argument('--dataset', type=str,
-                    default='cc12m', help='Dataset to use')
+                    default='laiona_coco', help='Dataset to use')
 parser.add_argument('--dataset_path', type=str,
-                    default='/home/mrwhite0racle/gcs_mount/arrayrecord/cc12m', help="Dataset location path")
+                    default='/home/mrwhite0racle/gcs_mount', help="Dataset location path")
 
 parser.add_argument('--noise_schedule', type=str, default='edm',
                     choices=['cosine', 'karras', 'edm'], help='Noise schedule')
