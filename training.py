@@ -131,6 +131,7 @@ parser.add_argument('--patch_size', type=int, default=16, help='Patch size for t
 parser.add_argument('--num_layers', type=int, default=12, help='Number of layers in the transformer if using UViT')
 parser.add_argument('--num_heads', type=int, default=12, help='Number of heads in the transformer if using UViT')
 parser.add_argument('--mlp_ratio', type=int, default=4, help='MLP ratio in the transformer if using UViT')
+parser.add_argument('--use_hilbert', type=boolean_string, default=False, help='Use Hilbert patch reordering for the transformer if using UViT')
 
 parser.add_argument('--dtype', type=str, default=None, help='dtype to use')
 parser.add_argument('--precision', type=str, default=None, help='precision to use', choices=['high', 'default', 'highest', 'None', None])
@@ -336,6 +337,7 @@ def main(args):
                 "add_residualblock_output": args.add_residualblock_output,
                 "use_flash_attention": args.flash_attention,
                 "use_self_and_cross": args.use_self_and_cross,
+                "use_hilbert": args.use_hilbert,
             },
         },
         "simple_dit": {
@@ -347,6 +349,7 @@ def main(args):
                 "dropout_rate": 0.1,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
+                "use_hilbert": args.use_hilbert,
             },
         },
         "simple_mmdit": {
@@ -358,6 +361,7 @@ def main(args):
                 "dropout_rate": 0.1,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
+                "use_hilbert": args.use_hilbert,
             },
         },
         "hierarchical_mmdit": {
@@ -370,6 +374,7 @@ def main(args):
                 "dropout_rate": 0.1,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
+                "use_hilbert": args.use_hilbert,
             },
         },
         "diffusers_unet_simple": {

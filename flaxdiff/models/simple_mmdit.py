@@ -302,6 +302,8 @@ class SimpleMMDiT(nn.Module):
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False  # Option to predict sigma like in DiT paper
     use_hilbert: bool = False  # Toggle Hilbert patch reorder
+    norm_groups: int = 0
+    activation: Callable = jax.nn.swish
 
     def setup(self):
         self.patch_embed = PatchEmbedding(
@@ -530,6 +532,8 @@ class HierarchicalMMDiT(nn.Module):
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False
     use_hilbert: bool = False
+    norm_groups: int = 0
+    activation: Callable = jax.nn.swish
     
     def setup(self):
         assert len(self.emb_features) == len(self.num_layers) == len(self.num_heads), \
