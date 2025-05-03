@@ -1,5 +1,5 @@
 import jax
-jax.config.update("jax_enable_x64", True)
+# jax.config.update("jax_enable_x64", True)
 
 from typing import Any, Tuple, Mapping, Callable, List, Dict
 from functools import partial
@@ -8,6 +8,7 @@ import jax.experimental.multihost_utils
 from flaxdiff.models.common import kernel_init
 from flaxdiff.models.simple_unet import Unet
 from flaxdiff.models.simple_vit import UViT
+from flaxdiff.models.simple_dit import SimpleDiT
 import jax.experimental.pallas.ops.tpu.flash_attention
 from flaxdiff.predictors import VPredictionTransform, EpsilonPredictionTransform, DiffusionPredictionTransform, DirectPredictionTransform, KarrasPredictionTransform
 from flaxdiff.schedulers import CosineNoiseScheduler, NoiseScheduler, GeneralizedNoiseScheduler, KarrasVENoiseScheduler, EDMNoiseScheduler
@@ -108,7 +109,7 @@ parser.add_argument('--noise_schedule', type=str, default='edm',
                     choices=['cosine', 'karras', 'edm'], help='Noise schedule')
 
 parser.add_argument('--architecture', type=str, 
-                    choices=["unet", "uvit", "diffusers_unet_simple"], 
+                    choices=["unet", "uvit", "diffusers_unet_simple", "simple_dit"], 
                     default="unet", help='Architecture to use')
 parser.add_argument('--emb_features', type=int, default=256, help='Embedding features')
 parser.add_argument('--feature_depths', type=int, nargs='+', default=[64, 128, 256, 512], help='Feature depths')
@@ -331,11 +332,20 @@ def main(args):
                 "num_layers":  args.num_layers,
                 "num_heads":  args.num_heads,
                 "dropout_rate": 0.1,
-                "use_projection": False,
                 "add_residualblock_output": args.add_residualblock_output,
-                "use_projection": args.use_projection,
                 "use_flash_attention": args.flash_attention,
                 "use_self_and_cross": args.use_self_and_cross,
+            },
+        },
+        "simple_dit": {
+            "class": SimpleDiT,
+            "kwargs": {
+                "patch_size":  args.patch_size,
+                "num_layers":  args.num_layers,
+                "num_heads":  args.num_heads,
+                "dropout_rate": 0.1,
+                "use_flash_attention": args.flash_attention,
+                "mlp_ratio": args.mlp_ratio,
             },
         },
         "diffusers_unet_simple": {
