@@ -47,6 +47,6 @@ mkdir -p $MOUNT_PATH
 # Grain uses _PROCESS_MANAGEMENT_MAX_THREADS = 64 (https://github.com/google/grain/blob/main/grain/_src/python/grain_pool.py)
 # Please make sure max-conns-per-host > grain_worker_count * _PROCESS_MANAGEMENT_MAX_THREADS
 
-gcsfuse -o ro --implicit-dirs --http-client-timeout=5s --max-conns-per-host=0 --max-idle-conns-per-host=100000 \
-        --experimental-enable-json-read --kernel-list-cache-ttl-secs=-1 -o ro --config-file=$HOME/gcsfuse.yml \
+gcsfuse -o rw --implicit-dirs --http-client-timeout=5s --max-conns-per-host=0 --max-idle-conns-per-host=100000 \
+        --experimental-enable-json-read --kernel-list-cache-ttl-secs=-1 -o rw --config-file=$HOME/gcsfuse.yml \
         --log-file=$HOME/gcsfuse.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH" 

@@ -8,7 +8,7 @@ from .sources.videos import VideoTFDSSource, VideoLocalSource, AudioVideoAugment
 # ---------------------------------------------------------------------------------
 
 from .sources.images import data_source_tfds, tfds_augmenters, data_source_gcs
-from .sources.images import data_source_combined_gcs, gcs_augmenters
+from .sources.images import data_source_combined_gcs, gcs_augmenters, gcs_filters
 
 # Configure the following for your datasets
 datasetMap = {
@@ -23,6 +23,7 @@ datasetMap = {
     "laiona_coco": {
         "source": data_source_gcs('datasets/laion12m+mscoco'),
         "augmenter": gcs_augmenters,
+        "filter": gcs_filters,
     },
     "aesthetic_coyo": {
         "source": data_source_gcs('arrayrecords/aestheticCoyo_0.25clip_6aesthetic'),
