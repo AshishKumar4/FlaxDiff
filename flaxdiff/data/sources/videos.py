@@ -216,6 +216,11 @@ class AudioVideoAugmenter(DataAugmenter):
         
         return AudioVideoTransform
 
+    
+    def create_filter(self, image_scale: int = 256):
+        class FilterTransform(pygrain.FilterTransform):
+            def map(self, element) -> bool:
+                return True
 
 # ----------------------------------------------------------------------------------
 # Helper functions for video datasets

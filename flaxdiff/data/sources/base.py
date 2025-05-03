@@ -62,6 +62,18 @@ class DataAugmenter(ABC):
         """
         pass
     
+    @abstractmethod
+    def create_filter(self, **kwargs) -> Callable[[], pygrain.FilterTransform]:
+        """Create a filter function for the data.
+        
+        Args:
+            **kwargs: Additional arguments for the filter.
+            
+        Returns:
+            A callable that returns a pygrain.FilterTransform instance.
+        """
+        pass
+    
     @staticmethod
     def create(augmenter_type: str, **kwargs) -> 'DataAugmenter':
         """Factory method to create a data augmenter of the specified type.

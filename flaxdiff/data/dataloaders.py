@@ -251,6 +251,12 @@ def generate_collate_fn(media_type="image"):
     else:  # Default to image
         return image_collate
 
+class CaptionDeletionTransform(pygrain.MapTransform):
+    def map(self, element):
+        """Delete the caption from the element."""
+        if "caption" in element:
+            del element["caption"]
+        return element
 
 def get_dataset_grain(
     data_name="cc12m",
@@ -288,6 +294,7 @@ def get_dataset_grain(
     dataset = datasetMap[data_name]
     data_source = dataset["source"](dataset_source)
     augmenter = dataset["augmenter"](image_scale, method)
+    filters = dataset.get("filter", None)(image_scale)
 
     local_batch_size = batch_size // jax.process_count()
 
@@ -310,8 +317,14 @@ def get_dataset_grain(
     def get_trainset():
         transformations = [
             augmenter(),
-            pygrain.Batch(local_batch_size, drop_remainder=True),
         ]
+        
+        if filters:
+            print("Adding filters to transformations")
+            transformations.append(filters())
+            
+        transformations.append(CaptionDeletionTransform())
+        transformations.append(pygrain.Batch(local_batch_size, drop_remainder=True))
 
         loader = pygrain.DataLoader(
             data_source=data_source,
