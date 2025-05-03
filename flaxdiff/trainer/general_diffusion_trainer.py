@@ -423,7 +423,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         process_index = jax.process_index()
         generate_samples = val_step_fn
         
-        val_ds = iter(val_ds()) if val_ds else None
+        val_ds = iter(val_ds) if val_ds else None
         # Evaluation step
         try:
             metrics = {metric.name: [] for metric in self.eval_metrics} if self.eval_metrics else {}
