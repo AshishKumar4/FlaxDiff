@@ -7,10 +7,13 @@ import einops
 from functools import partial
 
 # Re-use existing components if they are suitable
-from .common import kernel_init, FourierEmbedding, TimeProjection, hilbert_indices, inverse_permutation
+from .common import kernel_init, FourierEmbedding, TimeProjection
 # Using NormalAttention for RoPE integration
 from .attention import NormalAttention
 from flax.typing import Dtype, PrecisionLike
+
+# Use our improved Hilbert implementation
+from .hilbert import hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify
 
 # --- Rotary Positional Embedding (RoPE) ---
 # Adapted from https://github.com/google-deepmind/ring_attention/blob/main/ring_attention/layers/rotary.py
@@ -350,17 +353,19 @@ class SimpleDiT(nn.Module):
         B, H, W, C = x.shape
         assert H % self.patch_size == 0 and W % self.patch_size == 0, "Image dimensions must be divisible by patch size"
 
+        # Compute dimensions in terms of patches
+        H_P = H // self.patch_size
+        W_P = W // self.patch_size
+
         # 1. Patch Embedding
-        patches = self.patch_embed(x)  # Shape: [B, num_patches, emb_features]
-        num_patches = patches.shape[1]
-
-        # Optional Hilbert reorder
         if self.use_hilbert:
-            idx = hilbert_indices(H // self.patch_size, W // self.patch_size)
-            inv_idx = inverse_permutation(idx)
-            patches = patches[:, idx, :]
+            # Use hilbert_patchify which handles both patchification and reordering
+            patches, hilbert_inv_idx = hilbert_patchify(x, self.patch_size)
+        else:
+            patches = self.patch_embed(x)  # Shape: [B, num_patches, emb_features]
+            hilbert_inv_idx = None
 
-        # replace x with patches
+        num_patches = patches.shape[1]
         x_seq = patches
 
         # 2. Prepare Conditioning Signal (Time + Text Context)
@@ -390,21 +395,32 @@ class SimpleDiT(nn.Module):
         # Shape: [B, num_patches, patch_pixels (*2 if learn_sigma)]
         x_out = self.final_proj(x_out)
 
-        # Optional Hilbert inverse reorder
-        if self.use_hilbert:
-            x_out = x_out[:, inv_idx, :]
-
         # 6. Unpatchify
-        if self.learn_sigma:
-            # Split into mean and variance predictions
-            x_mean, x_logvar = jnp.split(x_out, 2, axis=-1)
-            x = unpatchify(x_mean, channels=self.output_channels)
-            # Return both mean and logvar if needed by the loss function
-            # For now, just returning the mean prediction like standard diffusion models
-            # logvar = unpatchify(x_logvar, channels=self.output_channels)
-            # return x, logvar
-            return x
+        if self.use_hilbert:
+            # For Hilbert mode, we need to use the specialized unpatchify function
+            if self.learn_sigma:
+                # Split into mean and variance predictions
+                x_mean, x_logvar = jnp.split(x_out, 2, axis=-1)
+                x_image = hilbert_unpatchify(x_mean, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+                # If needed, also unpack the logvar
+                # logvar_image = hilbert_unpatchify(x_logvar, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+                # return x_image, logvar_image
+                return x_image
+            else:
+                x_image = hilbert_unpatchify(x_out, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+                return x_image
         else:
-            # Shape: [B, H, W, C]
-            x = unpatchify(x_out, channels=self.output_channels)
-            return x
+            # Standard patch ordering - use the existing unpatchify function
+            if self.learn_sigma:
+                # Split into mean and variance predictions
+                x_mean, x_logvar = jnp.split(x_out, 2, axis=-1)
+                x = unpatchify(x_mean, channels=self.output_channels)
+                # Return both mean and logvar if needed by the loss function
+                # For now, just returning the mean prediction like standard diffusion models
+                # logvar = unpatchify(x_logvar, channels=self.output_channels)
+                # return x, logvar
+                return x
+            else:
+                # Shape: [B, H, W, C]
+                x = unpatchify(x_out, channels=self.output_channels)
+                return x
