@@ -10,7 +10,7 @@ from flaxdiff.models.simple_unet import FourierEmbedding, TimeProjection, ConvLa
 import einops
 from flax.typing import Dtype, PrecisionLike
 from functools import partial
-from .common import hilbert_indices, inverse_permutation
+from .hilbert import hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify
 
 def unpatchify(x, channels=3):
     patch_size = int((x.shape[2] // channels) ** 0.5)
@@ -88,15 +88,20 @@ class UViT(nn.Module):
         W_P = W // self.patch_size
 
         # Patch embedding
-        x = PatchEmbedding(patch_size=self.patch_size, embedding_dim=self.emb_features, 
-                           dtype=self.dtype, precision=self.precision)(x)
-        num_patches = x.shape[1]
-
-        # Optional Hilbert reorder
         if self.use_hilbert:
+            # Extract patches and apply embedding in one step
+            patches = PatchEmbedding(patch_size=self.patch_size, embedding_dim=self.emb_features, 
+                           dtype=self.dtype, precision=self.precision)(x)
+            # Apply Hilbert reordering
             idx = hilbert_indices(H_P, W_P)
             inv_idx = inverse_permutation(idx)
-            x = x[:, idx, :]
+            x = patches[:, idx, :]
+        else:
+            # Standard patch embedding
+            x = PatchEmbedding(patch_size=self.patch_size, embedding_dim=self.emb_features, 
+                           dtype=self.dtype, precision=self.precision)(x)
+        
+        num_patches = x.shape[1]
 
         context_emb = nn.DenseGeneral(features=self.emb_features, 
                                dtype=self.dtype, precision=self.precision)(textcontext)
@@ -150,18 +155,23 @@ class UViT(nn.Module):
         
         patch_dim = self.patch_size ** 2 * self.output_channels
         x = nn.Dense(features=patch_dim, dtype=self.dtype, precision=self.precision)(x)
-        # If Hilbert, restore original patch order
-        if self.use_hilbert:
-            x = x[:, inv_idx, :]
+        
         # Extract only the image patch tokens (first num_patches tokens)
         x = x[:, :num_patches, :] 
-        x = unpatchify(x, channels=self.output_channels)
+        
+        # Unpatchify based on method
+        if self.use_hilbert:
+            # Restore Hilbert order to row-major order and then to image
+            x_image = hilbert_unpatchify(x, inv_idx, self.patch_size, H, W, self.output_channels)
+        else:
+            # Standard unpatchify
+            x_image = unpatchify(x, channels=self.output_channels)
         
         if self.add_residualblock_output:
             # Concatenate the original image
-            x = jnp.concatenate([original_img, x], axis=-1)
+            x_image = jnp.concatenate([original_img, x_image], axis=-1)
             
-            x = ConvLayer(
+            x_image = ConvLayer(
                 "conv",
                 features=64,
                 kernel_size=(3, 3),
@@ -169,12 +179,12 @@ class UViT(nn.Module):
                 # activation=jax.nn.mish
                 dtype=self.dtype,
                 precision=self.precision
-            )(x)
+            )(x_image)
 
-            x = self.norm()(x)
-            x = self.activation(x)
+            x_image = self.norm()(x_image)
+            x_image = self.activation(x_image)
 
-        x = ConvLayer(
+        x_image = ConvLayer(
             "conv",
             features=self.output_channels,
             kernel_size=(3, 3),
@@ -182,5 +192,5 @@ class UViT(nn.Module):
             # activation=jax.nn.mish
             dtype=self.dtype,
             precision=self.precision
-        )(x)
-        return x
+        )(x_image)
+        return x_image
