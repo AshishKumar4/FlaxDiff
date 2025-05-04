@@ -468,6 +468,9 @@ def main(args):
     if autoencoder is not None:
         experiment_name = f"LDM-{experiment_name}"
         
+    if args.use_hilbert:
+        experiment_name = f"Hilbert-{experiment_name}"
+        
     conf_args = CONFIG['arguments']
     conf_args['date'] = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     conf_args['arguments_hash'] = arguments_hash
