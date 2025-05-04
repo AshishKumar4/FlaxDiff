@@ -708,20 +708,27 @@ class HierarchicalMMDiT(nn.Module):
             f"Image dimensions must be divisible by coarsest patch size {coarsest_patch_size}"
         assert textcontext is not None, "textcontext must be provided"
         
-        # Start with coarsest patch embedding
-        patches = self.patch_embed(x)  # Shape: [B, num_patches, emb_features[-1]]
-        H_patches = H // coarsest_patch_size
-        W_patches = W // coarsest_patch_size
-        num_patches = H_patches * W_patches
+        # 1. Patch Embedding (Conditional Hilbert at Coarsest Level)
+        H_patches_coarse = H // coarsest_patch_size
+        W_patches_coarse = W // coarsest_patch_size
         
-        # Optional Hilbert reorder at coarsest level
         hilbert_inv_idx = None
         if self.use_hilbert:
-            idx = hilbert_indices(H_patches, W_patches)
-            hilbert_inv_idx = inverse_permutation(idx)
-            patches = patches[:, idx, :]
+            # Use hilbert_patchify which handles both patchification and reordering at coarsest level
+            patches_raw, hilbert_inv_idx = hilbert_patchify(x, coarsest_patch_size) # Shape [B, S_coarse, P_coarse*P_coarse*C]
+            # Apply projection
+            patches = self.hilbert_proj(patches_raw) # Shape [B, S_coarse, emb_features[-1]]
+        else:
+            # Standard patch embedding at coarsest level
+            patches = self.patch_embed(x)  # Shape: [B, num_patches_coarse, emb_features[-1]]
+            hilbert_inv_idx = None # Ensure it's None if not using Hilbert
             
-        x_seq = patches  # Start sequence at coarsest level
+        num_patches = patches.shape[1]
+        assert num_patches == H_patches_coarse * W_patches_coarse, "Patch number mismatch"
+        
+        x_seq = patches  # Start sequence at coarsest level (stage num_stages-1)
+        H_patches = H_patches_coarse # Track current patch grid height
+        W_patches = W_patches_coarse # Track current patch grid width
         
         # Prepare conditioning signals
         t_emb = self.time_embed(temb)  # Shape: [B, emb_features[-1]]
@@ -815,14 +822,33 @@ class HierarchicalMMDiT(nn.Module):
         x_seq = self.final_norm(x_seq)
         x_seq = self.final_proj(x_seq)
         
-        # Undo Hilbert ordering if used
-        if self.use_hilbert and hilbert_inv_idx is not None:
-            x_seq = x_seq[:, hilbert_inv_idx, :]
-            
-        # Determine output channels for unpatchify
-        final_out_channels = self.output_channels * (2 if self.learn_sigma else 1)
-        
-        # Reshape back to image space
-        out = unpatchify(x_seq, channels=final_out_channels)
+        # 6. Unpatchify (Conditional Hilbert at Finest Level)
+        if self.use_hilbert:
+            # For Hilbert mode, use specialized unpatchify with the *finest* patch size
+            # The hilbert_inv_idx was calculated based on the *coarsest* grid, 
+            # but hilbert_unpatchify needs the inverse permutation for the *finest* grid.
+            # We need to recalculate the inverse index for the finest grid.
+            H_patches_fine = H // finest_patch_size
+            W_patches_fine = W // finest_patch_size
+            fine_idx = hilbert_indices(H_patches_fine, W_patches_fine)
+            fine_hilbert_inv_idx = inverse_permutation(fine_idx)
+
+            if self.learn_sigma:
+                x_mean, x_logvar = jnp.split(x_seq, 2, axis=-1)
+                # Use the recalculated inverse index for the finest grid
+                out = hilbert_unpatchify(x_mean, fine_hilbert_inv_idx, finest_patch_size, H, W, self.output_channels)
+                # Optionally return logvar: logvar_image = hilbert_unpatchify(x_logvar, fine_hilbert_inv_idx, finest_patch_size, H, W, self.output_channels)
+            else:
+                 # Use the recalculated inverse index for the finest grid
+                out = hilbert_unpatchify(x_seq, fine_hilbert_inv_idx, finest_patch_size, H, W, self.output_channels)
+        else:
+            # Standard unpatchify using the *finest* patch size implicitly via output_dim calculation
+            if self.learn_sigma:
+                 x_mean, x_logvar = jnp.split(x_seq, 2, axis=-1)
+                 # unpatchify expects the channels argument to be the *final* number of channels per pixel (e.g., 3 for RGB) 
+                 out = unpatchify(x_mean, channels=self.output_channels) 
+                 # Optionally return logvar: logvar = unpatchify(x_logvar, channels=self.output_channels)
+            else:
+                 out = unpatchify(x_seq, channels=self.output_channels)
         
         return out
