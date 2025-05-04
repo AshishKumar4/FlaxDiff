@@ -595,10 +595,10 @@ class HierarchicalMMDiT(nn.Module):
         )
 
         # Define projection layers for time and text embeddings for finer stages
-        self.t_emb_projs = []
-        self.text_emb_projs = []
+        t_emb_projs = []
+        text_emb_projs = []
         for stage in range(num_stages - 1): # Only need projections for stages 0 to num_stages-2
-            self.t_emb_projs.append(
+            t_emb_projs.append(
                 nn.Dense(
                     features=self.emb_features[stage],
                     dtype=self.dtype,
@@ -606,7 +606,7 @@ class HierarchicalMMDiT(nn.Module):
                     name=f"t_emb_proj_stage{stage}"
                 )
             )
-            self.text_emb_projs.append(
+            text_emb_projs.append(
                 nn.Dense(
                     features=self.emb_features[stage],
                     dtype=self.dtype,
@@ -614,6 +614,9 @@ class HierarchicalMMDiT(nn.Module):
                     name=f"text_emb_proj_stage{stage}"
                 )
             )
+            
+        self.t_emb_projs = t_emb_projs
+        self.text_emb_projs = text_emb_projs
 
         # Add projection layer for Hilbert patches
         if self.use_hilbert:
