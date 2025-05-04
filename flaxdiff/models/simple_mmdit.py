@@ -331,6 +331,14 @@ class SimpleMMDiT(nn.Module):
                      precision=self.precision)  # Final projection
         ], name="time_embed")
 
+        # Add projection layer for Hilbert patches
+        if self.use_hilbert:
+            self.hilbert_proj = nn.Dense(
+                features=self.emb_features,
+                dtype=self.dtype,
+                precision=self.precision,
+                name="hilbert_projection"
+            )
         # Text context projection (output dim: emb_features)
         # Input dim depends on the text encoder output, assumed to be handled externally
         self.text_proj = nn.Dense(features=self.emb_features, dtype=self.dtype,
@@ -383,18 +391,17 @@ class SimpleMMDiT(nn.Module):
         assert textcontext is not None, "textcontext must be provided for SimpleMMDiT"
 
         # 1. Patch Embedding
-        patches = self.patch_embed(x)  # Shape: [B, num_patches, emb_features]
-        num_patches = patches.shape[1]
-
-        # Optional Hilbert reorder
-        hilbert_inv_idx = None
         if self.use_hilbert:
-            idx = hilbert_indices(H // self.patch_size, W // self.patch_size)
-            hilbert_inv_idx = inverse_permutation(
-                idx)  # Store inverse for unpatchify
-            patches = patches[:, idx, :]
+            # Use hilbert_patchify which handles both patchification and reordering
+            patches_raw, hilbert_inv_idx = hilbert_patchify(x, self.patch_size) # Shape [B, S, P*P*C]
+            # Apply projection
+            patches = self.hilbert_proj(patches_raw) # Shape [B, S, emb_features]
+        else:
+            patches = self.patch_embed(x)  # Shape: [B, num_patches, emb_features]
+            hilbert_inv_idx = None
 
-        x_seq = patches  # Shape: [B, num_patches, emb_features]
+        num_patches = patches.shape[1]
+        x_seq = patches
 
         # 2. Prepare Conditioning Signals
         t_emb = self.time_embed(temb)      # Shape: [B, emb_features]
@@ -419,21 +426,35 @@ class SimpleMMDiT(nn.Module):
         x_seq = self.final_proj(x_seq)
 
         # 6. Unpatchify
-        # Optional Hilbert unorder
-        if self.use_hilbert and hilbert_inv_idx is not None:
-            x_seq = x_seq[:, hilbert_inv_idx, :]
+        if self.use_hilbert:
+            # For Hilbert mode, we need to use the specialized unpatchify function
+            if self.learn_sigma:
+                # Split into mean and variance predictions
+                x_mean, x_logvar = jnp.split(x_seq, 2, axis=-1)
+                x_image = hilbert_unpatchify(x_mean, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+                # If needed, also unpack the logvar
+                # logvar_image = hilbert_unpatchify(x_logvar, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+                # return x_image, logvar_image
+                return x_image
+            else:
+                x_image = hilbert_unpatchify(x_seq, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+                return x_image
+        else:
+            # Standard patch ordering - use the existing unpatchify function
+            if self.learn_sigma:
+                # Split into mean and variance predictions
+                x_mean, x_logvar = jnp.split(x_seq, 2, axis=-1)
+                x = unpatchify(x_mean, channels=self.output_channels)
+                # Return both mean and logvar if needed by the loss function
+                # For now, just returning the mean prediction like standard diffusion models
+                # logvar = unpatchify(x_logvar, channels=self.output_channels)
+                # return x, logvar
+                return x
+            else:
+                # Shape: [B, H, W, C]
+                x = unpatchify(x_seq, channels=self.output_channels)
+                return x
 
-        # Determine output channels for unpatchify
-        final_out_channels = self.output_channels * \
-            (2 if self.learn_sigma else 1)
-
-        # Reshape back to image space
-        # Shape: [B, H, W, C (*2 if learn_sigma)]
-        out = unpatchify(x_seq, channels=final_out_channels)
-
-        # If learn_sigma is True, the output has doubled channels.
-        # The caller is responsible for splitting if needed.
-        return out
 
 
 # --- Hierarchical MM-DiT components ---
@@ -573,6 +594,15 @@ class HierarchicalMMDiT(nn.Module):
             name="text_context_proj"
         )
         
+        # Add projection layer for Hilbert patches
+        if self.use_hilbert:
+            self.hilbert_proj = nn.Dense(
+                features=self.emb_features,
+                dtype=self.dtype,
+                precision=self.precision,
+                name="hilbert_projection"
+            )
+
         # Create RoPE embeddings for each stage
         self.ropes = [
             RotaryEmbedding(
