@@ -26,6 +26,7 @@ from flax.training.dynamic_scale import DynamicScale
 from flaxdiff.utils import RandomMarkovState
 from flax.training import dynamic_scale as dynamic_scale_lib
 from dataclasses import dataclass
+import shutil
 import gc
 
 PROCESS_COLOR_MAP = {
@@ -72,6 +73,54 @@ class Metrics(metrics.Collection):
 class SimpleTrainState(train_state.TrainState):
     metrics: Metrics
     dynamic_scale: dynamic_scale_lib.DynamicScale
+
+def move_contents_to_subdir(target_dir, new_subdir_name):
+    # --- 1. Validate Target Directory ---
+    if not os.path.isdir(target_dir):
+        print(f"Error: Target directory '{target_dir}' not found or is not a directory.")
+        return
+    # --- 2. Define Paths ---
+    # Construct the full path for the new subdirectory
+    new_subdir_path = os.path.join(target_dir, new_subdir_name)
+    # --- 3. Create New Subdirectory ---
+    try:
+        # Create the subdirectory.
+        # exist_ok=True prevents an error if the directory already exists.
+        os.makedirs(new_subdir_path, exist_ok=True)
+        print(f"Subdirectory '{new_subdir_path}' created or already exists.")
+    except OSError as e:
+        print(f"Error creating subdirectory '{new_subdir_path}': {e}")
+        return # Stop execution if subdirectory creation fails
+    # --- 4. List Contents of Target Directory ---
+    try:
+        items_to_move = os.listdir(target_dir)
+    except OSError as e:
+        print(f"Error listing contents of '{target_dir}': {e}")
+        return # Stop if we can't list directory contents
+    # --- 5. Move Items ---
+    print(f"Moving items from '{target_dir}' to '{new_subdir_path}'...")
+    moved_count = 0
+    error_count = 0
+    for item_name in items_to_move:
+        # Construct the full path of the item in the target directory
+        source_path = os.path.join(target_dir, item_name)
+        # IMPORTANT: Skip the newly created subdirectory itself!
+        if source_path == new_subdir_path:
+            continue
+        # Construct the destination path inside the new subdirectory
+        destination_path = os.path.join(new_subdir_path, item_name)
+        # Move the item
+        try:
+            shutil.move(source_path, destination_path)
+            # print(f"  Moved: '{item_name}'") # Uncomment for verbose output
+            moved_count += 1
+        except Exception as e:
+            print(f"  Error moving '{item_name}': {e}")
+            error_count += 1
+    print(f"\nOperation complete.")
+    print(f"  Successfully moved: {moved_count} item(s).")
+    if error_count > 0:
+        print(f"  Errors encountered: {error_count} item(s).")
 
 @dataclass
 class SimpleTrainer:
@@ -124,6 +173,17 @@ class SimpleTrainer:
                 if train_start_step_override is None:
                     train_start_step_override = run.summary['train/step'] + 1
                 print(f"Resuming from previous run {wandb_config['id']} with start step {train_start_step_override}")
+                
+                # If load_from_checkpoint is not set, and an artifact is found, load the artifact
+                if load_from_checkpoint is None:
+                    model_artifacts = [i for i in run.logged_artifacts() if i.type == 'model']
+                    if model_artifacts:
+                        artifact = model_artifacts[0]
+                        artifact_dir = artifact.download()
+                        print(f"Loading model from artifact {artifact.name} at {artifact_dir}")
+                        # Move the artifact's contents
+                        load_from_checkpoint = os.path.join(artifact_dir, str(run.summary['train/step']))
+                        move_contents_to_subdir(artifact_dir, load_from_checkpoint)
             
             # define our custom x axis metric
             self.wandb.define_metric("train/step")
@@ -272,6 +332,7 @@ class SimpleTrainer:
             f"{step}")
         self.loaded_checkpoint_path = loaded_checkpoint_path
         ckpt = checkpointer.restore(step)
+        
         state = ckpt['state']
         best_state = ckpt['best_state']
         rngstate = ckpt['rngs']
@@ -590,5 +651,5 @@ class SimpleTrainer:
                 )
                 print(colored(f"Validation done on process index {process_index}", PROCESS_COLOR_MAP[process_index]))
                 
-        self.save(epochs)
+        self.save(epochs)#
         return self.state
