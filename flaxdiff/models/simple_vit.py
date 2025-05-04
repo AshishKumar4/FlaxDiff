@@ -127,8 +127,7 @@ class UViT(nn.Module):
 
         # --- Conditioning ---
         self.time_embed = nn.Sequential([
-            # Fourier often uses float32
-            FourierEmbedding(features=self.emb_features, dtype=jnp.float32),
+            FourierEmbedding(features=self.emb_features),
             TimeProjection(features=self.emb_features,
                            dtype=self.dtype, precision=self.precision)
         ], name="time_embed")
