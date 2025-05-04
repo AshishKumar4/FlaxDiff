@@ -346,7 +346,7 @@ def get_dataset_grain(
 
         loader = pygrain.DataLoader(
             data_source=val_source,
-            sampler=val_sampler,
+            sampler=train_sampler,
             operations=transformations,
             worker_count=2,
             read_options=pygrain.ReadOptions(
