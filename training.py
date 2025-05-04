@@ -19,7 +19,7 @@ import struct as st
 import flax
 import tqdm
 import jax.numpy as jnp
-
+import re
 import optax
 import time
 import os
@@ -140,8 +140,8 @@ parser.add_argument('--distributed_training', type=boolean_string, default=True,
 parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
 parser.add_argument('--load_from_checkpoint', type=str,
                     default=None, help='Load from the best previously stored checkpoint. The checkpoint path should be provided')
-parser.add_argument('--resume_last_run', type=boolean_string,
-                    default=False, help='Resume the last run from the experiment name')
+parser.add_argument('--resume_last_run', type=str,
+                    default=None, help='Resume the last run from the experiment name')
 parser.add_argument('--dataset_seed', type=int, default=0, help='Dataset starting seed')
 
 parser.add_argument('--dataset_test', type=boolean_string,
@@ -452,29 +452,30 @@ def main(args):
     karas_ve_schedule = KarrasVENoiseScheduler(
         1, sigma_max=80, rho=7, sigma_data=0.5)
     edm_schedule = EDMNoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
-
-    if args.experiment_name and args.experiment_name != "":
-        experiment_name = args.experiment_name
-        if not args.resume_last_run:
-            experiment_name = f"{experiment_name}/" + "arguments_hash-{arguments_hash}/date-{date}"
-        else:
-            # TODO: Add logic to load the last run from wandb
-            pass
-    else:
-        experiment_name = "{name}_{date}".format(
-            name="Diffusion_SDE_VE_TEXT", date=datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-        )
     
-    if autoencoder is not None:
-        experiment_name = f"LDM-{experiment_name}"
-        
-    if args.use_hilbert:
-        experiment_name = f"Hilbert-{experiment_name}"
-        
-    conf_args = CONFIG['arguments']
-    conf_args['date'] = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-    conf_args['arguments_hash'] = arguments_hash
-    experiment_name = experiment_name.format(**conf_args)
+    if args.experiment_name is not None:
+        experiment_name = args.experiment_name
+    else:
+        experiment_name = "manual-dataset-{dataset}/image_size-{image_size}/batch-{batch_size}/schd-{noise_schedule}/dtype-{dtype}/arch-{architecture}/lr-{learning_rate}/resblks-{num_res_blocks}/emb-{emb_features}/pure-attn-{only_pure_attention}"
+    
+    # Check if format strings are required using regex
+    pattern = r"\{.+?\}"
+    if re.search(pattern, experiment_name):
+        experiment_name = f"{experiment_name}/" + "arguments_hash-{arguments_hash}/date-{date}"
+        if autoencoder is not None:
+            experiment_name = f"LDM-{experiment_name}"
+                
+        if args.use_hilbert:
+            experiment_name = f"Hilbert-{experiment_name}"
+                
+        conf_args = CONFIG['arguments']
+        conf_args['date'] = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+        conf_args['arguments_hash'] = arguments_hash
+        # Format the string with the arguments
+        experiment_name = experiment_name.format(**vars(args))
+    else:
+        # If no format strings, just use the provided name
+        experiment_name = args.experiment_name
         
     print("Experiment_Name:", experiment_name)
 
@@ -510,6 +511,9 @@ def main(args):
         "config": CONFIG,
         "name": experiment_name,
     }
+    
+    if args.resume_last_run is not None:
+        wandb_config['id'] = args.resume_last_run
     
     start_time = time.time()
     
