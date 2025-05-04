@@ -210,6 +210,7 @@ def hilbert_patchify(x: jnp.ndarray, patch_size: int) -> Tuple[jnp.ndarray, jnp.
 def hilbert_unpatchify(x: jnp.ndarray, inv_idx: jnp.ndarray, patch_size: int, H: int, W: int, C: int) -> jnp.ndarray:
     """
     Restore the original row-major order of patches and convert back to image.
+    (Revised version to be JIT-compatible)
 
     Args:
         x: Hilbert-ordered patches tensor [B, N, P*P*C] (N = number of patches in Hilbert order).
@@ -224,48 +225,58 @@ def hilbert_unpatchify(x: jnp.ndarray, inv_idx: jnp.ndarray, patch_size: int, H:
         Image tensor of shape [B, H, W, C].
     """
     B = x.shape[0]
-    N = x.shape[1] # Number of patches provided in Hilbert order
+    N = x.shape[1] # Number of patches provided in Hilbert order (h dimension)
     patch_dim = x.shape[2]
     H_P = H // patch_size
     W_P = W // patch_size
-    total_patches_expected = H_P * W_P
+    total_patches_expected = H_P * W_P # Number of patches expected in output (k dimension)
 
     # Ensure inv_idx has the expected total size
-    # assert inv_idx.shape[0] == total_patches_expected, \
-    #     f"Inverse index size {inv_idx.shape[0]} does not match expected total patches {total_patches_expected}"
+    assert inv_idx.shape[0] == total_patches_expected, \
+         f"Inverse index size {inv_idx.shape[0]} does not match expected total patches {total_patches_expected}"
 
-    # Create output array for row-major patches, initialized with zeros
-    # This ensures that any position not covered by the Hilbert curve remains zero
-    row_major_patches = jnp.zeros((B, total_patches_expected, patch_dim), dtype=x.dtype)
+    # --- JIT-compatible Scatter using Gather and Where ---
 
-    # --- Vectorized Scatter Operation ---
-    # Find the row-major indices (k) and Hilbert indices (h) that are valid
-    all_k_indices = jnp.arange(total_patches_expected, dtype=inv_idx.dtype) # All possible row-major indices k
-    all_h_indices = inv_idx # Corresponding Hilbert indices h (or -1)
+    # Target shape for row-major patches
+    target_shape = (B, total_patches_expected, patch_dim)
 
-    # Create a mask for valid indices: h must be non-negative and less than N (the number of input patches)
-    valid_mask = (all_h_indices >= 0) & (all_h_indices < N)
+    # Create indices for gathering from x (Hilbert order h) based on inv_idx (map k -> h)
+    # inv_idx contains the 'h' index for each 'k' index.
+    # Clamp invalid indices (-1) to 0; we'll mask these results later.
+    # Values must be < N (the actual number of patches in x).
+    h_indices_for_gather = jnp.maximum(inv_idx, 0) # Shape [total_patches_expected]
 
-    # Filter k and h based on the mask
-    target_k = all_k_indices[valid_mask] # Row-major indices to write to
-    source_h = all_h_indices[valid_mask] # Hilbert indices to read from
+    # Define gather for one batch item: output[k] = input[h_indices[k]]
+    def gather_one_batch(single_x, h_indices):
+        # single_x: [N, D], h_indices: [K] where K = total_patches_expected
+        # Check bounds: Ensure indices used are within the valid range [0, N-1] of single_x
+        # This check might be redundant if inv_idx < N mask is applied correctly later,
+        # but can prevent out-of-bounds access if N is smaller than expected.
+        safe_h_indices = jnp.minimum(h_indices, N - 1)
+        return single_x[safe_h_indices, :] # Result: [K, D]
 
-    # Define a function to perform the scatter for a single batch item
-    def scatter_one_batch(single_x, single_row_major_patches, source_h_indices, target_k_indices):
-        # Gather patches from the Hilbert-ordered input using source_h indices
-        source_patches = single_x[source_h_indices, :] # Shape: [num_valid, patch_dim]
-        # Scatter these patches into the row-major output array at target_k indices
-        return single_row_major_patches.at[target_k_indices, :].set(source_patches)
+    # Use vmap to gather across the batch dimension
+    # Result `gathered_patches` has shape [B, total_patches_expected, patch_dim]
+    gathered_patches = jax.vmap(gather_one_batch, in_axes=(0, None))(x, h_indices_for_gather)
 
-    # Use vmap to apply the scatter operation across the batch dimension
-    scatter_vmapped = jax.vmap(scatter_one_batch, in_axes=(0, 0, None, None), out_axes=0)
-    row_major_patches = scatter_vmapped(x, row_major_patches, source_h, target_k)
-    # --- End Vectorized Scatter ---
+    # Create a mask for valid k indices (where corresponding h was valid)
+    # A valid h must be >= 0 and < N (number of patches provided in x).
+    valid_k_mask = (inv_idx >= 0) & (inv_idx < N) # Shape [total_patches_expected]
+
+    # Expand mask for broadcasting with patch dimensions: [1, K, 1]
+    valid_k_mask_broadcast = valid_k_mask[None, :, None]
+
+    # Use `where` to select gathered patches for valid k, and zeros otherwise.
+    # This is JIT-friendly as shapes are consistent.
+    row_major_patches = jnp.where(
+        valid_k_mask_broadcast,
+        gathered_patches,
+        jnp.zeros(target_shape, dtype=x.dtype) # Use explicit shape for zeros
+    )
+    # --- End JIT-compatible Scatter ---
 
     # Convert the fully populated (or zero-padded) row-major patches back to image
     return unpatchify(row_major_patches, patch_size, H, W, C)
-
-
 # --- Visualization and Demo ---
 
 def visualize_hilbert_curve(H: int, W: int, patch_size: int, figsize=(12, 5)):
