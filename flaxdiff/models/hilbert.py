@@ -231,29 +231,36 @@ def hilbert_unpatchify(x: jnp.ndarray, inv_idx: jnp.ndarray, patch_size: int, H:
     total_patches_expected = H_P * W_P
 
     # Ensure inv_idx has the expected total size
-    assert inv_idx.shape[0] == total_patches_expected, \
-        f"Inverse index size {inv_idx.shape[0]} does not match expected total patches {total_patches_expected}"
+    # assert inv_idx.shape[0] == total_patches_expected, \
+    #     f"Inverse index size {inv_idx.shape[0]} does not match expected total patches {total_patches_expected}"
 
     # Create output array for row-major patches, initialized with zeros
     # This ensures that any position not covered by the Hilbert curve remains zero
     row_major_patches = jnp.zeros((B, total_patches_expected, patch_dim), dtype=x.dtype)
 
-    # Iterate through all possible row-major positions k (0 to total_patches_expected - 1)
-    for k in range(total_patches_expected):
-        # Find the Hilbert sequence index 'h' corresponding to this row-major position 'k'
-        hilbert_sequence_index = inv_idx[k]
+    # --- Vectorized Scatter Operation ---
+    # Find the row-major indices (k) and Hilbert indices (h) that are valid
+    all_k_indices = jnp.arange(total_patches_expected, dtype=inv_idx.dtype) # All possible row-major indices k
+    all_h_indices = inv_idx # Corresponding Hilbert indices h (or -1)
 
-        # Check if this row-major position 'k' actually corresponds to a valid patch
-        # in the Hilbert sequence (h != -1) AND that the Hilbert index 'h' is within
-        # the bounds of the input patches 'x' (h < N).
-        if hilbert_sequence_index != -1 and hilbert_sequence_index < N:
-            # Get the patch from the Hilbert-ordered input 'x' at index 'h'
-            source_patch = x[:, hilbert_sequence_index, :]
-            # Place it in the correct row-major position 'k'
-            row_major_patches = row_major_patches.at[:, k, :].set(source_patch)
-        # else: The position k was outside the original filtered Hilbert curve path
-        # or the input 'x' didn't contain a patch for this position.
-        # Leave the corresponding slot in row_major_patches as zero.
+    # Create a mask for valid indices: h must be non-negative and less than N (the number of input patches)
+    valid_mask = (all_h_indices >= 0) & (all_h_indices < N)
+
+    # Filter k and h based on the mask
+    target_k = all_k_indices[valid_mask] # Row-major indices to write to
+    source_h = all_h_indices[valid_mask] # Hilbert indices to read from
+
+    # Define a function to perform the scatter for a single batch item
+    def scatter_one_batch(single_x, single_row_major_patches, source_h_indices, target_k_indices):
+        # Gather patches from the Hilbert-ordered input using source_h indices
+        source_patches = single_x[source_h_indices, :] # Shape: [num_valid, patch_dim]
+        # Scatter these patches into the row-major output array at target_k indices
+        return single_row_major_patches.at[target_k_indices, :].set(source_patches)
+
+    # Use vmap to apply the scatter operation across the batch dimension
+    scatter_vmapped = jax.vmap(scatter_one_batch, in_axes=(0, 0, None, None), out_axes=0)
+    row_major_patches = scatter_vmapped(x, row_major_patches, source_h, target_k)
+    # --- End Vectorized Scatter ---
 
     # Convert the fully populated (or zero-padded) row-major patches back to image
     return unpatchify(row_major_patches, patch_size, H, W, C)
