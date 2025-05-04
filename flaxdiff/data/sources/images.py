@@ -191,13 +191,15 @@ Batch structure:
 class ImageGCSSource(DataSource):
     """Data source for Google Cloud Storage (GCS) image datasets."""
     
-    def __init__(self, source: str = 'arrayrecord/laion-aesthetics-12m+mscoco-2017'):
+    def __init__(self, source: str = 'arrayrecord/laion-aesthetics-12m+mscoco-2017', split: str = "train"):
         """Initialize a GCS image data source.
         
         Args:
             source: Path to the GCS dataset.
+            split: Dataset split (e.g., train, test).
         """
         self.source = source
+        self.split = split
     
     def get_source(self, path_override: str = "/home/mrwhite0racle/gcs_mount") -> Any:
         """Get the GCS data source.
@@ -211,19 +213,22 @@ class ImageGCSSource(DataSource):
         records_path = os.path.join(path_override, self.source)
         records = [os.path.join(records_path, i) for i in os.listdir(
             records_path) if 'array_record' in i]
+        if self.split == "val":
+            records = records[:1]
         return pygrain.ArrayRecordDataSource(records)
 
 
 class CombinedImageGCSSource(DataSource):
     """Data source that combines multiple GCS image datasets."""
     
-    def __init__(self, sources: List[str] = []):
+    def __init__(self, sources: List[str] = [], split: str = "train"):
         """Initialize a combined GCS image data source.
         
         Args:
             sources: List of paths to GCS datasets.
         """
         self.sources = sources
+        self.split = split
     
     def get_source(self, path_override: str = "/home/mrwhite0racle/gcs_mount") -> Any:
         """Get the combined GCS data source.
@@ -239,6 +244,8 @@ class CombinedImageGCSSource(DataSource):
         for records_path in records_paths:
             records += [os.path.join(records_path, i) for i in os.listdir(
                 records_path) if 'array_record' in i]
+        if self.split == "val":
+            records = records[:1]
         return pygrain.ArrayRecordDataSource(records)
 
 class ImageGCSAugmenter(DataAugmenter):
@@ -366,15 +373,15 @@ def tfds_augmenters(image_scale, method):
     return augmenter.create_transform(image_scale=image_scale, method=method)
 
 
-def data_source_gcs(source='arrayrecord/laion-aesthetics-12m+mscoco-2017'):
+def data_source_gcs(source='arrayrecord/laion-aesthetics-12m+mscoco-2017', split="train"):
     """Legacy function for GCS data sources."""
-    source_obj = ImageGCSSource(source=source)
+    source_obj = ImageGCSSource(source=source, split=split)
     return source_obj.get_source
 
 
-def data_source_combined_gcs(sources=[]):
+def data_source_combined_gcs(sources=[], split="train"):
     """Legacy function for combined GCS data sources."""
-    source_obj = CombinedImageGCSSource(sources=sources)
+    source_obj = CombinedImageGCSSource(sources=sources, split=split)
     return source_obj.get_source
 
 
