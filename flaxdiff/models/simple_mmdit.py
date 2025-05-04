@@ -769,18 +769,20 @@ class HierarchicalMMDiT(nn.Module):
         # 1. Initial Patch Embedding (Finest Level - stage 0)
         H_patches = H // finest_patch_size
         W_patches = W // finest_patch_size
+        total_patches = H_patches * W_patches # Calculate total patches
         hilbert_inv_idx = None
         if self.use_hilbert:
             # Calculate Hilbert indices and inverse permutation for the *finest* grid
             fine_idx = hilbert_indices(H_patches, W_patches)
-            hilbert_inv_idx = inverse_permutation(fine_idx) # Store for unpatchify
+            # Pass the total number of patches as total_size
+            hilbert_inv_idx = inverse_permutation(fine_idx, total_size=total_patches) # Store for unpatchify
 
             # Apply Hilbert patchify at the finest level
             patches_raw, _ = hilbert_patchify(x, finest_patch_size) # We already have inv_idx
             x_seq = self.hilbert_proj(patches_raw) # Shape [B, S_fine, emb[0]]
         else:
             x_seq = self.patch_embed(x) # Shape [B, S_fine, emb[0]]
-
+            
         # 2. Prepare Conditioning Signals for each stage
         t_emb_base = self.time_embed_base(temb)
         text_emb_base = self.text_proj_base(textcontext)
