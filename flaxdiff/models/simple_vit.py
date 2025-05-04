@@ -205,12 +205,14 @@ class UViT(nn.Module):
         if self.add_residualblock_output:
             # Define these layers only if needed
             self.final_conv1 = ConvLayer(
+                "conv",
                 features=64, kernel_size=(3, 3), strides=(1, 1),
                 dtype=self.dtype, precision=self.precision, name="final_conv1"
             )
             self.final_norm_conv = self.norm_factory(
                 name="final_norm_conv")  # Use factory
             self.final_conv2 = ConvLayer(
+                "conv",
                 features=self.output_channels, kernel_size=(3, 3), strides=(1, 1),
                 dtype=jnp.float32,  # Often good to have final conv output float32
                 precision=self.precision, name="final_conv2"
@@ -218,6 +220,7 @@ class UViT(nn.Module):
         else:
             # Final conv to map features to output channels directly after unpatchify
             self.final_conv_direct = ConvLayer(
+                "conv",
                 # Use 1x1 conv
                 features=self.output_channels, kernel_size=(1, 1), strides=(1, 1),
                 dtype=jnp.float32,  # Output float32
