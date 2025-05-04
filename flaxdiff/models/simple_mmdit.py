@@ -614,7 +614,7 @@ class HierarchicalMMDiT(nn.Module):
         ]
         
         # Encoder blocks (from coarse to fine)
-        self.encoder_blocks = []
+        encoder_blocks = []
         for stage in range(num_stages):
             stage_blocks = [
                 MMDiTBlock(
@@ -632,7 +632,9 @@ class HierarchicalMMDiT(nn.Module):
                 ) 
                 for i in range(self.num_layers[stage] // 2)  # Half for encoder, half for decoder
             ]
-            self.encoder_blocks.append(stage_blocks)
+            encoder_blocks.append(stage_blocks)
+            
+        self.encoder_blocks = encoder_blocks
         
         # Patch expanding layers (from coarse to fine)
         if num_stages > 1:
@@ -647,7 +649,7 @@ class HierarchicalMMDiT(nn.Module):
             ]
         
         # Decoder blocks (from coarse to fine)
-        self.decoder_blocks = []
+        decoder_blocks = []
         for stage in range(num_stages-1, -1, -1):
             stage_blocks = [
                 MMDiTBlock(
@@ -665,7 +667,8 @@ class HierarchicalMMDiT(nn.Module):
                 ) 
                 for i in range(self.num_layers[stage] // 2)  # Half for encoder, half for decoder
             ]
-            self.decoder_blocks.append(stage_blocks)
+            decoder_blocks.append(stage_blocks)
+        self.decoder_blocks = decoder_blocks
             
         # Fusion layers for skip connections
         if num_stages > 1:
