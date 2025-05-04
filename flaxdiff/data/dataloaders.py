@@ -293,7 +293,7 @@ def get_dataset_grain(
     """
     dataset = datasetMap[data_name]
     train_source = dataset["source"](dataset_source, split="train")
-    val_source = dataset["source"](dataset_source, split="val")
+    # val_source = dataset["source"](dataset_source, split="val")
     augmenter = dataset["augmenter"](image_scale, method)
 
     local_batch_size = batch_size // jax.process_count()
@@ -306,13 +306,13 @@ def get_dataset_grain(
         shard_options=pygrain.ShardByJaxProcess(),
     )
 
-    val_sampler = pygrain.IndexSampler(
-        num_records=len(val_source) if count is None else count,
-        shuffle=False,
-        seed=seed,
-        num_epochs=num_epochs,
-        shard_options=pygrain.ShardByJaxProcess(),
-    )
+    # val_sampler = pygrain.IndexSampler(
+    #     num_records=len(val_source) if count is None else count,
+    #     shuffle=False,
+    #     seed=seed,
+    #     num_epochs=num_epochs,
+    #     shard_options=pygrain.ShardByJaxProcess(),
+    # )
     
     def get_trainset():
         transformations = [
