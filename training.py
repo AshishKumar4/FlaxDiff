@@ -177,7 +177,7 @@ parser.add_argument('--wandb_project', type=str, default='mlops-msml605-project'
 parser.add_argument('--wandb_entity', type=str, default='umd-projects', help='Wandb entity name')
 
 parser.add_argument('--val_metrics', type=str, nargs='+', default=['clip'], help='Validation metrics to use')
-parser.add_argument('--best_tracker_metric', type=str, default='train/best_loss', help='Best tracker metric to use')
+parser.add_argument('--best_tracker_metric', type=str, default='val/clip_similarity', help='Best tracker metric to use')
 
 # parser.add_argument('--wandb_project', type=str, default='flaxdiff', help='Wandb project name')
 # parser.add_argument('--wandb_entity', type=str, default='ashishkumar4', help='Wandb entity name')
