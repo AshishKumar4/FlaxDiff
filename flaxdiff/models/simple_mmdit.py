@@ -208,6 +208,8 @@ class MMAdaLNZero(nn.Module):
         scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
             ada_params, 6, axis=-1)  # Each shape: [B, 1, F]
 
+        scale_mlp = jnp.clip(scale_mlp, -10.0, 10.0)
+        shift_mlp = jnp.clip(shift_mlp, -10.0, 10.0)
         # Apply modulation for Attention path (broadcasting handled by JAX)
         x_attn = norm_x * (1 + scale_attn) + shift_attn
 
@@ -250,7 +252,7 @@ class MMDiTBlock(nn.Module):
             precision=self.precision,
             use_bias=True,  # Bias is common in DiT attention proj
             force_fp32_for_softmax=self.force_fp32_for_softmax,
-            rope_emb=self.rope  # Pass RoPE module instance
+            rope_emb=self.rope_emb  # Pass RoPE module instance
         )
 
         # Standard MLP block remains the same

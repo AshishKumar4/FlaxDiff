@@ -175,6 +175,8 @@ class AdaLNZero(nn.Module):
         scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
             ada_params, 6, axis=-1)
 
+        scale_mlp = jnp.clip(scale_mlp, -10.0, 10.0)
+        shift_mlp = jnp.clip(shift_mlp, -10.0, 10.0)
         # Apply Layer Normalization
         norm = nn.LayerNorm(epsilon=self.norm_epsilon,
                             use_scale=False, use_bias=False, dtype=self.dtype)
@@ -191,47 +193,103 @@ class AdaLNZero(nn.Module):
         # Return modulated outputs and gates
         return x_attn, gate_attn, x_mlp, gate_mlp
 
+class AdaLNParams(nn.Module): # Renamed for clarity
+    features: int
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
 
+    @nn.compact
+    def __call__(self, conditioning):
+        # Ensure conditioning is broadcastable if needed (e.g., [B, 1, D_cond])
+        if conditioning.ndim == 2:
+             conditioning = jnp.expand_dims(conditioning, axis=1)
+
+        # Project conditioning to get 6 params per feature
+        ada_params = nn.Dense(
+            features=6 * self.features,
+            dtype=self.dtype,
+            precision=self.precision,
+            kernel_init=nn.initializers.zeros,
+            name="ada_proj"
+        )(conditioning)
+        # Return all params (or split if preferred, but maybe return tuple/dict)
+        # Shape: [B, 1, 6*F]
+        return ada_params # Or split and return tuple: jnp.split(ada_params, 6, axis=-1)
+    
 # --- DiT Block ---
-
 class DiTBlock(nn.Module):
     features: int
     num_heads: int
-    rope_emb: RotaryEmbedding  # Pass RoPE module
+    rope_emb: RotaryEmbedding
     mlp_ratio: int = 4
-    dropout_rate: float = 0.0  # Typically dropout is not used in diffusion models
+    dropout_rate: float = 0.0
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    # Keep option, but RoPEAttention uses NormalAttention base
-    use_flash_attention: bool = False
+    use_flash_attention: bool = False # Keep placeholder
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
+    use_gating: bool = True # Add flag to easily disable gating
 
     def setup(self):
         hidden_features = int(self.features * self.mlp_ratio)
-        self.ada_ln_zero = AdaLNZero(
-            self.features, dtype=self.dtype, precision=self.precision, norm_epsilon=self.norm_epsilon)
+        # Get modulation parameters (scale, shift, gates)
+        self.ada_params_module = AdaLNParams( # Use the modified module
+            self.features, dtype=self.dtype, precision=self.precision)
 
-        # Use RoPEAttention
+        # Layer Norms - one before Attn, one before MLP
+        self.norm1 = nn.LayerNorm(epsilon=self.norm_epsilon, use_scale=False, use_bias=False, dtype=self.dtype, name="norm1")
+        self.norm2 = nn.LayerNorm(epsilon=self.norm_epsilon, use_scale=False, use_bias=False, dtype=self.dtype, name="norm2")
+
         self.attention = RoPEAttention(
             query_dim=self.features,
             heads=self.num_heads,
             dim_head=self.features // self.num_heads,
             dtype=self.dtype,
             precision=self.precision,
-            use_bias=True,  # Bias is common in DiT attention proj
+            use_bias=True,
             force_fp32_for_softmax=self.force_fp32_for_softmax,
-            rope_emb=self.rope_emb  # Pass RoPE module instance
+            rope_emb=self.rope_emb
         )
 
-        # Standard MLP block
         self.mlp = nn.Sequential([
-            nn.Dense(features=hidden_features, dtype=self.dtype,
-                     precision=self.precision),
-            nn.gelu,
-            nn.Dense(features=self.features, dtype=self.dtype,
-                     precision=self.precision)
+            nn.Dense(features=hidden_features, dtype=self.dtype, precision=self.precision),
+            nn.gelu, # Or swish as specified in SimpleDiT? Consider consistency.
+            nn.Dense(features=self.features, dtype=self.dtype, precision=self.precision)
         ])
+
+    @nn.compact
+    def __call__(self, x, conditioning, freqs_cis):
+        # Get scale/shift/gate parameters
+        # Shape: [B, 1, 6*F] -> split into 6 of [B, 1, F]
+        scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
+             self.ada_params_module(conditioning), 6, axis=-1
+        )
+
+        # --- Attention Path ---
+        residual = x
+        norm_x_attn = self.norm1(x)
+        # Modulate after norm
+        x_attn_modulated = norm_x_attn * (1 + scale_attn) + shift_attn
+        attn_output = self.attention(x_attn_modulated, context=None, freqs_cis=freqs_cis)
+
+        if self.use_gating:
+             x = residual + gate_attn * attn_output
+        else:
+             x = residual + attn_output # Original DiT style without gate
+
+        # --- MLP Path ---
+        residual = x
+        norm_x_mlp = self.norm2(x) # Apply second LayerNorm
+        # Modulate after norm
+        x_mlp_modulated = norm_x_mlp * (1 + scale_mlp) + shift_mlp
+        mlp_output = self.mlp(x_mlp_modulated)
+
+        if self.use_gating:
+             x = residual + gate_mlp * mlp_output
+        else:
+             x = residual + mlp_output # Original DiT style without gate
+
+        return x
 
     @nn.compact
     def __call__(self, x, conditioning, freqs_cis):
