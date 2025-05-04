@@ -96,8 +96,7 @@ class RoPEAttention(NormalAttention):
             _B, _H, _W, _C = context.shape
             context_seq_len = _H * _W
             context = context.reshape((B, context_seq_len, _C))
-        else:
-            _B, context_seq_len, _C = context.shape
+        # else: context is already [B, S_ctx, C]
 
         query = self.query(x)  # [B, S, H, D]
         key = self.key(context)  # [B, S_ctx, H, D]
@@ -106,19 +105,21 @@ class RoPEAttention(NormalAttention):
         # Apply RoPE to query and key
         if freqs_cis is None:
             # Generate frequencies using the rope_emb instance
-            seq_len = query.shape[1]
-            freqs_cos, freqs_sin = self.rope_emb(seq_len)
+            seq_len_q = query.shape[1] # Use query's sequence length
+            freqs_cos, freqs_sin = self.rope_emb(seq_len_q)
         else:
-            # If freqs_cis is passed in as a tuple (for backward compatibility)
+            # If freqs_cis is passed in as a tuple
             freqs_cos, freqs_sin = freqs_cis
 
         # Apply RoPE to query and key
-        # Permute to [B, H, S, D] for RoPE application if needed by apply_rotary_embedding
+        # Permute to [B, H, S, D] for RoPE application
         query = einops.rearrange(query, 'b s h d -> b h s d')
         key = einops.rearrange(key, 'b s h d -> b h s d')
 
+        # Apply RoPE only up to the context sequence length for keys if different
+        # Assuming self-attention or context has same seq len for simplicity here
         query = apply_rotary_embedding(query, freqs_cos, freqs_sin)
-        key = apply_rotary_embedding(key, freqs_cos, freqs_sin)
+        key = apply_rotary_embedding(key, freqs_cos, freqs_sin) # Apply same freqs to key
 
         # Permute back to [B, S, H, D] for dot_product_attention
         query = einops.rearrange(query, 'b h s d -> b s h d')
@@ -130,10 +131,8 @@ class RoPEAttention(NormalAttention):
             deterministic=True
         )  # Output shape [B, S, H, D]
 
-        # Flatten H and D dimensions before projection
-        hidden_states_flat = einops.rearrange(hidden_states, 'b s h d -> b s (h d)') # Shape [B, S, F]
-
-        proj = self.proj_attn(hidden_states_flat)  # Input [B, S, F], Output shape [B, S, C]
+        # Use the proj_attn from NormalAttention which expects [B, S, H, D]
+        proj = self.proj_attn(hidden_states)  # Output shape [B, S, C]
 
         if is_4d:
             proj = proj.reshape(orig_x_shape)  # Reshape back if input was 4D
