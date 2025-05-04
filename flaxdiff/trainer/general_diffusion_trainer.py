@@ -129,6 +129,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                  frames_per_sample: int = None,
                  wandb_config: Dict[str, Any] = None,
                  eval_metrics: List[EvaluationMetric] = None,
+                 best_tracker_metric: str = "train/best_loss",
                  **kwargs
                  ):
         """
@@ -196,6 +197,8 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             **kwargs
         )
         
+        self.best_tracker_metric = best_tracker_metric
+        
         # Store video-specific parameters
         self.frames_per_sample = frames_per_sample
         
@@ -203,6 +206,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         self.conditional_inputs = input_config.conditions
         # Determine if we're working with video or images
         self.is_video = self._is_video_data()
+        self.best_val_metrics = {}
     
     def _is_video_data(self):
         sample_data_shape = self.input_config.sample_data_shape
@@ -465,11 +469,17 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                         else:  # [B,H,W,C] - Image data
                             self._log_image_samples(samples, current_step)
                     
-            if getattr(self, 'wandb', None) is not None and self.wandb:
-                # metrics is a dict of metrics
-                if metrics and type(metrics) == dict:
-                    # Flatten the metrics
-                    metrics = {k: np.mean(v) for k, v in metrics.items()}
+            # Flatten the metrics
+            if metrics:
+                metrics = {k: np.mean(v) for k, v in metrics.items()}
+                # Update the best validation metrics
+                for key, value in metrics.items():
+                    if key not in self.best_val_metrics:
+                        self.best_val_metrics[key] = value
+                    else:
+                        self.best_val_metrics[key] = min(self.best_val_metrics[key], value)
+                # Log the best validation metrics
+                if getattr(self, 'wandb', None) is not None and self.wandb:
                     # Log the metrics
                     for key, value in metrics.items():
                         if isinstance(value, jnp.ndarray):
@@ -477,6 +487,8 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                         self.wandb.log({
                             f"val/{key}": value,
                         }, step=current_step)
+                
+            
                         
         except StopIteration:
             print(f"Validation dataset exhausted for process index {process_index}")
@@ -602,9 +614,13 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         """
         if self.wandb is None:
             raise ValueError("Wandb is not initialized. Cannot get best runs.")
-        
+        import wandb
         # Get the sweep runs
-        runs = sorted(self.wandb.runs, key=lambda x: x.summary.get(metric, float('inf')))
+        runs = [i for i in wandb.Api().runs(path=f"{self.wandb.entity}/{self.wandb.project}", filters={"config.dataset.name": self.wandb.config['dataset']['name']})]
+        if not runs:
+            raise ValueError("No runs found in wandb.")
+        print(f"Getting best runs from wandb {self.wandb.id}...")
+        runs = sorted(runs, key=lambda x: x.summary.get(metric, float('inf')))
         best_runs = runs[:top_k]
         lower_bound = best_runs[-1].summary.get(metric, float('inf'))
         upper_bound = best_runs[0].summary.get(metric, float('inf'))
@@ -636,6 +652,8 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         # Check if current run is one of the best
         if metric == "train/best_loss":
             current_run_metric = self.best_loss
+        elif metric in self.best_val_metrics:
+            current_run_metric = self.best_val_metrics[metric]
         else:
             current_run_metric = self.wandb.summary.get(metric, float('inf') if is_lower_better else float('-inf'))
                 
@@ -653,7 +671,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         if self.wandb is not None:
             checkpoint = get_latest_checkpoint(self.checkpoint_path())
             try:
-                is_good, is_best = self.__compare_run_against_best__(top_k=5, metric="train/best_loss", from_sweeps=hasattr(self, "wandb_sweep"))
+                is_good, is_best = self.__compare_run_against_best__(top_k=5, metric=self.best_tracker_metric, from_sweeps=hasattr(self, "wandb_sweep"))
                 if is_good:
                     # Push to registry with appropriate aliases
                     aliases = []
