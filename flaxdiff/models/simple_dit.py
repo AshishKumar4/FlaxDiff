@@ -291,27 +291,6 @@ class DiTBlock(nn.Module):
 
         return x
 
-    @nn.compact
-    def __call__(self, x, conditioning, freqs_cis):
-        # x shape: [B, S, F]
-        # conditioning shape: [B, D_cond]
-
-        residual = x
-
-        # Apply adaLN-Zero to get modulated inputs and gates
-        x_attn, gate_attn, x_mlp, gate_mlp = self.ada_ln_zero(x, conditioning)
-
-        # Attention block
-        attn_output = self.attention(
-            x_attn, context=None, freqs_cis=freqs_cis)  # Self-attention only
-        x = residual + gate_attn * attn_output
-
-        # MLP block
-        mlp_output = self.mlp(x_mlp)
-        x = x + gate_mlp * mlp_output
-
-        return x
-
 
 # --- Patch Embedding (reuse or define if needed) ---
 # Assuming PatchEmbedding exists in simple_vit.py and is suitable
