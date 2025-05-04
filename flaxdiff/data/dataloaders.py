@@ -319,11 +319,11 @@ def get_dataset_grain(
             augmenter(),
         ]
         
-        if filters:
-            print("Adding filters to transformations")
-            transformations.append(filters())
+        # if filters:
+        #     print("Adding filters to transformations")
+        #     transformations.append(filters())
             
-        transformations.append(CaptionDeletionTransform())
+        # transformations.append(CaptionDeletionTransform())
         transformations.append(pygrain.Batch(local_batch_size, drop_remainder=True))
 
         loader = pygrain.DataLoader(

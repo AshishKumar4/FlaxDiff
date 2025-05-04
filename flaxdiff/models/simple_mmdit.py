@@ -155,56 +155,63 @@ class MMAdaLNZero(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     norm_epsilon: float = 1e-5
+    use_mean_pooling: bool = True  # Whether to use mean pooling for sequence inputs
 
     @nn.compact
     def __call__(self, x, t_emb, text_emb):
         # x shape: [B, S, F]
         # t_emb shape: [B, D_t]
-        # text_emb shape: [B, D_text]
+        # text_emb shape: [B, S_text, D_text] or [B, D_text]
 
-        # Ensure embeddings have seq dim if x does (for broadcasting later)
-        if x.ndim == 3:
-            if t_emb.ndim == 2:
-                t_emb = jnp.expand_dims(t_emb, axis=1)  # [B, 1, D_t]
-            if text_emb.ndim == 2:
-                text_emb = jnp.expand_dims(text_emb, axis=1)  # [B, 1, D_text]
+        # First normalize the input features
+        norm = nn.LayerNorm(epsilon=self.norm_epsilon,
+                            use_scale=False, use_bias=False, dtype=self.dtype)
+        norm_x = norm(x)  # Shape: [B, S, F]
 
-        # Separate projections for time and text embeddings
-        # Target dimension: 6 * features for scale/shift/gate of MLP/Attention
+        # Process time embedding: ensure it has a sequence dimension for later broadcasting
+        if t_emb.ndim == 2:  # [B, D_t]
+            t_emb = jnp.expand_dims(t_emb, axis=1)  # [B, 1, D_t]
+            
+        # Process text embedding: if it has a sequence dimension different from x
+        if text_emb.ndim == 2:  # [B, D_text]
+            text_emb = jnp.expand_dims(text_emb, axis=1)  # [B, 1, D_text]
+        elif text_emb.ndim == 3 and self.use_mean_pooling and text_emb.shape[1] != x.shape[1]:
+            # Mean pooling is standard in MM-DiT for handling different sequence lengths
+            text_emb = jnp.mean(text_emb, axis=1, keepdims=True)  # [B, 1, D_text]
+
+        # Project time embedding 
         t_params = nn.Dense(
             features=6 * self.features,
             dtype=self.dtype,
             precision=self.precision,
-            kernel_init=nn.initializers.zeros,  # Zero init
+            kernel_init=nn.initializers.zeros,  # Zero init is standard in AdaLN-Zero
             name="ada_t_proj"
         )(t_emb)  # Shape: [B, 1, 6*F]
 
+        # Project text embedding
         text_params = nn.Dense(
             features=6 * self.features,
             dtype=self.dtype,
             precision=self.precision,
             kernel_init=nn.initializers.zeros,  # Zero init
             name="ada_text_proj"
-        )(text_emb)  # Shape: [B, 1, 6*F]
+        )(text_emb)  # Shape: [B, 1, 6*F] or [B, S_text, 6*F]
 
-        # Combine projected parameters (summing is typical in MM-DiT)
+        # If text_params still has a sequence dim different from t_params, mean pool it
+        if t_params.shape[1] != text_params.shape[1]:
+            text_params = jnp.mean(text_params, axis=1, keepdims=True)
+            
+        # Combine parameters (summing is standard in MM-DiT)
         ada_params = t_params + text_params  # Shape: [B, 1, 6*F]
 
         # Split into scale, shift, gate for MLP and Attention
         scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
             ada_params, 6, axis=-1)  # Each shape: [B, 1, F]
 
-        # Apply Layer Normalization to input x
-        norm = nn.LayerNorm(epsilon=self.norm_epsilon,
-                            use_scale=False, use_bias=False, dtype=self.dtype)
-        # norm = nn.RMSNorm(epsilon=self.norm_epsilon, dtype=self.dtype) # Alternative
-        norm_x = norm(x)  # Shape: [B, S, F]
-
-        # Modulate for Attention path
-        # Broadcasting scale/shift/gate from [B, 1, F] to [B, S, F]
+        # Apply modulation for Attention path (broadcasting handled by JAX)
         x_attn = norm_x * (1 + scale_attn) + shift_attn
 
-        # Modulate for MLP path
+        # Apply modulation for MLP path
         x_mlp = norm_x * (1 + scale_mlp) + shift_mlp
 
         # Return modulated outputs and gates
@@ -243,7 +250,7 @@ class MMDiTBlock(nn.Module):
             precision=self.precision,
             use_bias=True,  # Bias is common in DiT attention proj
             force_fp32_for_softmax=self.force_fp32_for_softmax,
-            rope_emb=self.rope_emb  # Pass RoPE module instance
+            rope_emb=self.rope  # Pass RoPE module instance
         )
 
         # Standard MLP block remains the same
