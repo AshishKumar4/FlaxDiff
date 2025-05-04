@@ -237,7 +237,7 @@ class SimpleTrainer:
         if load_from_checkpoint is not None:
             latest_step, old_state, old_best_state, rngstate = self.load(load_from_checkpoint, checkpoint_step, load_directly_from_dir)
         else:
-            latest_step, old_state, old_best_state, rngstate = 0, 0, None, None, None
+            latest_step, old_state, old_best_state, rngstate = 0, None, None, None
 
         self.latest_step = latest_step
         
