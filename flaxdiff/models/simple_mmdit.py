@@ -588,12 +588,33 @@ class HierarchicalMMDiT(nn.Module):
 
         # Text context projection
         self.text_proj = nn.Dense(
-            features=self.emb_features[-1],  # Use largest dim 
+            features=self.emb_features[-1],  # Use largest dim
             dtype=self.dtype,
-            precision=self.precision, 
+            precision=self.precision,
             name="text_context_proj"
         )
-        
+
+        # Define projection layers for time and text embeddings for finer stages
+        self.t_emb_projs = []
+        self.text_emb_projs = []
+        for stage in range(num_stages - 1): # Only need projections for stages 0 to num_stages-2
+            self.t_emb_projs.append(
+                nn.Dense(
+                    features=self.emb_features[stage],
+                    dtype=self.dtype,
+                    precision=self.precision,
+                    name=f"t_emb_proj_stage{stage}"
+                )
+            )
+            self.text_emb_projs.append(
+                nn.Dense(
+                    features=self.emb_features[stage],
+                    dtype=self.dtype,
+                    precision=self.precision,
+                    name=f"text_emb_proj_stage{stage}"
+                )
+            )
+
         # Add projection layer for Hilbert patches
         if self.use_hilbert:
             self.hilbert_proj = nn.Dense(
@@ -745,23 +766,9 @@ class HierarchicalMMDiT(nn.Module):
                 t_embs.append(t_emb)
                 text_embs.append(text_emb)
             else:
-                # Project to appropriate dimension for this stage
-                t_embs.append(
-                    nn.Dense(
-                        features=self.emb_features[stage],
-                        dtype=self.dtype,
-                        precision=self.precision,
-                        name=f"t_emb_proj_stage{stage}"
-                    )(t_emb)
-                )
-                text_embs.append(
-                    nn.Dense(
-                        features=self.emb_features[stage],
-                        dtype=self.dtype,
-                        precision=self.precision,
-                        name=f"text_emb_proj_stage{stage}"
-                    )(text_emb)
-                )
+                # Use pre-defined projection layers
+                t_embs.append(self.t_emb_projs[stage](t_emb))
+                text_embs.append(self.text_emb_projs[stage](text_emb))
                 
         # --- Encoder Path (coarse to fine) ---
         skip_features = []
