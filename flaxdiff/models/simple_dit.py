@@ -130,7 +130,10 @@ class RoPEAttention(NormalAttention):
             deterministic=True
         )  # Output shape [B, S, H, D]
 
-        proj = self.proj_attn(hidden_states)  # Output shape [B, S, C]
+        # Flatten H and D dimensions before projection
+        hidden_states_flat = einops.rearrange(hidden_states, 'b s h d -> b s (h d)') # Shape [B, S, F]
+
+        proj = self.proj_attn(hidden_states_flat)  # Input [B, S, F], Output shape [B, S, C]
 
         if is_4d:
             proj = proj.reshape(orig_x_shape)  # Reshape back if input was 4D
@@ -285,6 +288,14 @@ class SimpleDiT(nn.Module):
             precision=self.precision
         )
 
+        # Add projection layer for Hilbert patches
+        self.hilbert_proj = nn.Dense(
+            features=self.emb_features,
+            dtype=self.dtype,
+            precision=self.precision,
+            name="hilbert_projection"
+        )
+
         # Time embedding projection
         self.time_embed = nn.Sequential([
             FourierEmbedding(features=self.emb_features),
@@ -360,7 +371,9 @@ class SimpleDiT(nn.Module):
         # 1. Patch Embedding
         if self.use_hilbert:
             # Use hilbert_patchify which handles both patchification and reordering
-            patches, hilbert_inv_idx = hilbert_patchify(x, self.patch_size)
+            patches_raw, hilbert_inv_idx = hilbert_patchify(x, self.patch_size) # Shape [B, S, P*P*C]
+            # Apply projection
+            patches = self.hilbert_proj(patches_raw) # Shape [B, S, emb_features]
         else:
             patches = self.patch_embed(x)  # Shape: [B, num_patches, emb_features]
             hilbert_inv_idx = None

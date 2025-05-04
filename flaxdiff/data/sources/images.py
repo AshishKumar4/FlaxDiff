@@ -293,7 +293,6 @@ class ImageGCSAugmenter(DataAugmenter):
                 results = self.auto_tokenize(caption)
                 return {
                     "image": image,
-                    "caption": caption,
                     "text": {
                         "input_ids": results['input_ids'][0],
                         "attention_mask": results['attention_mask'][0],
