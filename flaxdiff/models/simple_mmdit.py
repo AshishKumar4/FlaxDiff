@@ -644,8 +644,8 @@ class HierarchicalMMDiT(nn.Module):
         ]
 
         # 5. --- Encoder Path (Fine to Coarse) ---
-        self.encoder_blocks = []
-        self.patch_mergers = []
+        encoder_blocks = []
+        patch_mergers = []
         for stage in range(num_stages):
             # Blocks for this stage
             stage_blocks = [
@@ -665,11 +665,11 @@ class HierarchicalMMDiT(nn.Module):
                 # Assuming symmetric layers for now, adjust if needed (e.g., self.num_encoder_layers[stage])
                 for i in range(self.num_layers[stage])
             ]
-            self.encoder_blocks.append(stage_blocks)
+            encoder_blocks.append(stage_blocks)
 
             # Patch Merging layer (except for the last/coarsest stage)
             if stage < num_stages - 1:
-                self.patch_mergers.append(
+                patch_mergers.append(
                     PatchMerging(
                         out_features=self.emb_features[stage + 1], # Target next stage dim
                         dtype=self.dtype,
@@ -678,15 +678,17 @@ class HierarchicalMMDiT(nn.Module):
                         name=f"patch_merger_{stage}"
                     )
                 )
-
+        self.encoder_blocks = encoder_blocks
+        self.patch_mergers = patch_mergers
+        
         # 6. --- Decoder Path (Coarse to Fine) ---
-        self.decoder_blocks = []
-        self.patch_expanders = []
-        self.fusion_layers = []
+        decoder_blocks = []
+        patch_expanders = []
+        fusion_layers = []
         # Iterate from second coarsest stage (N-2) down to finest (0)
         for stage in range(num_stages - 2, -1, -1):
             # Patch Expanding layer (Expands from stage+1 to stage)
-            self.patch_expanders.append(
+            patch_expanders.append(
                 PatchExpanding(
                     out_features=self.emb_features[stage], # Target current stage dim
                     dtype=self.dtype,
@@ -696,7 +698,7 @@ class HierarchicalMMDiT(nn.Module):
                 )
             )
             # Fusion layer (Combines skip[stage] and expanded[stage+1]->[stage])
-            self.fusion_layers.append(
+            fusion_layers.append(
                 nn.Sequential([ # Use Sequential for Norm + Dense
                     nn.LayerNorm(epsilon=self.norm_epsilon, dtype=self.dtype, name=f"fusion_norm_{stage}"),
                     nn.Dense(
@@ -727,8 +729,12 @@ class HierarchicalMMDiT(nn.Module):
                 for i in range(self.num_layers[stage])
             ]
             # Append blocks in order: stage N-2, N-3, ..., 0
-            self.decoder_blocks.append(stage_blocks)
+            decoder_blocks.append(stage_blocks)
 
+        self.patch_expanders = patch_expanders
+        self.fusion_layers = fusion_layers
+        self.decoder_blocks = decoder_blocks
+        
         # Note: The lists expanders, fusion_layers, decoder_blocks are now ordered
         # corresponding to stages N-2, N-3, ..., 0.
 
