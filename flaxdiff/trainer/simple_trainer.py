@@ -122,6 +122,28 @@ def move_contents_to_subdir(target_dir, new_subdir_name):
     if error_count > 0:
         print(f"  Errors encountered: {error_count} item(s).")
 
+def load_from_checkpoint(
+    checkpoint_dir: str,
+):
+    try:
+        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        options = orbax.checkpoint.CheckpointManagerOptions(create=False)
+        # Convert checkpoint_dir to absolute path
+        checkpoint_dir = os.path.abspath(checkpoint_dir)
+        manager = orbax.checkpoint.CheckpointManager(checkpoint_dir, checkpointer, options)
+        ckpt = manager.restore(checkpoint_dir)
+        # Extract as above
+        state, best_state = None, None
+        if 'state' in ckpt:
+            state = ckpt['state']
+        if 'best_state' in ckpt:
+            best_state = ckpt['best_state']
+        print(f"Loaded checkpoint from local dir {checkpoint_dir}")
+        return state, best_state
+    except Exception as e:
+        print(f"Warning: Failed to load checkpoint from local dir: {e}")
+        return None, None
+    
 @dataclass
 class SimpleTrainer:
     state: SimpleTrainState
@@ -162,6 +184,8 @@ class SimpleTrainer:
         self.input_shapes = input_shapes
         self.checkpoint_base_path = checkpoint_base_path
         
+        load_directly_from_dir = False
+        
         if wandb_config is not None and jax.process_index() == 0:
             import wandb
             run = wandb.init(resume='allow', **wandb_config)
@@ -183,8 +207,8 @@ class SimpleTrainer:
                         artifact_dir = artifact.download()
                         print(f"Loading model from artifact {artifact.name} at {artifact_dir}")
                         # Move the artifact's contents
-                        load_from_checkpoint = os.path.join(artifact_dir, str(run.summary['train/step']))
-                        move_contents_to_subdir(artifact_dir, load_from_checkpoint)
+                        load_from_checkpoint = artifact_dir
+                        load_directly_from_dir = True
             
             # define our custom x axis metric
             self.wandb.define_metric("train/step")
@@ -211,9 +235,9 @@ class SimpleTrainer:
             self.checkpoint_path(), async_checkpointer, options)
 
         if load_from_checkpoint is not None:
-            latest_epoch, latest_step, old_state, old_best_state, rngstate = self.load(load_from_checkpoint, checkpoint_step)
+            latest_step, old_state, old_best_state, rngstate = self.load(load_from_checkpoint, checkpoint_step, load_directly_from_dir)
         else:
-            latest_epoch, latest_step, old_state, old_best_state, rngstate = 0, 0, None, None, None
+            latest_step, old_state, old_best_state, rngstate = 0, 0, None, None, None
 
         self.latest_step = latest_step
         
@@ -312,15 +336,12 @@ class SimpleTrainer:
             os.makedirs(path)
         return path
 
-    def load(self, checkpoint_path=None, checkpoint_step=None):
-        if checkpoint_path is None:
-            checkpointer = self.checkpointer
-        else:
-            checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-            options = orbax.checkpoint.CheckpointManagerOptions(
-                max_to_keep=4, create=False)
-            checkpointer = orbax.checkpoint.CheckpointManager(
-                checkpoint_path, checkpointer, options)    
+    def load(self, checkpoint_path, checkpoint_step=None, load_directly_from_dir=False):
+        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        options = orbax.checkpoint.CheckpointManagerOptions(
+            max_to_keep=4, create=False)
+        checkpointer = orbax.checkpoint.CheckpointManager(
+            checkpoint_path, checkpointer, options)    
         
         if checkpoint_step is None:
             step = checkpointer.latest_step()
@@ -332,7 +353,7 @@ class SimpleTrainer:
             checkpoint_path if checkpoint_path else self.checkpoint_path(),
             f"{step}")
         self.loaded_checkpoint_path = loaded_checkpoint_path
-        ckpt = checkpointer.restore(step)
+        ckpt = checkpointer.restore(step) if not load_directly_from_dir else checkpointer.restore(checkpoint_path)
         
         state = ckpt['state']
         best_state = ckpt['best_state']
@@ -342,10 +363,8 @@ class SimpleTrainer:
         if self.best_loss == 0:
             # It cant be zero as that must have been some problem
             self.best_loss = 1e9
-        current_epoch = ckpt.get('epoch', step) # Must be a checkpoint from an older version which used epochs instead of steps
-        print(
-            f"Loaded model from checkpoint at epoch {current_epoch} step {step}", ckpt['best_loss'])
-        return current_epoch, step, state, best_state, rngstate
+        print(f"Loaded model from checkpoint at step {step}", ckpt['best_loss'])
+        return step, state, best_state, rngstate
 
     def save(self, epoch=0, step=0, state=None, rngstate=None):
         print(f"Saving model at epoch {epoch} step {step}")
