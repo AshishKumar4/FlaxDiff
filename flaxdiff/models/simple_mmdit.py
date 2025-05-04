@@ -597,7 +597,7 @@ class HierarchicalMMDiT(nn.Module):
         # Add projection layer for Hilbert patches
         if self.use_hilbert:
             self.hilbert_proj = nn.Dense(
-                features=self.emb_features,
+                features=self.emb_features[-1], # Use the feature dim of the coarsest stage
                 dtype=self.dtype,
                 precision=self.precision,
                 name="hilbert_projection"
