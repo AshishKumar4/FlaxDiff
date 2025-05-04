@@ -325,12 +325,13 @@ class SimpleDiT(nn.Module):
         )
 
         # Add projection layer for Hilbert patches
-        self.hilbert_proj = nn.Dense(
-            features=self.emb_features,
-            dtype=self.dtype,
-            precision=self.precision,
-            name="hilbert_projection"
-        )
+        if self.use_hilbert:
+            self.hilbert_proj = nn.Dense(
+                features=self.emb_features,
+                dtype=self.dtype,
+                precision=self.precision,
+                name="hilbert_projection"
+            )
 
         # Time embedding projection
         self.time_embed = nn.Sequential([
