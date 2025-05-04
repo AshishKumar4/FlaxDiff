@@ -176,7 +176,8 @@ class SimpleTrainer:
                 
                 # If load_from_checkpoint is not set, and an artifact is found, load the artifact
                 if load_from_checkpoint is None:
-                    model_artifacts = [i for i in run.logged_artifacts() if i.type == 'model']
+                    api_run = wandb.Api().run(f"{wandb_config['entity']}/{wandb_config['project']}/{wandb_config['id']}")
+                    model_artifacts = [i for i in api_run.logged_artifacts() if i.type == 'model']
                     if model_artifacts:
                         artifact = model_artifacts[0]
                         artifact_dir = artifact.download()
