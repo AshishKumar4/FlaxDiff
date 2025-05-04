@@ -128,7 +128,7 @@ class UViT(nn.Module):
         # --- Conditioning ---
         self.time_embed = nn.Sequential([
             FourierEmbedding(features=self.emb_features),
-            TimeProjection(features=self.emb_features, precision=self.precision)
+            TimeProjection(features=self.emb_features)
         ], name="time_embed")
 
         # Text projection
