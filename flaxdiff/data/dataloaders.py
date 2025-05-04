@@ -345,7 +345,7 @@ def get_dataset_grain(
         ]
 
         loader = pygrain.DataLoader(
-            data_source=val_source,
+            data_source=train_source,
             sampler=train_sampler,
             operations=transformations,
             worker_count=2,
@@ -360,7 +360,7 @@ def get_dataset_grain(
         "train": get_trainset,
         "train_len": len(train_source),
         "val": get_valset,
-        "val_len": len(val_source),
+        "val_len": len(train_source),
         "local_batch_size": local_batch_size,
         "global_batch_size": batch_size,
     }
