@@ -97,6 +97,7 @@ class SimpleTrainer:
                  checkpoint_step: int = None,
                  use_dynamic_scale: bool = False,
                  max_checkpoints_to_keep: int = 2,
+                 train_start_step_override: int = None,
                  ):
         if distributed_training is None or distributed_training is True:
             # Auto-detect if we are running on multiple devices
@@ -116,6 +117,13 @@ class SimpleTrainer:
             import wandb
             run = wandb.init(resume='allow', **wandb_config)
             self.wandb = run
+            
+            if 'id' in wandb_config:
+                # If resuming from a previous run, and train_start_step_override is not set, 
+                # set the start step to the last step of the previous run
+                if train_start_step_override is None:
+                    train_start_step_override = run.summary['train/step'] + 1
+                print(f"Resuming from previous run {wandb_config['id']} with start step {train_start_step_override}")
             
             # define our custom x axis metric
             self.wandb.define_metric("train/step")
@@ -147,6 +155,10 @@ class SimpleTrainer:
             latest_epoch, latest_step, old_state, old_best_state, rngstate = 0, 0, None, None, None
 
         self.latest_step = latest_step
+        
+        if train_start_step_override is not None:
+            self.latest_step = train_start_step_override
+            print(f"Overriding start step to {self.latest_step}")
         
         if rngstate:
             self.rngstate = RandomMarkovState(**rngstate)
