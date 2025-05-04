@@ -369,9 +369,9 @@ def main(args):
             "class": HierarchicalMMDiT,
             "kwargs": {
                 "base_patch_size": args.patch_size // 2,  # Use half the patch size for base
-                "emb_features": (512, 768, 1024),  # Default dims per stage
-                "num_layers": (4, 6, 12),  # Default layers per stage
-                "num_heads": (8, 12, 16),  # Default heads per stage
+                "emb_features": (args.emb_features - 256, args.emb_features, args.emb_features + 256),  # Default dims per stage
+                "num_layers": (args.num_layers // 3, args.num_layers // 2, args.num_layers),  # Default layers per stage
+                "num_heads": (args.num_heads - 2, args.num_heads, args.num_heads + 2),  # Default heads per stage
                 "dropout_rate": 0.1,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
