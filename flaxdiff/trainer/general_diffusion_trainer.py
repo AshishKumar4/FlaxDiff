@@ -489,7 +489,8 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                         }, step=current_step)
                 
             
-                        
+            # Close validation dataset iterator
+            del val_ds
         except StopIteration:
             print(f"Validation dataset exhausted for process index {process_index}")
         except Exception as e:
