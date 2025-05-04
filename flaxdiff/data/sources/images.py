@@ -82,7 +82,7 @@ def labelizer_oxford_flowers102(path):
 class ImageTFDSSource(DataSource):
     """Data source for TensorFlow Datasets (TFDS) image datasets."""
     
-    def __init__(self, name: str, use_tf: bool = True, split: str = "all"):
+    def __init__(self, name: str, use_tf: bool = True):
         """Initialize a TFDS image data source.
         
         Args:
@@ -92,9 +92,8 @@ class ImageTFDSSource(DataSource):
         """
         self.name = name
         self.use_tf = use_tf
-        self.split = split
     
-    def get_source(self, path_override: str) -> Any:
+    def get_source(self, path_override: str, split: str = "all") -> Any:
         """Get the TFDS data source.
         
         Args:
@@ -105,9 +104,9 @@ class ImageTFDSSource(DataSource):
         """
         import tensorflow_datasets as tfds
         if self.use_tf:
-            return tfds.load(self.name, split=self.split, shuffle_files=True)
+            return tfds.load(self.name, split=split, shuffle_files=True)
         else:
-            return tfds.data_source(self.name, split=self.split, try_gcs=False)
+            return tfds.data_source(self.name, split=split, try_gcs=False)
 
 
 class ImageTFDSAugmenter(DataAugmenter):
@@ -191,17 +190,15 @@ Batch structure:
 class ImageGCSSource(DataSource):
     """Data source for Google Cloud Storage (GCS) image datasets."""
     
-    def __init__(self, source: str = 'arrayrecord/laion-aesthetics-12m+mscoco-2017', split: str = "train"):
+    def __init__(self, source: str = 'arrayrecord/laion-aesthetics-12m+mscoco-2017'):
         """Initialize a GCS image data source.
         
         Args:
             source: Path to the GCS dataset.
-            split: Dataset split (e.g., train, test).
         """
         self.source = source
-        self.split = split
     
-    def get_source(self, path_override: str = "/home/mrwhite0racle/gcs_mount") -> Any:
+    def get_source(self, path_override: str = "/home/mrwhite0racle/gcs_mount", split: str = "train") -> Any:
         """Get the GCS data source.
         
         Args:
@@ -213,7 +210,7 @@ class ImageGCSSource(DataSource):
         records_path = os.path.join(path_override, self.source)
         records = [os.path.join(records_path, i) for i in os.listdir(
             records_path) if 'array_record' in i]
-        if self.split == "val":
+        if split == "val":
             records = records[:1]
         return pygrain.ArrayRecordDataSource(records)
 
@@ -221,16 +218,15 @@ class ImageGCSSource(DataSource):
 class CombinedImageGCSSource(DataSource):
     """Data source that combines multiple GCS image datasets."""
     
-    def __init__(self, sources: List[str] = [], split: str = "train"):
+    def __init__(self, sources: List[str] = []):
         """Initialize a combined GCS image data source.
         
         Args:
             sources: List of paths to GCS datasets.
         """
         self.sources = sources
-        self.split = split
     
-    def get_source(self, path_override: str = "/home/mrwhite0racle/gcs_mount") -> Any:
+    def get_source(self, path_override: str = "/home/mrwhite0racle/gcs_mount", split: str = "train") -> Any:
         """Get the combined GCS data source.
         
         Args:
@@ -244,7 +240,7 @@ class CombinedImageGCSSource(DataSource):
         for records_path in records_paths:
             records += [os.path.join(records_path, i) for i in os.listdir(
                 records_path) if 'array_record' in i]
-        if self.split == "val":
+        if split == "val":
             records = records[:1]
         return pygrain.ArrayRecordDataSource(records)
 
@@ -361,9 +357,9 @@ class ImageGCSAugmenter(DataAugmenter):
 
 # These functions maintain backward compatibility with existing code
 
-def data_source_tfds(name, use_tf=True, split="all"):
+def data_source_tfds(name, use_tf=True):
     """Legacy function for TFDS data sources."""
-    source = ImageTFDSSource(name=name, use_tf=use_tf, split=split)
+    source = ImageTFDSSource(name=name, use_tf=use_tf)
     return source.get_source
 
 
@@ -373,15 +369,15 @@ def tfds_augmenters(image_scale, method):
     return augmenter.create_transform(image_scale=image_scale, method=method)
 
 
-def data_source_gcs(source='arrayrecord/laion-aesthetics-12m+mscoco-2017', split="train"):
+def data_source_gcs(source='arrayrecord/laion-aesthetics-12m+mscoco-2017'):
     """Legacy function for GCS data sources."""
-    source_obj = ImageGCSSource(source=source, split=split)
+    source_obj = ImageGCSSource(source=source)
     return source_obj.get_source
 
 
-def data_source_combined_gcs(sources=[], split="train"):
+def data_source_combined_gcs(sources=[]):
     """Legacy function for combined GCS data sources."""
-    source_obj = CombinedImageGCSSource(sources=sources, split=split)
+    source_obj = CombinedImageGCSSource(sources=sources)
     return source_obj.get_source
 
 
