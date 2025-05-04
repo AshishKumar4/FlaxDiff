@@ -128,11 +128,10 @@ class UViT(nn.Module):
         # --- Conditioning ---
         self.time_embed = nn.Sequential([
             FourierEmbedding(features=self.emb_features),
-            TimeProjection(features=self.emb_features,
-                           dtype=self.dtype, precision=self.precision)
+            TimeProjection(features=self.emb_features, precision=self.precision)
         ], name="time_embed")
 
-        # Text projection (assuming textcontext input needs projection)
+        # Text projection
         self.text_proj = nn.DenseGeneral(
             features=self.emb_features,
             dtype=self.dtype,
@@ -141,7 +140,7 @@ class UViT(nn.Module):
         )
 
         # --- Transformer Blocks ---
-        BlockClass = TransformerBlock  # Use TransformerBlockRemat if self.use_remat
+        BlockClass = TransformerBlock 
 
         self.down_blocks = [
             BlockClass(
@@ -233,9 +232,6 @@ class UViT(nn.Module):
         W_P = W // self.patch_size
         num_patches = H_P * W_P
         assert H % self.patch_size == 0 and W % self.patch_size == 0, "Image dimensions must be divisible by patch size"
-
-        # Ensure input dtype matches model dtype
-        x = x.astype(self.dtype)
 
         # --- Patch Embedding ---
         hilbert_inv_idx = None
@@ -345,4 +341,4 @@ class UViT(nn.Module):
             pass  # Assuming unpatchify output is correct
 
         # Ensure final output is float32
-        return x_image.astype(jnp.float32)
+        return x_image
