@@ -110,7 +110,17 @@ parser.add_argument('--noise_schedule', type=str, default='edm',
                     choices=['cosine', 'karras', 'edm'], help='Noise schedule')
 
 parser.add_argument('--architecture', type=str, 
-                    choices=["unet", "uvit", "diffusers_unet_simple", "simple_dit", "simple_mmdit", "hierarchical_mmdit"], 
+                    choices=[
+                        "unet", 
+                        "uvit", 
+                        "diffusers_unet_simple", 
+                        "simple_dit", 
+                        "simple_mmdit", 
+                        "hierarchical_mmdit",
+                        "simple_dit-hilbert", 
+                        "simple_mmdit-hilbert", 
+                        "hierarchical_mmdit-hilbert",
+                    ], 
                     default="unet", help='Architecture to use')
 parser.add_argument('--emb_features', type=int, default=256, help='Embedding features')
 parser.add_argument('--feature_depths', type=int, nargs='+', default=[64, 128, 256, 512], help='Feature depths')
@@ -304,7 +314,14 @@ def main(args):
             INPUT_CHANNELS = 4
             DIFFUSION_INPUT_SIZE = DIFFUSION_INPUT_SIZE // 8
     
-    if 'diffusers' in args.architecture:
+    use_hilbert = args.use_hilbert
+    architecture_name = args.architecture
+    if 'hilbert' in architecture_name:
+        architecture_name = architecture_name.split('-')[0]
+        print("Will use Hilbert Patch Reordering")
+        use_hilbert = True
+    
+    if 'diffusers' in architecture_name:
         model_config = {}
     else:
         model_config = {
@@ -338,7 +355,7 @@ def main(args):
                 "add_residualblock_output": args.add_residualblock_output,
                 "use_flash_attention": args.flash_attention,
                 "use_self_and_cross": args.use_self_and_cross,
-                "use_hilbert": args.use_hilbert,
+                "use_hilbert": use_hilbert,
             },
         },
         "simple_dit": {
@@ -350,7 +367,7 @@ def main(args):
                 "dropout_rate": 0.1,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
-                "use_hilbert": args.use_hilbert,
+                "use_hilbert": use_hilbert,
             },
         },
         "simple_mmdit": {
@@ -362,7 +379,7 @@ def main(args):
                 "dropout_rate": 0.1,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
-                "use_hilbert": args.use_hilbert,
+                "use_hilbert": use_hilbert,
             },
         },
         "hierarchical_mmdit": {
@@ -375,7 +392,7 @@ def main(args):
                 "dropout_rate": 0.1,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
-                "use_hilbert": args.use_hilbert,
+                "use_hilbert": use_hilbert,
             },
         },
         "diffusers_unet_simple": {
@@ -395,10 +412,10 @@ def main(args):
         }
     }
     
-    model_architecture = MODEL_ARCHITECUTRES[args.architecture]['class']
-    model_config.update(MODEL_ARCHITECUTRES[args.architecture]['kwargs'])
+    model_architecture = MODEL_ARCHITECUTRES[architecture_name]['class']
+    model_config.update(MODEL_ARCHITECUTRES[architecture_name]['kwargs'])
     
-    if args.architecture == 'uvit':
+    if architecture_name == 'uvit':
         model_config['emb_features'] = 768
         
     sorted_args_json = json.dumps(vars(args), sort_keys=True)
@@ -430,7 +447,7 @@ def main(args):
     
     CONFIG = {
         "model": model_config,
-        "architecture": args.architecture,
+        "architecture": architecture_name,
         "dataset": {
             "name": dataset_name,
             "length": datalen,
@@ -486,7 +503,7 @@ def main(args):
     model = model_architecture(**model_config)
     
     # If using the Diffusers UNet, we need to wrap it 
-    if 'diffusers' in args.architecture:
+    if 'diffusers' in architecture_name:
         from flaxdiff.models.general import BCHWModelWrapper
         model = BCHWModelWrapper(model)
 
