@@ -90,9 +90,9 @@ parser.add_argument('--GRAIN_WORKER_COUNT', type=int,
 parser.add_argument('--GRAIN_READ_THREAD_COUNT', type=int,
                     default=140, help='Number of grain read threads')
 parser.add_argument('--GRAIN_READ_BUFFER_SIZE', type=int,
-                    default=128, help='Grain read buffer size')
+                    default=96, help='Grain read buffer size')
 parser.add_argument('--GRAIN_WORKER_BUFFER_SIZE', type=int,
-                    default=50, help='Grain worker buffer size')
+                    default=128, help='Grain worker buffer size')
 
 parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
 parser.add_argument('--image_size', type=int, default=128, help='Image size')
@@ -574,10 +574,27 @@ def main(args):
     if trainer.distributed_training:
         print("Distributed Training enabled")
     print(f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
-    
+     
+    # Hardcoding these cuz don't have much time for project submission
     if dataset_name == 'oxford_flowers102':
-        from flaxdiff.data.sources.images import get_oxford_valset
-        val, val_len = get_oxford_valset(text_encoder)
+        # Construct a validation set by the prompts
+        val_prompts = ['water tulip', ' a water lily', ' a water lily', ' a photo of a rose', ' a photo of a rose', ' a water lily', ' a water lily', ' a photo of a marigold', ' a photo of a marigold', ' a photo of a marigold', ' a water lily', ' a photo of a sunflower', ' a photo of a lotus', ' columbine', ' columbine', ' an orchid', ' an orchid', ' an orchid', ' a water lily', ' a water lily', ' a water lily', ' columbine', ' columbine', ' a photo of a sunflower', ' a photo of a sunflower', ' a photo of a sunflower', ' a photo of a lotus', ' a photo of a lotus', ' a photo of a marigold', ' a photo of a marigold', ' a photo of a rose', ' a photo of a rose', ' a photo of a rose', ' orange dahlia', ' orange dahlia', ' a lenten rose', ' a lenten rose', ' a water lily', ' a water lily', ' a water lily', ' a water lily', ' an orchid', ' an orchid', ' an orchid', ' hard-leaved pocket orchid', ' bird of paradise', ' bird of paradise', ' a photo of a lovely rose', ' a photo of a lovely rose', ' a photo of a globe-flower', ' a photo of a globe-flower', ' a photo of a lovely rose', ' a photo of a lovely rose', ' a photo of a ruby-lipped cattleya', ' a photo of a ruby-lipped cattleya', ' a photo of a lovely rose', ' a water lily', ' a osteospermum', ' a osteospermum', ' a water lily', ' a water lily', ' a water lily', ' a red rose', ' a red rose']
+        val_prompts *= 100
+        def get_val_dataset(batch_size=128):
+            for i in range(0, len(val_prompts), batch_size):
+                prompts = val_prompts[i:i + batch_size]
+                tokens = text_encoder.tokenize(prompts)
+                yield {"text": tokens}
+                
+        data['val'] = get_val_dataset
+        data['val_len'] = len(val_prompts)
+    elif dataset_name == 'laiona_coco':
+        import pickle
+        val_set = pickle.load(open("/home/mrwhite0racle/gcs_mount/datasets/laion12m+mscoco_filtered-new/validation_set_small.pkl", "rb"))
+        def get_val_dataset():
+            for i in range(0, len(val_set)):
+                yield val_set[i]
+        val, val_len = get_val_dataset, len(val_set)
         data['val_len'] = val_len
         data['val'] = val
 
