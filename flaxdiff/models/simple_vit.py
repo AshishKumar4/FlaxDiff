@@ -11,6 +11,7 @@ import einops
 from flax.typing import Dtype, PrecisionLike
 from functools import partial
 from .hilbert import hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify
+from .simple_dit import _rotate_half, apply_rotary_embedding, RotaryEmbedding, RoPEAttention, AdaLNZero, AdaLNParams, DiTBlock
 
 
 def unpatchify(x, channels=3):
@@ -85,16 +86,10 @@ class UViT(nn.Module):
 
         # --- Norm Layer ---
         if self.norm_groups > 0:
-            # GroupNorm needs features arg, which varies. Define partial here, apply in __call__?
-            # Or maybe use LayerNorm/RMSNorm consistently? Let's use LayerNorm for simplicity here.
-            # If GroupNorm is essential, it needs careful handling with changing feature sizes.
-            # self.norm_factory = partial(nn.GroupNorm, self.norm_groups, epsilon=self.norm_epsilon, dtype=self.dtype)
             print(f"Warning: norm_groups > 0 not fully supported with standard LayerNorm fallback in UViT setup. Using LayerNorm.")
             self.norm_factory = partial(
                 nn.LayerNorm, epsilon=self.norm_epsilon, dtype=self.dtype)
         else:
-            # Use LayerNorm or RMSNorm for sequence normalization
-            # self.norm_factory = partial(nn.RMSNorm, epsilon=self.norm_epsilon, dtype=self.dtype)
             self.norm_factory = partial(
                 nn.LayerNorm, epsilon=self.norm_epsilon, dtype=self.dtype)
 
@@ -107,7 +102,6 @@ class UViT(nn.Module):
             name="patch_embed"
         )
         if self.use_hilbert:
-            # Projection layer needed after raw Hilbert patches
             self.hilbert_proj = nn.Dense(
                 features=self.emb_features,
                 dtype=self.dtype,
@@ -115,13 +109,8 @@ class UViT(nn.Module):
                 name="hilbert_projection"
             )
 
-        # Positional encoding (learned) - applied only to patch tokens
-        # Max length needs to accommodate max possible patches
-        # Example: 512x512 image, patch 16 -> (512/16)^2 = 1024 patches
-        # Estimate max patches, adjust if needed
         max_patches = (512 // self.patch_size)**2
         self.pos_encoding = self.param('pos_encoding',
-                                       # Standard init for ViT pos embeds
                                        jax.nn.initializers.normal(stddev=0.02),
                                        (1, max_patches, self.emb_features))
 
@@ -131,7 +120,6 @@ class UViT(nn.Module):
             TimeProjection(features=self.emb_features)
         ], name="time_embed")
 
-        # Text projection
         self.text_proj = nn.DenseGeneral(
             features=self.emb_features,
             dtype=self.dtype,
@@ -169,7 +157,7 @@ class UViT(nn.Module):
         )
 
         self.up_dense = [
-            nn.DenseGeneral(  # Project concatenated skip + up_path features back to emb_features
+            nn.DenseGeneral(
                 features=self.emb_features,
                 dtype=self.dtype,
                 precision=self.precision,
@@ -191,157 +179,309 @@ class UViT(nn.Module):
         ]
 
         # --- Output Path ---
-        self.final_norm = self.norm_factory(name="final_norm")  # Use factory
+        self.final_norm = self.norm_factory(name="final_norm")
 
         patch_dim = self.patch_size ** 2 * self.output_channels
         self.final_proj = nn.Dense(
             features=patch_dim,
-            dtype=self.dtype,  # Keep model dtype for projection
+            dtype=self.dtype,
             precision=self.precision,
-            kernel_init=nn.initializers.zeros,  # Zero init final layer
+            kernel_init=nn.initializers.zeros,
             name="final_proj"
         )
 
         if self.add_residualblock_output:
-            # Define these layers only if needed
             self.final_conv1 = ConvLayer(
                 "conv",
                 features=64, kernel_size=(3, 3), strides=(1, 1),
                 dtype=self.dtype, precision=self.precision, name="final_conv1"
             )
             self.final_norm_conv = self.norm_factory(
-                name="final_norm_conv")  # Use factory
+                name="final_norm_conv")
             self.final_conv2 = ConvLayer(
                 "conv",
                 features=self.output_channels, kernel_size=(3, 3), strides=(1, 1),
-                dtype=jnp.float32,  # Often good to have final conv output float32
+                dtype=jnp.float32,
                 precision=self.precision, name="final_conv2"
             )
         else:
-            # Final conv to map features to output channels directly after unpatchify
             self.final_conv_direct = ConvLayer(
                 "conv",
-                # Use 1x1 conv
                 features=self.output_channels, kernel_size=(1, 1), strides=(1, 1),
-                dtype=jnp.float32,  # Output float32
+                dtype=jnp.float32,
                 precision=self.precision, name="final_conv_direct"
             )
 
     @nn.compact
     def __call__(self, x, temb, textcontext=None):
-        original_img = x  # Keep original for potential residual connection
+        original_img = x
         B, H, W, C = original_img.shape
         H_P = H // self.patch_size
         W_P = W // self.patch_size
         num_patches = H_P * W_P
         assert H % self.patch_size == 0 and W % self.patch_size == 0, "Image dimensions must be divisible by patch size"
 
-        # --- Patch Embedding ---
         hilbert_inv_idx = None
         if self.use_hilbert:
-            # Use hilbert_patchify to get raw patches and inverse index
             patches_raw, hilbert_inv_idx_calc = hilbert_patchify(
-                x, self.patch_size)  # Shape [B, S, P*P*C]
-            # Project raw patches
-            # Shape [B, S, emb_features]
+                x, self.patch_size)
             x_patches = self.hilbert_proj(patches_raw)
-            # Calculate inverse permutation (needs total_size)
             idx = hilbert_indices(H_P, W_P)
             hilbert_inv_idx = inverse_permutation(
-                idx, total_size=num_patches)  # Corrected call
-            # Apply Hilbert reordering *after* projection
+                idx, total_size=num_patches)
             x_patches = x_patches[:, idx, :]
         else:
-            # Standard patch embedding
-            # Shape: [B, num_patches, emb_features]
             x_patches = self.patch_embed(x)
 
-        # --- Positional Encoding ---
-        # Add positional encoding only to patch tokens
         assert num_patches <= self.pos_encoding.shape[
             1], f"Number of patches {num_patches} exceeds max_len {self.pos_encoding.shape[1]} in positional encoding"
         x_patches = x_patches + self.pos_encoding[:, :num_patches, :]
 
-        # --- Conditioning Tokens ---
-        # Time embedding: [B, D] -> [B, 1, D]
         time_token = self.time_embed(temb.astype(
-            jnp.float32))  # Ensure input is float32
+            jnp.float32))
         time_token = jnp.expand_dims(time_token.astype(
-            self.dtype), axis=1)  # Cast back and add seq dim
+            self.dtype), axis=1)
 
-        # Text embedding: [B, S_text, D_in] -> [B, S_text, D]
         if textcontext is not None:
             text_tokens = self.text_proj(
-                textcontext.astype(self.dtype))  # Cast context
+                textcontext.astype(self.dtype))
             num_text_tokens = text_tokens.shape[1]
-            # Concatenate: [Patches+Pos, Time, Text]
             x = jnp.concatenate([x_patches, time_token, text_tokens], axis=1)
         else:
-            # Concatenate: [Patches+Pos, Time]
             num_text_tokens = 0
             x = jnp.concatenate([x_patches, time_token], axis=1)
 
-        # --- U-Net Transformer ---
         skips = []
-        # Down blocks (Encoder)
         for i in range(self.num_layers // 2):
-            x = self.down_blocks[i](x)  # Pass full sequence (patches+cond)
-            skips.append(x)  # Store output for skip connection
+            x = self.down_blocks[i](x)
+            skips.append(x)
 
-        # Middle block
         x = self.mid_block(x)
 
-        # Up blocks (Decoder)
         for i in range(self.num_layers // 2):
             skip_conn = skips.pop()
-            # Concatenate along feature dimension
             x = jnp.concatenate([x, skip_conn], axis=-1)
-            # Project back to emb_features
             x = self.up_dense[i](x)
-            # Apply transformer block
             x = self.up_blocks[i](x)
 
-        # --- Output Processing ---
-        # Normalize before final projection
-        x = self.final_norm(x)  # Apply norm factory instance
+        x = self.final_norm(x)
 
-        # Extract only the image patch tokens (first num_patches tokens)
-        # Conditioning tokens (time, text) are discarded here
         x_patches_out = x[:, :num_patches, :]
 
-        # Project to patch pixel dimensions
-        # Shape: [B, num_patches, patch_dim]
         x_patches_out = self.final_proj(x_patches_out)
 
-        # --- Unpatchify ---
         if self.use_hilbert:
-            # Restore Hilbert order to row-major order and then to image
             assert hilbert_inv_idx is not None, "Hilbert inverse index missing"
             x_image = hilbert_unpatchify(
                 x_patches_out, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
         else:
-            # Standard unpatchify
-            # Shape: [B, H, W, C_out]
             x_image = unpatchify(x_patches_out, channels=self.output_channels)
 
-        # --- Final Convolutions ---
         if self.add_residualblock_output:
-            # Concatenate the original image (ensure dtype matches)
             x_image = jnp.concatenate(
                 [original_img.astype(self.dtype), x_image], axis=-1)
 
             x_image = self.final_conv1(x_image)
-            # Apply norm factory instance
             x_image = self.final_norm_conv(x_image)
             x_image = self.activation(x_image)
-            x_image = self.final_conv2(x_image)  # Outputs float32
+            x_image = self.final_conv2(x_image)
         else:
-            # Apply a simple 1x1 conv to map features if needed (unpatchify already gives C_out channels)
-            # Or just return x_image if channels match output_channels
-            # If unpatchify output channels == self.output_channels, this might be redundant
-            # Let's assume unpatchify gives correct channels, but ensure float32
-            # x_image = self.final_conv_direct(x_image) # Use 1x1 conv if needed
-            pass  # Assuming unpatchify output is correct
+            pass
 
-        # Ensure final output is float32
         return x_image
+
+
+# --- Simple U-DiT ---
+
+class SimpleUDiT(nn.Module):
+    """
+    A Simple U-Net Diffusion Transformer (U-DiT) implementation.
+    Combines the U-Net structure with DiT blocks using RoPE and AdaLN-Zero conditioning.
+    Based on SimpleDiT and standard U-Net principles.
+    """
+    output_channels: int = 3
+    patch_size: int = 16
+    emb_features: int = 768
+    num_layers: int = 12 # Should be even for U-Net structure
+    num_heads: int = 12
+    mlp_ratio: int = 4
+    dropout_rate: float = 0.0  # Typically 0 for diffusion
+    dtype: Optional[Dtype] = None # e.g., jnp.float32 or jnp.bfloat16
+    precision: PrecisionLike = None
+    use_flash_attention: bool = False # Passed to DiTBlock -> RoPEAttention
+    force_fp32_for_softmax: bool = True # Passed to DiTBlock -> RoPEAttention
+    norm_epsilon: float = 1e-5
+    learn_sigma: bool = False
+    use_hilbert: bool = False
+    norm_groups: int = 0
+    activation: Callable = jax.nn.swish
+
+    def setup(self):
+        assert self.num_layers % 2 == 0, "num_layers must be even for U-Net structure"
+        half_layers = self.num_layers // 2
+
+        self.patch_embed = PatchEmbedding(
+            patch_size=self.patch_size,
+            embedding_dim=self.emb_features,
+            dtype=self.dtype,
+            precision=self.precision,
+            name="patch_embed"
+        )
+        if self.use_hilbert:
+            self.hilbert_proj = nn.Dense(
+                features=self.emb_features,
+                dtype=self.dtype,
+                precision=self.precision,
+                name="hilbert_projection"
+            )
+
+        self.time_embed = nn.Sequential([
+            FourierEmbedding(features=self.emb_features, dtype=jnp.float32),
+            TimeProjection(features=self.emb_features * self.mlp_ratio, dtype=self.dtype, precision=self.precision),
+            nn.Dense(features=self.emb_features, dtype=self.dtype, precision=self.precision)
+        ], name="time_embed")
+
+        self.text_proj = nn.Dense(
+            features=self.emb_features,
+            dtype=self.dtype,
+            precision=self.precision,
+            name="text_proj"
+        )
+
+        max_patches = (512 // self.patch_size)**2
+        self.rope = RotaryEmbedding(
+            dim=self.emb_features // self.num_heads,
+            max_seq_len=max_patches,
+            dtype=self.dtype,
+            name="rope_emb"
+        )
+
+        self.down_blocks = [
+            DiTBlock(
+                features=self.emb_features,
+                num_heads=self.num_heads,
+                mlp_ratio=self.mlp_ratio,
+                dropout_rate=self.dropout_rate,
+                dtype=self.dtype,
+                precision=self.precision,
+                use_flash_attention=self.use_flash_attention,
+                force_fp32_for_softmax=self.force_fp32_for_softmax,
+                norm_epsilon=self.norm_epsilon,
+                rope_emb=self.rope,
+                name=f"down_block_{i}"
+            ) for i in range(half_layers)
+        ]
+
+        self.mid_block = DiTBlock(
+            features=self.emb_features,
+            num_heads=self.num_heads,
+            mlp_ratio=self.mlp_ratio,
+            dropout_rate=self.dropout_rate,
+            dtype=self.dtype,
+            precision=self.precision,
+            use_flash_attention=self.use_flash_attention,
+            force_fp32_for_softmax=self.force_fp32_for_softmax,
+            norm_epsilon=self.norm_epsilon,
+            rope_emb=self.rope,
+            name="mid_block"
+        )
+
+        self.up_dense = [
+             nn.DenseGeneral(
+                 features=self.emb_features,
+                 dtype=self.dtype,
+                 precision=self.precision,
+                 name=f"up_dense_{i}"
+             ) for i in range(half_layers)
+        ]
+        self.up_blocks = [
+            DiTBlock(
+                features=self.emb_features,
+                num_heads=self.num_heads,
+                mlp_ratio=self.mlp_ratio,
+                dropout_rate=self.dropout_rate,
+                dtype=self.dtype,
+                precision=self.precision,
+                use_flash_attention=self.use_flash_attention,
+                force_fp32_for_softmax=self.force_fp32_for_softmax,
+                norm_epsilon=self.norm_epsilon,
+                rope_emb=self.rope,
+                name=f"up_block_{i}"
+            ) for i in range(half_layers)
+        ]
+
+        self.final_norm = nn.LayerNorm(
+            epsilon=self.norm_epsilon, dtype=self.dtype, name="final_norm")
+
+        output_dim = self.patch_size * self.patch_size * self.output_channels
+        if self.learn_sigma:
+            output_dim *= 2
+
+        self.final_proj = nn.Dense(
+            features=output_dim,
+            dtype=jnp.float32,
+            precision=self.precision,
+            kernel_init=nn.initializers.zeros,
+            name="final_proj"
+        )
+
+    @nn.compact
+    def __call__(self, x, temb, textcontext=None):
+        B, H, W, C = x.shape
+        H_P = H // self.patch_size
+        W_P = W // self.patch_size
+        num_patches = H_P * W_P
+        assert H % self.patch_size == 0 and W % self.patch_size == 0, "Image dimensions must be divisible by patch size"
+
+        x = x.astype(self.dtype)
+
+        hilbert_inv_idx = None
+        if self.use_hilbert:
+            patches_raw, _ = hilbert_patchify(x, self.patch_size)
+            x_seq = self.hilbert_proj(patches_raw)
+            idx = hilbert_indices(H_P, W_P)
+            hilbert_inv_idx = inverse_permutation(idx, total_size=num_patches)
+        else:
+            x_seq = self.patch_embed(x)
+
+        t_emb = self.time_embed(temb.astype(jnp.float32))
+        t_emb = t_emb.astype(self.dtype)
+
+        cond_emb = t_emb
+        if textcontext is not None:
+            text_emb = self.text_proj(textcontext.astype(self.dtype))
+            if text_emb.ndim == 3:
+                text_emb = jnp.mean(text_emb, axis=1)
+            cond_emb = cond_emb + text_emb
+
+        skips = []
+        for i in range(self.num_layers // 2):
+            x_seq = self.down_blocks[i](x_seq, conditioning=cond_emb, freqs_cis=None)
+            skips.append(x_seq)
+
+        x_seq = self.mid_block(x_seq, conditioning=cond_emb, freqs_cis=None)
+
+        for i in range(self.num_layers // 2):
+            skip_conn = skips.pop()
+            x_seq = jnp.concatenate([x_seq, skip_conn], axis=-1)
+            x_seq = self.up_dense[i](x_seq)
+            x_seq = self.up_blocks[i](x_seq, conditioning=cond_emb, freqs_cis=None)
+
+        x_out = self.final_norm(x_seq)
+        x_out = self.final_proj(x_out)
+
+        if self.use_hilbert:
+            assert hilbert_inv_idx is not None, "Hilbert inverse index missing"
+            if self.learn_sigma:
+                x_mean, x_logvar = jnp.split(x_out, 2, axis=-1)
+                x_image = hilbert_unpatchify(x_mean, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+            else:
+                x_image = hilbert_unpatchify(x_out, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+        else:
+            if self.learn_sigma:
+                x_mean, x_logvar = jnp.split(x_out, 2, axis=-1)
+                x_image = unpatchify(x_mean, channels=self.output_channels)
+            else:
+                x_image = unpatchify(x_out, channels=self.output_channels)
+
+        return x_image.astype(jnp.float32)

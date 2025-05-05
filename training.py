@@ -7,7 +7,7 @@ import flax.training.dynamic_scale
 import jax.experimental.multihost_utils
 from flaxdiff.models.common import kernel_init
 from flaxdiff.models.simple_unet import Unet
-from flaxdiff.models.simple_vit import UViT
+from flaxdiff.models.simple_vit import UViT, SimpleUDiT
 from flaxdiff.models.simple_dit import SimpleDiT
 from flaxdiff.models.simple_mmdit import SimpleMMDiT, HierarchicalMMDiT
 import jax.experimental.pallas.ops.tpu.flash_attention
@@ -113,10 +113,12 @@ parser.add_argument('--architecture', type=str,
                     choices=[
                         "unet", 
                         "uvit", 
+                        "simple_udit", 
                         "diffusers_unet_simple", 
                         "simple_dit", 
                         "simple_mmdit", 
                         "hierarchical_mmdit",
+                        'simple_dit-hilbert',
                         "simple_dit-hilbert", 
                         "simple_mmdit-hilbert", 
                         "hierarchical_mmdit-hilbert",
@@ -359,6 +361,18 @@ def main(args):
             },
         },
         "simple_dit": {
+            "class": SimpleUDiT,
+            "kwargs": {
+                "patch_size":  args.patch_size,
+                "num_layers":  args.num_layers,
+                "num_heads":  args.num_heads,
+                "dropout_rate": 0.1,
+                "use_flash_attention": args.flash_attention,
+                "mlp_ratio": args.mlp_ratio,
+                "use_hilbert": use_hilbert,
+            },
+        },
+        "simple_dit": {
             "class": SimpleDiT,
             "kwargs": {
                 "patch_size":  args.patch_size,
@@ -465,6 +479,8 @@ def main(args):
         "autoencoder_opts": args.autoencoder_opts,
         "arguments_hash": arguments_hash,
     }
+    
+    batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
 
     cosine_schedule = CosineNoiseScheduler(1000, beta_end=1)
     karas_ve_schedule = KarrasVENoiseScheduler(
@@ -557,7 +573,6 @@ def main(args):
     
     if trainer.distributed_training:
         print("Distributed Training enabled")
-    batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
     print(f"Training on {CONFIG['dataset']['name']} dataset with {batches} samples")
     
     # Construct a validation set by the prompts
