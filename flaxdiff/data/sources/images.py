@@ -82,7 +82,7 @@ def labelizer_oxford_flowers102(path):
 class ImageTFDSSource(DataSource):
     """Data source for TensorFlow Datasets (TFDS) image datasets."""
     
-    def __init__(self, name: str, use_tf: bool = True):
+    def __init__(self, name: str, use_tf: bool = True, split: str = "all"):
         """Initialize a TFDS image data source.
         
         Args:
@@ -92,8 +92,9 @@ class ImageTFDSSource(DataSource):
         """
         self.name = name
         self.use_tf = use_tf
+        self.split = split
     
-    def get_source(self, path_override: str, split: str = "all") -> Any:
+    def get_source(self, path_override: str) -> Any:
         """Get the TFDS data source.
         
         Args:
@@ -104,9 +105,9 @@ class ImageTFDSSource(DataSource):
         """
         import tensorflow_datasets as tfds
         if self.use_tf:
-            return tfds.load(self.name, split=split, shuffle_files=True)
+            return tfds.load(self.name, split=self.split, shuffle_files=True)
         else:
-            return tfds.data_source(self.name, split=split, try_gcs=False)
+            return tfds.data_source(self.name, split=self.split, try_gcs=False)
 
 
 class ImageTFDSAugmenter(DataAugmenter):
@@ -198,7 +199,7 @@ class ImageGCSSource(DataSource):
         """
         self.source = source
     
-    def get_source(self, path_override: str = "/home/mrwhite0racle/gcs_mount", split: str = "train") -> Any:
+    def get_source(self, path_override: str = "/home/mrwhite0racle/gcs_mount") -> Any:
         """Get the GCS data source.
         
         Args:
@@ -210,8 +211,6 @@ class ImageGCSSource(DataSource):
         records_path = os.path.join(path_override, self.source)
         records = [os.path.join(records_path, i) for i in os.listdir(
             records_path) if 'array_record' in i]
-        if split == "val":
-            records = records[:1]
         return pygrain.ArrayRecordDataSource(records)
 
 
@@ -226,7 +225,7 @@ class CombinedImageGCSSource(DataSource):
         """
         self.sources = sources
     
-    def get_source(self, path_override: str = "/home/mrwhite0racle/gcs_mount", split: str = "train") -> Any:
+    def get_source(self, path_override: str = "/home/mrwhite0racle/gcs_mount") -> Any:
         """Get the combined GCS data source.
         
         Args:
@@ -240,8 +239,6 @@ class CombinedImageGCSSource(DataSource):
         for records_path in records_paths:
             records += [os.path.join(records_path, i) for i in os.listdir(
                 records_path) if 'array_record' in i]
-        if split == "val":
-            records = records[:1]
         return pygrain.ArrayRecordDataSource(records)
 
 class ImageGCSAugmenter(DataAugmenter):
@@ -357,9 +354,9 @@ class ImageGCSAugmenter(DataAugmenter):
 
 # These functions maintain backward compatibility with existing code
 
-def data_source_tfds(name, use_tf=True):
+def data_source_tfds(name, use_tf=True, split="all"):
     """Legacy function for TFDS data sources."""
-    source = ImageTFDSSource(name=name, use_tf=use_tf)
+    source = ImageTFDSSource(name=name, use_tf=use_tf, split=split)
     return source.get_source
 
 

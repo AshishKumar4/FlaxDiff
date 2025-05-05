@@ -292,14 +292,14 @@ def get_dataset_grain(
         Dictionary with train dataset function and metadata.
     """
     dataset = datasetMap[data_name]
-    train_source = dataset["source"](dataset_source, split="train")
-    # val_source = dataset["source"](dataset_source, split="val")
+    data_source = dataset["source"](dataset_source)
     augmenter = dataset["augmenter"](image_scale, method)
+    filters = dataset.get("filter", None)(image_scale)
 
     local_batch_size = batch_size // jax.process_count()
 
     train_sampler = pygrain.IndexSampler(
-        num_records=len(train_source) if count is None else count,
+        num_records=len(data_source) if count is None else count,
         shuffle=True,
         seed=seed,
         num_epochs=num_epochs,
@@ -307,7 +307,7 @@ def get_dataset_grain(
     )
 
     # val_sampler = pygrain.IndexSampler(
-    #     num_records=len(val_source) if count is None else count,
+    #     num_records=len(data_source) if count is None else count,
     #     shuffle=False,
     #     seed=seed,
     #     num_epochs=num_epochs,
@@ -327,7 +327,7 @@ def get_dataset_grain(
         transformations.append(pygrain.Batch(local_batch_size, drop_remainder=True))
 
         loader = pygrain.DataLoader(
-            data_source=train_source,
+            data_source=data_source,
             sampler=train_sampler,
             operations=transformations,
             worker_count=worker_count,
@@ -345,22 +345,23 @@ def get_dataset_grain(
     #     ]
 
     #     loader = pygrain.DataLoader(
-    #         data_source=train_source,
-    #         sampler=train_sampler,
+    #         data_source=data_source,
+    #         sampler=val_sampler,
     #         operations=transformations,
-    #         worker_count=2,
+    #         worker_count=worker_count,
     #         read_options=pygrain.ReadOptions(
     #             read_thread_count, read_buffer_size
     #         ),
-    #         worker_buffer_size=2,
+    #         worker_buffer_size=worker_buffer_size,
     #     )
     #     return loader
+    get_valset = get_trainset  # For now, use the same function for validation
 
     return {
         "train": get_trainset,
-        "train_len": len(train_source),
-        "val": get_trainset,
-        "val_len": len(train_source),
+        "train_len": len(data_source),
+        "val": get_valset,
+        "val_len": len(data_source),
         "local_batch_size": local_batch_size,
         "global_batch_size": batch_size,
     }
