@@ -360,7 +360,7 @@ def main(args):
                 "use_hilbert": use_hilbert,
             },
         },
-        "simple_dit": {
+        "simple_udit": {
             "class": SimpleUDiT,
             "kwargs": {
                 "patch_size":  args.patch_size,
