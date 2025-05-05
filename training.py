@@ -578,7 +578,7 @@ def main(args):
     if dataset_name == 'oxford_flowers102':
         from flaxdiff.data.sources.images import get_oxford_valset
         val, val_len = get_oxford_valset(text_encoder)
-        data['val_len'] = len(val)
+        data['val_len'] = val_len
         data['val'] = val
 
     final_state = trainer.fit(
