@@ -119,10 +119,10 @@ parser.add_argument('--architecture', type=str,
                         "simple_mmdit", 
                         "hierarchical_mmdit",
                         # 'uvit-hilbert',
-                        'simple_dit-hilbert',
-                        "simple_dit-hilbert", 
-                        "simple_mmdit-hilbert", 
-                        "hierarchical_mmdit-hilbert",
+                        'simple_dit+hilbert',
+                        "simple_dit+hilbert", 
+                        "simple_mmdit+hilbert", 
+                        "hierarchical_mmdit+hilbert",
                     ], 
                     default="unet", help='Architecture to use')
 parser.add_argument('--emb_features', type=int, default=256, help='Embedding features')
@@ -320,7 +320,7 @@ def main(args):
     use_hilbert = args.use_hilbert
     architecture_name = args.architecture
     if 'hilbert' in architecture_name:
-        architecture_name = architecture_name.split('-')[0]
+        architecture_name = architecture_name.split('+')[0]
         print("Will use Hilbert Patch Reordering")
         use_hilbert = True
     
