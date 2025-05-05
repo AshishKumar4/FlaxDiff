@@ -316,12 +316,6 @@ def get_dataset_grain(
         transformations = [
             augmenter(),
         ]
-        
-        # if filters:
-        #     print("Adding filters to transformations")
-        #     transformations.append(filters())
-            
-        # transformations.append(CaptionDeletionTransform())
         transformations.append(pygrain.Batch(local_batch_size, drop_remainder=True))
 
         loader = pygrain.DataLoader(
@@ -339,18 +333,18 @@ def get_dataset_grain(
     def get_valset():
         transformations = [
             augmenter(),
-            pygrain.Batch(local_batch_size, drop_remainder=True),
+            pygrain.Batch(32, drop_remainder=True),
         ]
 
         loader = pygrain.DataLoader(
             data_source=data_source,
             sampler=train_sampler,
             operations=transformations,
-            worker_count=4,
+            worker_count=8,
             read_options=pygrain.ReadOptions(
-                5, 100
+                32, 100
             ),
-            worker_buffer_size=5,
+            worker_buffer_size=32,
         )
         return loader
 
