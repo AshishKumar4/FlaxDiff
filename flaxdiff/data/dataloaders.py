@@ -353,13 +353,10 @@ def get_dataset_grain(
     #         worker_buffer_size=worker_buffer_size,
     #     )
     #     return loader
-    get_valset = get_trainset  # For now, use the same function for validation
 
     return {
         "train": get_trainset,
         "train_len": len(data_source),
-        "val": get_valset,
-        "val_len": len(data_source),
         "local_batch_size": local_batch_size,
         "global_batch_size": batch_size,
     }
