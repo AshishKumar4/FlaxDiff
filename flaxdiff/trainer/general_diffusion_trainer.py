@@ -428,6 +428,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         generate_samples = val_step_fn
         
         val_ds = iter(val_ds) if val_ds else None
+        print(f"Validation loop started for process index {process_index} with {global_device_count} devices.")
         # Evaluation step
         try:
             metrics = {metric.name: [] for metric in self.eval_metrics} if self.eval_metrics else {}
@@ -487,7 +488,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                         self.wandb.log({
                             f"val/{key}": value,
                         }, step=current_step)
-                
+                print(f"Validation metrics for process index {process_index}: {metrics}")
             
             # Close validation dataset iterator
             del val_ds
