@@ -338,28 +338,28 @@ def get_dataset_grain(
         )
         return loader
     
-    def get_valset():
-        transformations = [
-            augmenter(),
-            pygrain.Batch(local_batch_size, drop_remainder=True),
-        ]
+    # def get_valset():
+    #     transformations = [
+    #         augmenter(),
+    #         pygrain.Batch(local_batch_size, drop_remainder=True),
+    #     ]
 
-        loader = pygrain.DataLoader(
-            data_source=train_source,
-            sampler=train_sampler,
-            operations=transformations,
-            worker_count=2,
-            read_options=pygrain.ReadOptions(
-                read_thread_count, read_buffer_size
-            ),
-            worker_buffer_size=2,
-        )
-        return loader
+    #     loader = pygrain.DataLoader(
+    #         data_source=train_source,
+    #         sampler=train_sampler,
+    #         operations=transformations,
+    #         worker_count=2,
+    #         read_options=pygrain.ReadOptions(
+    #             read_thread_count, read_buffer_size
+    #         ),
+    #         worker_buffer_size=2,
+    #     )
+    #     return loader
 
     return {
         "train": get_trainset,
         "train_len": len(train_source),
-        "val": get_valset,
+        "val": get_trainset,
         "val_len": len(train_source),
         "local_batch_size": local_batch_size,
         "global_batch_size": batch_size,
