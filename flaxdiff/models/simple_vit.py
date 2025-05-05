@@ -295,8 +295,8 @@ class SimpleUDiT(nn.Module):
             )
 
         self.time_embed = nn.Sequential([
-            FourierEmbedding(features=self.emb_features, dtype=jnp.float32),
-            TimeProjection(features=self.emb_features * self.mlp_ratio, dtype=self.dtype, precision=self.precision),
+            FourierEmbedding(features=self.emb_features),
+            TimeProjection(features=self.emb_features * self.mlp_ratio),
             nn.Dense(features=self.emb_features, dtype=self.dtype, precision=self.precision)
         ], name="time_embed")
 
