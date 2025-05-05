@@ -294,8 +294,6 @@ def get_dataset_grain(
     dataset = datasetMap[data_name]
     data_source = dataset["source"](dataset_source)
     augmenter = dataset["augmenter"](image_scale, method)
-    filters = dataset.get("filter", None)(image_scale)
-
     local_batch_size = batch_size // jax.process_count()
 
     train_sampler = pygrain.IndexSampler(
