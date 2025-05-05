@@ -11,49 +11,8 @@ import einops
 from flax.typing import Dtype, PrecisionLike
 from functools import partial
 from .hilbert import hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify
-from .simple_dit import _rotate_half, apply_rotary_embedding, RotaryEmbedding, RoPEAttention, AdaLNZero, AdaLNParams, DiTBlock
-
-
-def unpatchify(x, channels=3):
-    patch_size = int((x.shape[2] // channels) ** 0.5)
-    h = w = int(x.shape[1] ** .5)
-    assert h * w == x.shape[1] and patch_size ** 2 * \
-        channels == x.shape[2], f"Invalid shape: {x.shape}, should be {h*w}, {patch_size**2*channels}"
-    x = einops.rearrange(
-        x, 'B (h w) (p1 p2 C) -> B (h p1) (w p2) C', h=h, p1=patch_size, p2=patch_size)
-    return x
-
-
-class PatchEmbedding(nn.Module):
-    patch_size: int
-    embedding_dim: int
-    dtype: Any = jnp.float32
-    precision: Any = jax.lax.Precision.HIGH
-
-    @nn.compact
-    def __call__(self, x):
-        batch, height, width, channels = x.shape
-        assert height % self.patch_size == 0 and width % self.patch_size == 0, "Image dimensions must be divisible by patch size"
-
-        x = nn.Conv(features=self.embedding_dim,
-                    kernel_size=(self.patch_size, self.patch_size),
-                    strides=(self.patch_size, self.patch_size),
-                    dtype=self.dtype,
-                    precision=self.precision)(x)
-        x = jnp.reshape(x, (batch, -1, self.embedding_dim))
-        return x
-
-
-class PositionalEncoding(nn.Module):
-    max_len: int
-    embedding_dim: int
-
-    @nn.compact
-    def __call__(self, x):
-        pe = self.param('pos_encoding',
-                        jax.nn.initializers.zeros,
-                        (1, self.max_len, self.embedding_dim))
-        return x + pe[:, :x.shape[1], :]
+from .vit_common import _rotate_half, unpatchify, PatchEmbedding, apply_rotary_embedding, RotaryEmbedding, RoPEAttention, AdaLNZero, AdaLNParams
+from .simple_dit import DiTBlock
 
 
 class UViT(nn.Module):
