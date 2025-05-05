@@ -92,7 +92,7 @@ parser.add_argument('--GRAIN_READ_THREAD_COUNT', type=int,
 parser.add_argument('--GRAIN_READ_BUFFER_SIZE', type=int,
                     default=96, help='Grain read buffer size')
 parser.add_argument('--GRAIN_WORKER_BUFFER_SIZE', type=int,
-                    default=128, help='Grain worker buffer size')
+                    default=40, help='Grain worker buffer size')
 
 parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
 parser.add_argument('--image_size', type=int, default=128, help='Image size')
