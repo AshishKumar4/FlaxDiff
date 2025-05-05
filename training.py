@@ -147,7 +147,7 @@ parser.add_argument('--mlp_ratio', type=int, default=4, help='MLP ratio in the t
 parser.add_argument('--use_hilbert', type=boolean_string, default=False, help='Use Hilbert patch reordering for the transformer if using UViT')
 
 parser.add_argument('--dtype', type=str, default=None, help='dtype to use')
-parser.add_argument('--precision', type=str, default=None, help='precision to use', choices=['high', 'default', 'highest', 'None', None])
+parser.add_argument('--precision', type=str, default='default', help='precision to use', choices=['high', 'default', 'highest', 'None', None])
 
 parser.add_argument('--distributed_training', type=boolean_string, default=True, help='Should use distributed training or not')
 parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
