@@ -333,7 +333,7 @@ def get_dataset_grain(
     def get_valset():
         transformations = [
             augmenter(),
-            pygrain.Batch(32, drop_remainder=True),
+            pygrain.Batch(64, drop_remainder=True),
         ]
 
         loader = pygrain.DataLoader(
@@ -342,7 +342,7 @@ def get_dataset_grain(
             operations=transformations,
             worker_count=8,
             read_options=pygrain.ReadOptions(
-                32, 100
+                32, 128
             ),
             worker_buffer_size=32,
         )
