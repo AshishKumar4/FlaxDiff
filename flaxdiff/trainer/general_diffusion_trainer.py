@@ -649,7 +649,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             best_runs, bounds = self.__get_best_general_runs__(metric=metric, top_k=top_k)
         
         # Determine if lower or higher values are better (for loss, lower is better)
-        is_lower_better = "loss" in metric.lower()
+        is_lower_better = True
         
         # Check if current run is one of the best
         if metric == "train/best_loss":
@@ -661,7 +661,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                 
         # Check based on bounds
         if (is_lower_better and current_run_metric < bounds[1]) or (not is_lower_better and current_run_metric > bounds[0]):
-            print(f"Current run {self.wandb.id} meets performance criteria.")
+            print(f"Current run {self.wandb.id} meets performance criteria. Current metric: {current_run_metric}, Best bounds: {bounds}")
             is_best = (is_lower_better and current_run_metric < bounds[0]) or (not is_lower_better and current_run_metric > bounds[1])
             return True, is_best
             
