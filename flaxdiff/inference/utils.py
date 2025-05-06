@@ -25,6 +25,9 @@ from flaxdiff.models.autoencoder.diffusers import StableDiffusionVAE
 from flaxdiff.inputs import DiffusionInputConfig, ConditionalInputConfig
 from flaxdiff.utils import defaultTextEncodeModel
 
+from flaxdiff.models.simple_vit import UViT, SimpleUDiT
+from flaxdiff.models.simple_dit import SimpleDiT
+from flaxdiff.models.simple_mmdit import SimpleMMDiT, HierarchicalMMDiT
 from orbax.checkpoint import CheckpointManager, CheckpointManagerOptions, PyTreeCheckpointer
 import os
 
@@ -116,7 +119,10 @@ def parse_config(config, overrides=None):
     MODEL_CLASSES = {
         'unet': Unet,
         'uvit': UViT,
-        'diffusers_unet_simple': FlaxUNet2DConditionModel
+        'diffusers_unet_simple': FlaxUNet2DConditionModel,
+        'simple_dit': SimpleDiT,
+        'simple_uvit': SimpleUDiT,
+        'simple_mmdit': SimpleMMDiT,
     }
     
     # Map all the leaves of the model config, converting strings to appropriate types
