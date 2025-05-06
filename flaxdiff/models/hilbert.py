@@ -241,7 +241,6 @@ def hilbert_unpatchify(x: jnp.ndarray, inv_idx: jnp.ndarray, patch_size: int, H:
     target_shape = (B, total_patches_expected, patch_dim)
 
     # Create indices for gathering from x (Hilbert order h) based on inv_idx (map k -> h)
-    # inv_idx contains the 'h' index for each 'k' index.
     # Clamp invalid indices (-1) to 0; we'll mask these results later.
     # Values must be < N (the actual number of patches in x).
     h_indices_for_gather = jnp.maximum(inv_idx, 0) # Shape [total_patches_expected]
@@ -320,15 +319,26 @@ def visualize_hilbert_curve(H: int, W: int, patch_size: int, figsize=(12, 5)):
     orig_grid = np.arange(H_P * W_P).reshape((H_P, W_P))
     im0 = axes[0].imshow(orig_grid, cmap='viridis', aspect='auto')
     axes[0].set_title(f"Original Grid ({H_P}x{W_P})\n(Row-Major Order)")
-    # Add text labels for indices
-    for r in range(H_P):
-        for c in range(W_P):
-            axes[0].text(c, r, f'{orig_grid[r, c]}', ha='center', va='center', color='white' if orig_grid[r,c] < (H_P*W_P)/2 else 'black', fontsize=8)
+    # Remove text labels for indices
     axes[0].set_xticks(np.arange(W_P))
     axes[0].set_yticks(np.arange(H_P))
     axes[0].set_xticklabels(np.arange(W_P))
     axes[0].set_yticklabels(np.arange(H_P))
     plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04, label="Row-Major Index")
+
+    # Draw the row-major scanning line
+    if H_P * W_P > 1:
+        row_major_coords_y = []
+        row_major_coords_x = []
+        for r_idx in range(H_P * W_P):
+            r = r_idx // W_P
+            c = r_idx % W_P
+            row_major_coords_y.append(r + 0.5) # Cell center
+            row_major_coords_x.append(c + 0.5) # Cell center
+        axes[0].plot(row_major_coords_x, row_major_coords_y, color='red', linestyle='-', linewidth=1.5, alpha=0.8)
+        axes[0].plot(row_major_coords_x[0], row_major_coords_y[0], 'go', markersize=5, label='Start') # Smaller marker
+        axes[0].plot(row_major_coords_x[-1], row_major_coords_y[-1], 'mo', markersize=5, label='End') # Smaller marker
+        axes[0].legend(fontsize='x-small')
 
     # --- Plot 2: Hilbert Curve Ordering ---
     # Mask unmapped cells for visualization
@@ -336,10 +346,10 @@ def visualize_hilbert_curve(H: int, W: int, patch_size: int, figsize=(12, 5)):
     im1 = axes[1].imshow(masked_grid, cmap=cmap, aspect='auto', vmin=0, vmax=max(0, len(idx)-1))
     axes[1].set_title(f"Hilbert Curve Ordering ({len(idx)} points)")
     # Add text labels for Hilbert indices
-    for r in range(H_P):
-        for c in range(W_P):
-            if grid[r,c] != -1:
-                axes[1].text(c, r, f'{int(grid[r, c])}', ha='center', va='center', color='black', fontsize=8)
+    # for r in range(H_P):
+    #     for c in range(W_P):
+    #         if grid[r,c] != -1:
+    #             axes[1].text(c, r, f'{int(grid[r, c])}', ha='center', va='center', color='black', fontsize=8)
     axes[1].set_xticks(np.arange(W_P))
     axes[1].set_yticks(np.arange(H_P))
     axes[1].set_xticklabels(np.arange(W_P))
@@ -355,22 +365,17 @@ def visualize_hilbert_curve(H: int, W: int, patch_size: int, figsize=(12, 5)):
         for i in range(len(idx)):
              if i in row_col_map:
                  coords.append(row_col_map[i])
-             # Fallback (slower):
-             # row_indices, col_indices = np.where(grid == i)
-             # if len(row_indices) > 0:
-             #     coords.append((row_indices[0], col_indices[0]))
 
         if coords:
              # Get coordinates for plotting (centers of cells)
-             y_coords = [r + 0.5 for r, c in coords]
-             x_coords = [c + 0.5 for r, c in coords]
-             axes[1].plot(x_coords, y_coords, color='black', linestyle='-', linewidth=1.5, alpha=0.8)
+             y_coords = [r + 0.5 for r, c in coords] # Cell center
+             x_coords = [c + 0.5 for r, c in coords] # Cell center
+             axes[1].plot(x_coords, y_coords, color='red', linestyle='-', linewidth=1.5, alpha=0.8) # Ensure Hilbert curve is red
              # Mark start point
-             axes[1].plot(x_coords[0], y_coords[0], 'go', markersize=8, label='Start (Idx 0)') # Green circle
+             axes[1].plot(x_coords[0], y_coords[0], 'go', markersize=5, label='Start') # Smaller marker
              # Mark end point
-             axes[1].plot(x_coords[-1], y_coords[-1], 'mo', markersize=8, label=f'End (Idx {len(idx)-1})') # Magenta circle
-             axes[1].legend(fontsize='small')
-
+             axes[1].plot(x_coords[-1], y_coords[-1], 'mo', markersize=5, label='End') # Smaller marker
+             axes[1].legend(fontsize='x-small')
 
     plt.tight_layout()
     return fig
