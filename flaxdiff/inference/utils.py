@@ -121,8 +121,8 @@ def parse_config(config, overrides=None):
         'uvit': UViT,
         'diffusers_unet_simple': FlaxUNet2DConditionModel,
         'simple_dit': SimpleDiT,
-        'simple_uvit': SimpleUDiT,
         'simple_mmdit': SimpleMMDiT,
+        'simple_udit': SimpleUDiT,
     }
     
     # Map all the leaves of the model config, converting strings to appropriate types
