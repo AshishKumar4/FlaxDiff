@@ -642,6 +642,19 @@ class SimpleTrainer:
             self.rngstate = rng_state
             total_time = end_time - start_time
             avg_time_per_step = total_time / train_steps_per_epoch
+            
+            if val_steps_per_epoch > 0:
+                print(f"Validation started for process index {process_index}")
+                # Validation step
+                self.validation_loop(
+                    train_state,
+                    val_step,
+                    val_ds,
+                    val_steps_per_epoch,
+                    current_step,
+                )
+                print(colored(f"Validation done on process index {process_index}", PROCESS_COLOR_MAP[process_index]))
+            
             avg_loss = epoch_loss / train_steps_per_epoch
             if avg_loss < self.best_loss:
                 self.best_loss = avg_loss
@@ -659,17 +672,6 @@ class SimpleTrainer:
                     }, step=current_step)
                 print(colored(f"\n\tEpoch {current_epoch} completed. Avg Loss: {avg_loss}, Time: {total_time:.2f}s, Best Loss: {self.best_loss}", 'green'))
                     
-            if val_steps_per_epoch > 0:
-                print(f"Validation started for process index {process_index}")
-                # Validation step
-                self.validation_loop(
-                    train_state,
-                    val_step,
-                    val_ds,
-                    val_steps_per_epoch,
-                    current_step,
-                )
-                print(colored(f"Validation done on process index {process_index}", PROCESS_COLOR_MAP[process_index]))
                 
         self.save(epochs)#
         return self.state
