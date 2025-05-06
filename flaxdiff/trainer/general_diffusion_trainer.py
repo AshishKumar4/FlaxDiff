@@ -427,7 +427,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         process_index = jax.process_index()
         generate_samples = val_step_fn
         
-        val_ds = iter(val_ds) if val_ds else None
+        val_ds = iter(val_ds()) if val_ds else None
         print(f"Validation loop started for process index {process_index} with {global_device_count} devices.")
         # Evaluation step
         try:
