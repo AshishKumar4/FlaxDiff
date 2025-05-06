@@ -600,7 +600,7 @@ class SimpleTrainer:
 
     def fit(self, data, train_steps_per_epoch, epochs, train_step_args={}, val_steps_per_epoch=5, validation_step_args={}):
         train_ds = iter(data['train']())
-        val_ds = data.get('val', data.get('test', None))()
+        val_ds = data.get('val', data.get('test', None))
         train_step = self._define_train_step(**train_step_args)
         val_step = self._define_validation_step(**validation_step_args)
         train_state = self.state
