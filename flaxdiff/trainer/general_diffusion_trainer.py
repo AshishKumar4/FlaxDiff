@@ -475,10 +475,11 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                 metrics = {k: np.mean(v) for k, v in metrics.items()}
                 # Update the best validation metrics
                 for key, value in metrics.items():
-                    if key not in self.best_val_metrics:
-                        self.best_val_metrics[key] = value
+                    final_key = f"val/{key}"
+                    if final_key not in self.best_val_metrics:
+                        self.best_val_metrics[final_key] = value
                     else:
-                        self.best_val_metrics[key] = min(self.best_val_metrics[key], value)
+                        self.best_val_metrics[final_key] = min(self.best_val_metrics[final_key], value)
                 # Log the best validation metrics
                 if getattr(self, 'wandb', None) is not None and self.wandb:
                     # Log the metrics
@@ -487,6 +488,13 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                             value = np.array(value)
                         self.wandb.log({
                             f"val/{key}": value,
+                        }, step=current_step)
+                    # Log the best validation metrics
+                    for key, value in self.best_val_metrics.items():
+                        if isinstance(value, jnp.ndarray):
+                            value = np.array(value)
+                        self.wandb.log({
+                            f"best_{key}": value,
                         }, step=current_step)
                 print(f"Validation metrics for process index {process_index}: {metrics}")
             
@@ -622,10 +630,10 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         if not runs:
             raise ValueError("No runs found in wandb.")
         print(f"Getting best runs from wandb {self.wandb.id}...")
-        runs = sorted(runs, key=lambda x: x.summary.get(metric, float('inf')))
+        runs = sorted(runs, key=lambda x: x.summary.get(f"best_{metric}", float('inf')))
         best_runs = runs[:top_k]
-        lower_bound = best_runs[-1].summary.get(metric, float('inf'))
-        upper_bound = best_runs[0].summary.get(metric, float('inf'))
+        lower_bound = best_runs[-1].summary.get(f"best_{metric}", float('inf'))
+        upper_bound = best_runs[0].summary.get(f"best_{metric}", float('inf'))
         print(f"Best runs from wandb {self.wandb.id}:")
         for run in best_runs:
             print(f"\t\tRun ID: {run.id}, Metric: {run.summary.get(metric, float('inf'))}")
@@ -655,10 +663,12 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         if metric == "train/best_loss":
             current_run_metric = self.best_loss
         elif metric in self.best_val_metrics:
+            print(f"Fetching best validation metric {metric} from local")
             current_run_metric = self.best_val_metrics[metric]
         else:
             current_run_metric = self.wandb.summary.get(metric, float('inf') if is_lower_better else float('-inf'))
-                
+        
+        print(f"Current run {self.wandb.id} metric: {current_run_metric}, Best bounds: {bounds}")
         # Check based on bounds
         if (is_lower_better and current_run_metric < bounds[1]) or (not is_lower_better and current_run_metric > bounds[0]):
             print(f"Current run {self.wandb.id} meets performance criteria. Current metric: {current_run_metric}, Best bounds: {bounds}")
