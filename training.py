@@ -10,6 +10,7 @@ from flaxdiff.models.simple_unet import Unet
 from flaxdiff.models.simple_vit import UViT, SimpleUDiT
 from flaxdiff.models.simple_dit import SimpleDiT
 from flaxdiff.models.simple_mmdit import SimpleMMDiT, HierarchicalMMDiT
+from flaxdiff.models.ssm_dit import HybridSSMAttentionDiT
 import jax.experimental.pallas.ops.tpu.flash_attention
 from flaxdiff.predictors import VPredictionTransform, EpsilonPredictionTransform, DiffusionPredictionTransform, DirectPredictionTransform, KarrasPredictionTransform
 from flaxdiff.schedulers import CosineNoiseScheduler, NoiseScheduler, GeneralizedNoiseScheduler, KarrasVENoiseScheduler, EDMNoiseScheduler
@@ -120,9 +121,11 @@ parser.add_argument('--architecture', type=str,
                         "hierarchical_mmdit",
                         # 'uvit-hilbert',
                         'simple_dit+hilbert',
-                        "simple_udit+hilbert", 
-                        "simple_mmdit+hilbert", 
+                        "simple_udit+hilbert",
+                        "simple_mmdit+hilbert",
                         "hierarchical_mmdit+hilbert",
+                        "hybrid_dit",
+                        "hybrid_dit+hilbert",
                     ], 
                     default="unet", help='Architecture to use')
 parser.add_argument('--emb_features', type=int, default=256, help='Embedding features')
@@ -145,6 +148,8 @@ parser.add_argument('--num_layers', type=int, default=12, help='Number of layers
 parser.add_argument('--num_heads', type=int, default=12, help='Number of heads in the transformer if using UViT')
 parser.add_argument('--mlp_ratio', type=int, default=4, help='MLP ratio in the transformer if using UViT')
 parser.add_argument('--use_hilbert', type=boolean_string, default=False, help='Use Hilbert patch reordering for the transformer if using UViT')
+parser.add_argument('--ssm_attention_ratio', type=str, default='3:1', help='SSM to attention ratio for hybrid_dit (e.g., "3:1", "1:1", "all-ssm", "all-attn")')
+parser.add_argument('--ssm_state_dim', type=int, default=64, help='State dimension for S5 SSM blocks')
 
 parser.add_argument('--dtype', type=str, default=None, help='dtype to use')
 parser.add_argument('--precision', type=str, default='default', help='precision to use', choices=['high', 'default', 'highest', 'None', None])
@@ -408,6 +413,20 @@ def main(args):
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
+            },
+        },
+        "hybrid_dit": {
+            "class": HybridSSMAttentionDiT,
+            "kwargs": {
+                "patch_size": args.patch_size,
+                "num_layers": args.num_layers,
+                "num_heads": args.num_heads,
+                "dropout_rate": 0.1,
+                "use_flash_attention": args.flash_attention,
+                "mlp_ratio": args.mlp_ratio,
+                "use_hilbert": use_hilbert,
+                "ssm_state_dim": args.ssm_state_dim,
+                "ssm_attention_ratio": args.ssm_attention_ratio,
             },
         },
         "diffusers_unet_simple": {
