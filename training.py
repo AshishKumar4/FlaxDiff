@@ -213,8 +213,10 @@ def main(args):
         (65535, 65535))
 
     print("Initializing JAX")
-    if os.environ.get('JAX_COORDINATOR_ADDRESS') or jax.default_backend() == 'tpu':
+    try:
         jax.distributed.initialize()
+    except Exception:
+        pass
 
     # jax.config.update('jax_threefry_partitionable', True)
     print(f"Number of devices: {jax.device_count()}")
