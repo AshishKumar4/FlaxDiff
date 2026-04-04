@@ -518,7 +518,10 @@ def main(args):
         experiment_name = f"{experiment_name}/" + "arguments_hash-{arguments_hash}/date-{date}"
         if autoencoder is not None:
             experiment_name = f"LDM-{experiment_name}"
-                
+
+        if 'hybrid_dit' in args.architecture:
+            experiment_name = f"SSM-{experiment_name}"
+
         if args.use_hilbert:
             experiment_name = f"Hilbert-{experiment_name}"
                 
