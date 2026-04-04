@@ -11,7 +11,10 @@ import einops
 import functools
 import math
 from .common import kernel_init
-import jax.experimental.pallas.ops.tpu.flash_attention
+try:
+    import jax.experimental.pallas.ops.tpu.flash_attention
+except (ImportError, ModuleNotFoundError):
+    pass
 
 class EfficientAttention(nn.Module):
     """
