@@ -11,7 +11,10 @@ from flaxdiff.models.simple_vit import UViT, SimpleUDiT
 from flaxdiff.models.simple_dit import SimpleDiT
 from flaxdiff.models.simple_mmdit import SimpleMMDiT, HierarchicalMMDiT
 from flaxdiff.models.ssm_dit import HybridSSMAttentionDiT
-import jax.experimental.pallas.ops.tpu.flash_attention
+try:
+    import jax.experimental.pallas.ops.tpu.flash_attention
+except (ImportError, ModuleNotFoundError):
+    pass
 from flaxdiff.predictors import VPredictionTransform, EpsilonPredictionTransform, DiffusionPredictionTransform, DirectPredictionTransform, KarrasPredictionTransform
 from flaxdiff.schedulers import CosineNoiseScheduler, NoiseScheduler, GeneralizedNoiseScheduler, KarrasVENoiseScheduler, EDMNoiseScheduler
 from diffusers import FlaxUNet2DConditionModel
@@ -210,7 +213,8 @@ def main(args):
         (65535, 65535))
 
     print("Initializing JAX")
-    jax.distributed.initialize()
+    if os.environ.get('JAX_COORDINATOR_ADDRESS') or jax.default_backend() == 'tpu':
+        jax.distributed.initialize()
 
     # jax.config.update('jax_threefry_partitionable', True)
     print(f"Number of devices: {jax.device_count()}")
