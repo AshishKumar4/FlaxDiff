@@ -13,7 +13,10 @@ from .attention import NormalAttention
 from flax.typing import Dtype, PrecisionLike
 
 # Use our improved Hilbert implementation
-from .hilbert import hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify
+from .hilbert import (
+    hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify,
+    build_2d_sincos_pos_embed,
+)
 
 # --- DiT Block ---
 class DiTBlock(nn.Module):
@@ -215,6 +218,18 @@ class SimpleDiT(nn.Module):
             hilbert_inv_idx = None
 
         num_patches = patches.shape[1]
+
+        # In Hilbert mode, sequence index != 2D position, so RoPE (which encodes
+        # sequence position) would give the attention blocks scrambled relative
+        # distances. To supply a correct spatial signal we add a fixed 2D sin-cos
+        # position embedding to the patches, reordered to match the Hilbert sequence.
+        if self.use_hilbert:
+            pos_embed_rm = build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
+            pos_embed_rm = jnp.asarray(pos_embed_rm, dtype=patches.dtype)
+            h_idx = hilbert_indices(H_P, W_P)
+            pos_embed = pos_embed_rm[h_idx]
+            patches = patches + pos_embed[None, :, :]
+
         x_seq = patches
 
         # 2. Prepare Conditioning Signal (Time + Text Context)
@@ -234,6 +249,15 @@ class SimpleDiT(nn.Module):
         # Get RoPE frequencies for the sequence length (number of patches)
         # Shape [num_patches, D_head/2]
         freqs_cos, freqs_sin = self.rope(seq_len=num_patches)
+        # In Hilbert mode, the sequence is a Hilbert curve traversal — sequence
+        # index k is a Hilbert index, not a 2D position, so RoPE encodes wrong
+        # relative distances between 2D neighbors. The additive 2D sin-cos above
+        # already supplies the correct spatial signal, so we override RoPE with
+        # identity (cos=1, sin=0) here. This makes apply_rotary_embedding a no-op
+        # inside the attention layer without changing its interface.
+        if self.use_hilbert:
+            freqs_cos = jnp.ones_like(freqs_cos)
+            freqs_sin = jnp.zeros_like(freqs_sin)
 
         # 4. Apply Transformer Blocks with adaLN-Zero conditioning
         for block in self.blocks:
