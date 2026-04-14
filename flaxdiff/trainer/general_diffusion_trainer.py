@@ -207,6 +207,13 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         # Determine if we're working with video or images
         self.is_video = self._is_video_data()
         self.best_val_metrics = {}
+
+        # Map of `val/<metric_name>` -> True if higher is better, False otherwise.
+        # Defaults to lower-is-better for any metric that doesn't declare otherwise.
+        self.metric_higher_is_better = {}
+        if eval_metrics is not None:
+            for m in eval_metrics:
+                self.metric_higher_is_better[f"val/{m.name}"] = getattr(m, 'higher_is_better', False)
     
     def _is_video_data(self):
         sample_data_shape = self.input_config.sample_data_shape
@@ -473,13 +480,16 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             # Flatten the metrics
             if metrics:
                 metrics = {k: np.mean(v) for k, v in metrics.items()}
-                # Update the best validation metrics
+                # Update the best validation metrics. Direction (min/max) per metric
+                # is taken from `metric_higher_is_better`, defaulting to lower-is-better.
                 for key, value in metrics.items():
                     final_key = f"val/{key}"
+                    higher_is_better = self.metric_higher_is_better.get(final_key, False)
                     if final_key not in self.best_val_metrics:
                         self.best_val_metrics[final_key] = value
                     else:
-                        self.best_val_metrics[final_key] = min(self.best_val_metrics[final_key], value)
+                        prev = self.best_val_metrics[final_key]
+                        self.best_val_metrics[final_key] = max(prev, value) if higher_is_better else min(prev, value)
                 # Log the best validation metrics
                 if getattr(self, 'wandb', None) is not None and self.wandb:
                     # Log the metrics
@@ -630,13 +640,24 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
         if not runs:
             raise ValueError("No runs found in wandb.")
         print(f"Getting best runs from wandb {self.wandb.id}...")
-        runs = sorted(runs, key=lambda x: x.summary.get(f"best_{metric}", float('inf')))
+
+        # Direction-aware sort: for higher-is-better metrics, sort descending so that
+        # the top_k slice contains the LARGEST values; otherwise ascending (lowest first).
+        higher_is_better = self.metric_higher_is_better.get(metric, False)
+        if higher_is_better:
+            sort_key = lambda x: x.summary.get(f"best_{metric}", float('-inf'))
+            runs = sorted(runs, key=sort_key, reverse=True)
+        else:
+            sort_key = lambda x: x.summary.get(f"best_{metric}", float('inf'))
+            runs = sorted(runs, key=sort_key)
+
         best_runs = runs[:top_k]
-        lower_bound = best_runs[-1].summary.get(f"best_{metric}", float('inf'))
-        upper_bound = best_runs[0].summary.get(f"best_{metric}", float('inf'))
+        default = float('-inf') if higher_is_better else float('inf')
+        lower_bound = best_runs[-1].summary.get(f"best_{metric}", default)
+        upper_bound = best_runs[0].summary.get(f"best_{metric}", default)
         print(f"Best runs from wandb {self.wandb.id}:")
         for run in best_runs:
-            print(f"\t\tRun ID: {run.id}, Metric: {run.summary.get(metric, float('inf'))}")
+            print(f"\t\tRun ID: {run.id}, Metric: {run.summary.get(metric, default)}")
         return best_runs, (min(lower_bound, upper_bound), max(lower_bound, upper_bound))
     
     def __compare_run_against_best__(self, top_k=2, metric="train/best_loss", from_sweeps=False):
@@ -655,10 +676,14 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             best_runs, bounds = self.__get_best_sweep_runs__(metric=metric, top_k=top_k)
         else:
             best_runs, bounds = self.__get_best_general_runs__(metric=metric, top_k=top_k)
-        
-        # Determine if lower or higher values are better (for loss, lower is better)
-        is_lower_better = True
-        
+
+        # Determine direction: for any registered eval metric, use its declared direction.
+        # For training losses (train/best_loss etc.), lower is always better.
+        if metric in self.metric_higher_is_better:
+            is_lower_better = not self.metric_higher_is_better[metric]
+        else:
+            is_lower_better = True  # safe default for losses
+
         # Check if current run is one of the best
         if metric == "train/best_loss":
             current_run_metric = self.best_loss
@@ -667,14 +692,14 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             current_run_metric = self.best_val_metrics[metric]
         else:
             current_run_metric = self.wandb.summary.get(metric, float('inf') if is_lower_better else float('-inf'))
-        
+
         print(f"Current run {self.wandb.id} metric: {current_run_metric}, Best bounds: {bounds}")
         # Check based on bounds
         if (is_lower_better and current_run_metric < bounds[1]) or (not is_lower_better and current_run_metric > bounds[0]):
             print(f"Current run {self.wandb.id} meets performance criteria. Current metric: {current_run_metric}, Best bounds: {bounds}")
             is_best = (is_lower_better and current_run_metric < bounds[0]) or (not is_lower_better and current_run_metric > bounds[1])
             return True, is_best
-            
+
         return False, False
             
     def save(self, epoch=0, step=0, state=None, rngstate=None):
