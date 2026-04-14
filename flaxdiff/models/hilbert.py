@@ -7,6 +7,44 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from typing import Tuple
 
+# --- 2D Positional Encoding (shared by simple_dit and ssm_dit) ---
+
+def build_2d_sincos_pos_embed(emb_dim: int, H_P: int, W_P: int) -> np.ndarray:
+    """Fixed 2D sin-cos positional embedding in row-major order.
+
+    Returns [H_P * W_P, emb_dim]. Each row is the sin-cos encoding of that
+    patch's (row, col) 2D grid position. Half the channels encode the row,
+    half encode the column. Standard MAE-style formulation.
+
+    When used with Hilbert serialization, index this by hilbert_indices(H_P, W_P)
+    to attach every patch in the Hilbert-ordered sequence to its TRUE 2D position.
+    """
+    assert emb_dim % 4 == 0, f"emb_dim must be divisible by 4 for 2D sincos, got {emb_dim}"
+    half = emb_dim // 2
+    quarter = half // 2
+
+    omega = np.arange(quarter, dtype=np.float32) / quarter
+    omega = 1.0 / (10000.0 ** omega)  # [quarter]
+
+    rows = np.arange(H_P, dtype=np.float32)
+    cols = np.arange(W_P, dtype=np.float32)
+
+    row_emb = np.einsum('h,d->hd', rows, omega)
+    col_emb = np.einsum('w,d->wd', cols, omega)
+
+    row_sin = np.sin(row_emb)
+    row_cos = np.cos(row_emb)
+    col_sin = np.sin(col_emb)
+    col_cos = np.cos(col_emb)
+
+    pos = np.zeros((H_P, W_P, emb_dim), dtype=np.float32)
+    pos[..., 0:quarter] = row_sin[:, None, :]
+    pos[..., quarter:half] = row_cos[:, None, :]
+    pos[..., half:half + quarter] = col_sin[None, :, :]
+    pos[..., half + quarter:] = col_cos[None, :, :]
+    return pos.reshape(H_P * W_P, emb_dim)
+
+
 # --- Core Hilbert Curve Logic ---
 
 def _d2xy(n: int, d: int) -> Tuple[int, int]:

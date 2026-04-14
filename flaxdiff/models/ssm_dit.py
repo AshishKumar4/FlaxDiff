@@ -22,46 +22,11 @@ from .common import kernel_init, FourierEmbedding, TimeProjection
 from .attention import NormalAttention
 from flax.typing import Dtype, PrecisionLike
 
-from .hilbert import hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify
+from .hilbert import (
+    hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify,
+    build_2d_sincos_pos_embed,
+)
 from .simple_dit import DiTBlock
-
-import numpy as _np
-
-
-def _build_2d_sincos_pos_embed(emb_dim: int, H_P: int, W_P: int) -> _np.ndarray:
-    """2D sin-cos positional embedding indexed in row-major order.
-
-    Returns array of shape [H_P * W_P, emb_dim] where row k = (k // W_P, k % W_P).
-    Half the channels encode the row, half encode the column.
-    """
-    assert emb_dim % 4 == 0, f"emb_dim must be divisible by 4 for 2D sincos, got {emb_dim}"
-    half = emb_dim // 2
-    quarter = half // 2
-
-    # Frequency bands per axis
-    omega = _np.arange(quarter, dtype=_np.float32) / quarter
-    omega = 1.0 / (10000.0 ** omega)  # [quarter]
-
-    rows = _np.arange(H_P, dtype=_np.float32)  # [H_P]
-    cols = _np.arange(W_P, dtype=_np.float32)  # [W_P]
-
-    row_emb = _np.einsum('h,d->hd', rows, omega)  # [H_P, quarter]
-    col_emb = _np.einsum('w,d->wd', cols, omega)  # [W_P, quarter]
-
-    # sin/cos for each axis
-    row_sin = _np.sin(row_emb)
-    row_cos = _np.cos(row_emb)
-    col_sin = _np.sin(col_emb)
-    col_cos = _np.cos(col_emb)
-
-    # Build per-position embedding [H_P, W_P, emb_dim]
-    pos = _np.zeros((H_P, W_P, emb_dim), dtype=_np.float32)
-    pos[..., 0:quarter] = row_sin[:, None, :]
-    pos[..., quarter:half] = row_cos[:, None, :]
-    pos[..., half:half + quarter] = col_sin[None, :, :]
-    pos[..., half + quarter:] = col_cos[None, :, :]
-
-    return pos.reshape(H_P * W_P, emb_dim)
 
 
 # =============================================================================
@@ -153,15 +118,19 @@ class S5Layer(nn.Module):
             (self.state_dim, F)
         )
 
-        # C: State-to-output projection [F, state_dim]
+        # C: State-to-output projection [F, state_dim].
+        # Zero-initialized so the SSM block starts as pure identity (y = D * u, D=1).
+        # AdaLN gates start at zero anyway, but a zero-init C also removes the
+        # noisy random-walk contribution from the state path at step 0 and lets the
+        # residual stream dominate cleanly during warmup.
         C_re = self.param(
             'C_re',
-            nn.initializers.lecun_normal(),
+            nn.initializers.zeros,
             (F, self.state_dim)
         )
         C_im = self.param(
             'C_im',
-            nn.initializers.lecun_normal(),
+            nn.initializers.zeros,
             (F, self.state_dim)
         )
 
@@ -572,7 +541,7 @@ class HybridSSMAttentionDiT(nn.Module):
         # add a 2D sin-cos position embedding to every patch. For Hilbert mode, we
         # reorder the row-major position embedding into Hilbert order so each patch
         # in the sequence is paired with its TRUE 2D position.
-        pos_embed_2d_rm = _build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
+        pos_embed_2d_rm = build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
         pos_embed_2d_rm = jnp.asarray(pos_embed_2d_rm, dtype=patches.dtype)
         if self.use_hilbert:
             # hilbert_indices(H_P, W_P)[h] = row-major index of h-th Hilbert patch
@@ -592,8 +561,17 @@ class HybridSSMAttentionDiT(nn.Module):
             text_emb_pooled = jnp.mean(text_emb, axis=1)
             cond_emb = cond_emb + text_emb_pooled
 
-        # 3. RoPE frequencies
+        # 3. RoPE frequencies for the attention blocks.
+        # When Hilbert is on, sequence index != 2D position. Applying RoPE over
+        # Hilbert-scrambled indices would encode wrong relative distances to the
+        # attention map. The additive 2D sin-cos embedding above already supplies
+        # the correct 2D position signal, so we override RoPE with identity
+        # (cos=1, sin=0) in Hilbert mode — this makes apply_rotary_embedding a
+        # no-op without changing any interface.
         freqs_cos, freqs_sin = self.rope(seq_len=num_patches)
+        if self.use_hilbert:
+            freqs_cos = jnp.ones_like(freqs_cos)
+            freqs_sin = jnp.zeros_like(freqs_sin)
 
         # 4. Hybrid blocks (SSM and attention interleaved)
         for block in self.blocks:
