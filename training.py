@@ -478,12 +478,16 @@ def main(args):
     )
     
     eval_metrics = []
-    # Validation metrics 
+    # Validation metrics
     if args.val_metrics is not None:
         if 'clip' in args.val_metrics:
             from flaxdiff.metrics.images import get_clip_metric
-            print("Using CLIP metric for validation")
+            print("Using legacy CLIP distance metric (val/clip_similarity) for validation")
             eval_metrics.append(get_clip_metric())
+        if 'clip_score' in args.val_metrics:
+            from flaxdiff.metrics.images import get_clip_score_metric
+            print("Using CLIPScore (val/clip_score, higher is better) for validation")
+            eval_metrics.append(get_clip_score_metric())
     
     CONFIG = {
         "model": model_config,
