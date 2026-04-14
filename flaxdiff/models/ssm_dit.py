@@ -18,25 +18,59 @@ from flax.typing import Dtype, PrecisionLike
 from .hilbert import hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify
 from .simple_dit import DiTBlock
 
+import numpy as _np
+
+
+def _build_2d_sincos_pos_embed(emb_dim: int, H_P: int, W_P: int) -> _np.ndarray:
+    """2D sin-cos positional embedding indexed in row-major order.
+
+    Returns array of shape [H_P * W_P, emb_dim] where row k = (k // W_P, k % W_P).
+    Half the channels encode the row, half encode the column.
+    """
+    assert emb_dim % 4 == 0, f"emb_dim must be divisible by 4 for 2D sincos, got {emb_dim}"
+    half = emb_dim // 2
+    quarter = half // 2
+
+    # Frequency bands per axis
+    omega = _np.arange(quarter, dtype=_np.float32) / quarter
+    omega = 1.0 / (10000.0 ** omega)  # [quarter]
+
+    rows = _np.arange(H_P, dtype=_np.float32)  # [H_P]
+    cols = _np.arange(W_P, dtype=_np.float32)  # [W_P]
+
+    row_emb = _np.einsum('h,d->hd', rows, omega)  # [H_P, quarter]
+    col_emb = _np.einsum('w,d->wd', cols, omega)  # [W_P, quarter]
+
+    # sin/cos for each axis
+    row_sin = _np.sin(row_emb)
+    row_cos = _np.cos(row_emb)
+    col_sin = _np.sin(col_emb)
+    col_cos = _np.cos(col_emb)
+
+    # Build per-position embedding [H_P, W_P, emb_dim]
+    pos = _np.zeros((H_P, W_P, emb_dim), dtype=_np.float32)
+    pos[..., 0:quarter] = row_sin[:, None, :]
+    pos[..., quarter:half] = row_cos[:, None, :]
+    pos[..., half:half + quarter] = col_sin[None, :, :]
+    pos[..., half + quarter:] = col_cos[None, :, :]
+
+    return pos.reshape(H_P * W_P, emb_dim)
+
 
 # --- S5 SSM Layer ---
 
-def hippo_initializer(state_dim):
-    """Initialize A matrix using HiPPO-LegS (Legendre State Space) framework.
+def hippo_log_a_real_init(key, shape, dtype=jnp.float32):
+    """HiPPO-diag init: A_real_n = -(n + 0.5), stored as log of the negative."""
+    state_dim = shape[0]
+    n = jnp.arange(state_dim, dtype=dtype)
+    return jnp.log(n + 0.5).astype(dtype)
 
-    For diagonal S5, we use the diagonal approximation of HiPPO.
-    Returns complex diagonal elements that capture long-range dependencies.
-    """
-    def init(key, shape, dtype=jnp.float32):
-        # Diagonal HiPPO initialization: lambda_n = -(2n+1)/2 + i*pi*n
-        n = jnp.arange(state_dim)
-        real = -(n + 0.5)
-        imag = jnp.pi * n
-        # Normalize to unit circle for stability
-        lambda_init = real + 1j * imag
-        # Discretize with dt=1 for initialization, actual dt is learned
-        return lambda_init.astype(jnp.complex64)
-    return init
+
+def hippo_a_imag_init(key, shape, dtype=jnp.float32):
+    """HiPPO-diag init: A_imag_n = pi * n."""
+    state_dim = shape[0]
+    n = jnp.arange(state_dim, dtype=dtype)
+    return (jnp.pi * n).astype(dtype)
 
 
 class S5Layer(nn.Module):
@@ -56,17 +90,16 @@ class S5Layer(nn.Module):
         # u: [B, S, F]
         B, S, F = u.shape
 
-        # --- Learnable SSM Parameters ---
-        # A: Diagonal state matrix (complex) - initialized with HiPPO
-        # We parameterize as log of negative real part for stability
+        # A: diagonal complex state matrix, HiPPO init, parameterized as
+        # log of the negative real part for stability
         log_A_real = self.param(
             'log_A_real',
-            nn.initializers.normal(stddev=0.5),
+            hippo_log_a_real_init,
             (self.state_dim,)
         )
         A_imag = self.param(
             'A_imag',
-            nn.initializers.normal(stddev=0.5),
+            hippo_a_imag_init,
             (self.state_dim,)
         )
 
@@ -97,7 +130,8 @@ class S5Layer(nn.Module):
         # D: Skip connection (direct input-to-output)
         D = self.param('D', nn.initializers.ones, (F,))
 
-        # dt: Discretization timestep (learned, per-feature)
+        # dt: discretization timestep, learned per state dim so each state
+        # channel can model its own time scale
         log_dt = self.param(
             'log_dt',
             lambda key, shape: jax.random.uniform(
@@ -105,22 +139,18 @@ class S5Layer(nn.Module):
                 minval=jnp.log(self.dt_min),
                 maxval=jnp.log(self.dt_max)
             ),
-            (F,)
+            (self.state_dim,)
         )
-        dt = jnp.exp(log_dt)  # [F]
+        dt = jnp.exp(log_dt)  # [state_dim]
 
         # Construct complex A and discretize
         A_real = -jnp.exp(log_A_real)  # negative real part for stability
         A_diag = A_real + 1j * A_imag  # [state_dim]
 
         # ZOH discretization: A_bar = exp(A * dt), B_bar = (A_bar - I) * A^{-1} * B
-        # For diagonal A, this simplifies element-wise
-        # dt broadcasts: [F] -> we use mean dt for state transition
-        dt_mean = jnp.mean(dt)
-        A_bar = jnp.exp(A_diag * dt_mean)  # [state_dim], complex
+        A_bar = jnp.exp(A_diag * dt)  # [state_dim], complex
 
         B_complex = B_re + 1j * B_im
-        # Discretized B: element-wise
         B_bar = ((A_bar[:, None] - 1.0) / (A_diag[:, None] + 1e-8)) * B_complex  # [state_dim, F]
 
         C_complex = C_re + 1j * C_im
@@ -164,13 +194,8 @@ class S5Layer(nn.Module):
 # --- Bidirectional S5 ---
 
 class BidirectionalS5Layer(nn.Module):
-    """Bidirectional S5 layer - runs forward and backward scans.
-
-    For diffusion models, spatial patches have no inherent directionality,
-    so bidirectional processing captures dependencies in both directions
-    along the serialization curve (Hilbert, raster, etc.).
-
-    Output is the sum of forward and backward scans, projected to features.
+    """Runs forward and backward S5 scans, concats and projects back to features.
+    Patches have no inherent direction, so scan both ways.
     """
     features: int
     state_dim: int = 64
@@ -205,16 +230,14 @@ class BidirectionalS5Layer(nn.Module):
         )(u_rev)
         y_bwd = jnp.flip(y_bwd_rev, axis=1)
 
-        # Combine forward and backward
-        y = y_fwd + y_bwd
+        y_cat = jnp.concatenate([y_fwd, y_bwd], axis=-1)  # [B, S, 2F]
 
-        # Output projection to mix directions
         y = nn.Dense(
             features=self.features,
             dtype=self.dtype,
             precision=self.precision,
             name="out_proj"
-        )(y)
+        )(y_cat)
 
         return y
 
@@ -443,6 +466,20 @@ class HybridSSMAttentionDiT(nn.Module):
             hilbert_inv_idx = None
 
         num_patches = patches.shape[1]
+
+        # 2D sincos position embedding - the SSM blocks ignore RoPE so they need
+        # an explicit positional signal. For Hilbert mode, reorder the row-major
+        # embedding into Hilbert order so each patch gets its real 2D position.
+        pos_embed_2d_rm = _build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
+        pos_embed_2d_rm = jnp.asarray(pos_embed_2d_rm, dtype=patches.dtype)
+        if self.use_hilbert:
+            # hilbert_indices(H_P, W_P)[h] = row-major index of h-th Hilbert patch
+            h_idx = hilbert_indices(H_P, W_P)
+            pos_embed_2d = pos_embed_2d_rm[h_idx]
+        else:
+            pos_embed_2d = pos_embed_2d_rm
+        patches = patches + pos_embed_2d[None, :, :]
+
         x_seq = patches
 
         # 2. Conditioning
