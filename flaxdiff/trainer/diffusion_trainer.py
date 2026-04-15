@@ -56,6 +56,7 @@ class DiffusionTrainer(SimpleTrainer):
                  autoencoder: AutoEncoder = None,
                  encoder: ConditioningEncoder = None,
                  native_resolution: int = None,
+                 ema_decay: float = 0.999,
                  **kwargs
                  ):
         super().__init__(
@@ -69,6 +70,8 @@ class DiffusionTrainer(SimpleTrainer):
         self.noise_schedule = noise_schedule
         self.model_output_transform = model_output_transform
         self.unconditional_prob = unconditional_prob
+        # Shadow the class-level default so CLI / caller overrides take effect.
+        self.ema_decay = ema_decay
         
         if native_resolution is None:
             if 'image' in input_shapes:

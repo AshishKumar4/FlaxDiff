@@ -119,23 +119,24 @@ class S5Layer(nn.Module):
         )
 
         # C: State-to-output projection [F, state_dim].
-        # Zero-initialized so the SSM block starts as pure identity (y = D * u, D=1).
-        # AdaLN gates start at zero anyway, but a zero-init C also removes the
-        # noisy random-walk contribution from the state path at step 0 and lets the
-        # residual stream dominate cleanly during warmup.
+        # lecun_normal matches the canonical S5 / S4D initialization (Smith et al. 2022
+        # and Gu et al. 2022). An earlier experiment used zeros-init to bias the block
+        # toward a pure-identity start, but this actively hurt convergence in our
+        # ablation (pfkggns2 vs mq05643r), so we reverted to the canonical scheme.
         C_re = self.param(
             'C_re',
-            nn.initializers.zeros,
+            nn.initializers.lecun_normal(),
             (F, self.state_dim)
         )
         C_im = self.param(
             'C_im',
-            nn.initializers.zeros,
+            nn.initializers.lecun_normal(),
             (F, self.state_dim)
         )
 
-        # D: Skip connection (direct input-to-output)
-        D = self.param('D', nn.initializers.ones, (F,))
+        # D: Skip connection (direct input-to-output). Canonical S5 samples D per-channel
+        # from N(0, 1); an earlier ones-init shortcut was non-canonical and reverted.
+        D = self.param('D', nn.initializers.normal(stddev=1.0), (F,))
 
         # dt: Discretization timestep, learned PER STATE DIMENSION (standard S5).
         # Per-state-dim dt allows different state channels to model different time scales,

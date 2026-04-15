@@ -219,16 +219,21 @@ class SimpleDiT(nn.Module):
 
         num_patches = patches.shape[1]
 
-        # In Hilbert mode, sequence index != 2D position, so RoPE (which encodes
-        # sequence position) would give the attention blocks scrambled relative
-        # distances. To supply a correct spatial signal we add a fixed 2D sin-cos
-        # position embedding to the patches, reordered to match the Hilbert sequence.
+        # Always add a fixed MAE-style 2D sin-cos position embedding. This gives
+        # every patch an explicit spatial (row, col) signal that is invariant to
+        # the token ORDER in the sequence. In raster mode it co-exists with RoPE
+        # (RoPE-ViT ECCV 2024 shows additive + multiplicative are complementary).
+        # In Hilbert mode we reorder the row-major embedding to the Hilbert
+        # sequence order so each token gets the sincos for its TRUE 2D position
+        # even though the token is in a scrambled spot in the sequence.
+        pos_embed_rm = build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
+        pos_embed_rm = jnp.asarray(pos_embed_rm, dtype=patches.dtype)
         if self.use_hilbert:
-            pos_embed_rm = build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
-            pos_embed_rm = jnp.asarray(pos_embed_rm, dtype=patches.dtype)
             h_idx = hilbert_indices(H_P, W_P)
             pos_embed = pos_embed_rm[h_idx]
-            patches = patches + pos_embed[None, :, :]
+        else:
+            pos_embed = pos_embed_rm
+        patches = patches + pos_embed[None, :, :]
 
         x_seq = patches
 

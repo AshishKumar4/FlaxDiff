@@ -200,10 +200,21 @@ parser.add_argument('--wandb_entity', type=str, default='umd-projects', help='Wa
 parser.add_argument('--val_metrics', type=str, nargs='+', default=['clip'], help='Validation metrics to use')
 parser.add_argument('--best_tracker_metric', type=str, default='val/clip_similarity', help='Best tracker metric to use')
 
+# Training-hygiene knobs exposed per the literature audit against DiT / SiT / EDM2 canon.
+# Defaults match the previously-hardcoded values so existing runs are unaffected.
+parser.add_argument('--dropout_rate', type=float, default=0.1, help='Dropout rate for transformer blocks. DiT canon uses 0; EDM2 uses 0.1 for larger models.')
+parser.add_argument('--ema_decay', type=float, default=0.999, help='EMA decay for weight averaging. DiT canon uses 0.9999.')
+parser.add_argument('--augmentation_mode', type=str, default='flip_jitter', choices=['none', 'flip_only', 'flip_jitter'],
+                    help='Image augmentation strategy applied before VAE. flip_only = DiT canon (horizontal flip only). flip_jitter = legacy default (flip + ColorJitter).')
+
 # parser.add_argument('--wandb_project', type=str, default='flaxdiff', help='Wandb project name')
 # parser.add_argument('--wandb_entity', type=str, default='ashishkumar4', help='Wandb entity name')
 
 def main(args):
+    # Signal to flaxdiff.data.sources.images which augmentation recipe to use.
+    # The image augmenter reads this env var at MapTransform construction time.
+    os.environ['FLAXDIFF_AUGMENT_MODE'] = args.augmentation_mode
+
     resource.setrlimit(
         resource.RLIMIT_CORE,
         (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
@@ -365,7 +376,7 @@ def main(args):
                 "patch_size":  args.patch_size,
                 "num_layers":  args.num_layers,
                 "num_heads":  args.num_heads,
-                "dropout_rate": 0.1,
+                "dropout_rate": args.dropout_rate,
                 "add_residualblock_output": args.add_residualblock_output,
                 "use_flash_attention": args.flash_attention,
                 "use_self_and_cross": args.use_self_and_cross,
@@ -378,7 +389,7 @@ def main(args):
                 "patch_size":  args.patch_size,
                 "num_layers":  args.num_layers,
                 "num_heads":  args.num_heads,
-                "dropout_rate": 0.1,
+                "dropout_rate": args.dropout_rate,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
@@ -390,7 +401,7 @@ def main(args):
                 "patch_size":  args.patch_size,
                 "num_layers":  args.num_layers,
                 "num_heads":  args.num_heads,
-                "dropout_rate": 0.1,
+                "dropout_rate": args.dropout_rate,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
@@ -402,7 +413,7 @@ def main(args):
                 "patch_size":  args.patch_size,
                 "num_layers":  args.num_layers,
                 "num_heads":  args.num_heads,
-                "dropout_rate": 0.1,
+                "dropout_rate": args.dropout_rate,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
@@ -415,7 +426,7 @@ def main(args):
                 "emb_features": (args.emb_features - 256, args.emb_features, args.emb_features + 256),  # Default dims per stage
                 "num_layers": (args.num_layers // 3, args.num_layers // 2, args.num_layers),  # Default layers per stage
                 "num_heads": (args.num_heads - 2, args.num_heads, args.num_heads + 2),  # Default heads per stage
-                "dropout_rate": 0.1,
+                "dropout_rate": args.dropout_rate,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
@@ -427,7 +438,7 @@ def main(args):
                 "patch_size": args.patch_size,
                 "num_layers": args.num_layers,
                 "num_heads": args.num_heads,
-                "dropout_rate": 0.1,
+                "dropout_rate": args.dropout_rate,
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
@@ -594,7 +605,7 @@ def main(args):
         sigma_data=edm_schedule.sigma_data),
         load_from_checkpoint=args.load_from_checkpoint,
         wandb_config=wandb_config,
-        distributed_training=args.distributed_training,  
+        distributed_training=args.distributed_training,
         checkpoint_base_path=CHECKPOINT_DIR,
         autoencoder=autoencoder,
         use_dynamic_scale=args.use_dynamic_scale,
@@ -602,6 +613,7 @@ def main(args):
         max_checkpoints_to_keep=args.max_checkpoints_to_keep,
         eval_metrics=eval_metrics,
         best_tracker_metric=args.best_tracker_metric,
+        ema_decay=args.ema_decay,
     )
     
     if trainer.distributed_training:
