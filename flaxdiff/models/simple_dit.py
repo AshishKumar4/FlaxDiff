@@ -219,16 +219,17 @@ class SimpleDiT(nn.Module):
 
         num_patches = patches.shape[1]
 
-        # In Hilbert mode, sequence index != 2D position, so RoPE (which encodes
-        # sequence position) would give the attention blocks scrambled relative
-        # distances. To supply a correct spatial signal we add a fixed 2D sin-cos
-        # position embedding to the patches, reordered to match the Hilbert sequence.
+        # Add a fixed 2D sincos position embedding (order-invariant spatial signal).
+        # For Hilbert mode, reorder the row-major embedding to the Hilbert sequence
+        # so each token gets the sincos for its real 2D position.
+        pos_embed_rm = build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
+        pos_embed_rm = jnp.asarray(pos_embed_rm, dtype=patches.dtype)
         if self.use_hilbert:
-            pos_embed_rm = build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
-            pos_embed_rm = jnp.asarray(pos_embed_rm, dtype=patches.dtype)
             h_idx = hilbert_indices(H_P, W_P)
             pos_embed = pos_embed_rm[h_idx]
-            patches = patches + pos_embed[None, :, :]
+        else:
+            pos_embed = pos_embed_rm
+        patches = patches + pos_embed[None, :, :]
 
         x_seq = patches
 

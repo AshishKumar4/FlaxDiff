@@ -159,11 +159,19 @@ class ImageTFDSAugmenter(DataAugmenter):
             interpolation = cv2.INTER_AREA
         
         from torchvision.transforms import v2
-        augments = v2.Compose([
-            v2.RandomHorizontalFlip(p=0.5),
-            v2.ColorJitter(brightness=0.2, contrast=0.05, saturation=0.2)
-        ])
-        
+        # FLAXDIFF_AUGMENT_MODE: flip_only (DiT style), flip_jitter (old default),
+        # or none (deterministic eval/debugging)
+        aug_mode = os.environ.get('FLAXDIFF_AUGMENT_MODE', 'flip_jitter')
+        if aug_mode == 'none':
+            augments = v2.Compose([])
+        elif aug_mode == 'flip_only':
+            augments = v2.Compose([v2.RandomHorizontalFlip(p=0.5)])
+        else:  # 'flip_jitter'
+            augments = v2.Compose([
+                v2.RandomHorizontalFlip(p=0.5),
+                v2.ColorJitter(brightness=0.2, contrast=0.05, saturation=0.2)
+            ])
+
         class TFDSTransform(pygrain.MapTransform):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
@@ -290,11 +298,18 @@ class ImageGCSAugmenter(DataAugmenter):
         print(f"Using method: {method}")
         
         from torchvision.transforms import v2
-        augments = v2.Compose([
-            v2.RandomHorizontalFlip(p=0.5),
-            v2.ColorJitter(brightness=0.2, contrast=0.05, saturation=0.2)
-        ])
-        
+        # same FLAXDIFF_AUGMENT_MODE handling as the TFDS augmenter above
+        aug_mode = os.environ.get('FLAXDIFF_AUGMENT_MODE', 'flip_jitter')
+        if aug_mode == 'none':
+            augments = v2.Compose([])
+        elif aug_mode == 'flip_only':
+            augments = v2.Compose([v2.RandomHorizontalFlip(p=0.5)])
+        else:  # 'flip_jitter'
+            augments = v2.Compose([
+                v2.RandomHorizontalFlip(p=0.5),
+                v2.ColorJitter(brightness=0.2, contrast=0.05, saturation=0.2)
+            ])
+
         class GCSTransform(pygrain.MapTransform):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
