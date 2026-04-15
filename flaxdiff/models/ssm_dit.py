@@ -80,24 +80,20 @@ class S5Layer(nn.Module):
             (self.state_dim, F)
         )
 
-        # C: State-to-output projection [F, state_dim].
-        # Zero-initialized so the SSM block starts as pure identity (y = D * u, D=1).
-        # AdaLN gates start at zero anyway, but a zero-init C also removes the
-        # noisy random-walk contribution from the state path at step 0 and lets the
-        # residual stream dominate cleanly during warmup.
+        # C: state-to-output projection [F, state_dim], lecun_normal as in S5
         C_re = self.param(
             'C_re',
-            nn.initializers.zeros,
+            nn.initializers.lecun_normal(),
             (F, self.state_dim)
         )
         C_im = self.param(
             'C_im',
-            nn.initializers.zeros,
+            nn.initializers.lecun_normal(),
             (F, self.state_dim)
         )
 
-        # D: Skip connection (direct input-to-output)
-        D = self.param('D', nn.initializers.ones, (F,))
+        # D: skip connection, N(0,1) per channel as in S5
+        D = self.param('D', nn.initializers.normal(stddev=1.0), (F,))
 
         # dt: discretization timestep, learned per state dim so each state
         # channel can model its own time scale
