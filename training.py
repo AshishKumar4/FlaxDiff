@@ -131,6 +131,9 @@ parser.add_argument('--architecture', type=str,
                         "hybrid_dit",
                         "hybrid_dit+hilbert",
                         "hybrid_dit+zigzag",
+                        "hybrid_dit+2d",
+                        "hybrid_dit+2d+hilbert",
+                        "hybrid_dit+2d+zigzag",
                     ], 
                     default="unet", help='Architecture to use')
 parser.add_argument('--emb_features', type=int, default=256, help='Embedding features')
@@ -154,6 +157,7 @@ parser.add_argument('--num_heads', type=int, default=12, help='Number of heads i
 parser.add_argument('--mlp_ratio', type=int, default=4, help='MLP ratio in the transformer if using UViT')
 parser.add_argument('--use_hilbert', type=boolean_string, default=False, help='Use Hilbert patch reordering for the transformer')
 parser.add_argument('--use_zigzag', type=boolean_string, default=False, help='Use zigzag (ZigMa-style serpentine) patch reordering for the transformer. Mutually exclusive with --use_hilbert.')
+parser.add_argument('--use_2d_fusion', type=boolean_string, default=False, help='Direction alpha: Spatial-Mamba-style 2D state fusion inside hybrid_dit SSM blocks. Adds multi-dilation depthwise conv after the SSM scan.')
 parser.add_argument('--ssm_attention_ratio', type=str, default='3:1', help='SSM to attention ratio for hybrid_dit (e.g., "3:1", "1:1", "all-ssm", "all-attn")')
 parser.add_argument('--ssm_state_dim', type=int, default=64, help='State dimension for S5 SSM blocks')
 
@@ -344,7 +348,15 @@ def main(args):
     
     use_hilbert = args.use_hilbert
     use_zigzag = args.use_zigzag
+    use_2d_fusion = args.use_2d_fusion
     architecture_name = args.architecture
+    # Parse '+2d' suffix first so it can coexist with '+hilbert' or '+zigzag'.
+    # Example: 'hybrid_dit+2d+hilbert' → use_2d_fusion=True, use_hilbert=True.
+    # Example: 'hybrid_dit+2d' → use_2d_fusion=True, raster scan.
+    if '+2d' in architecture_name:
+        architecture_name = architecture_name.replace('+2d', '')
+        print("Will use 2D state fusion (Spatial-Mamba-style) in SSM blocks")
+        use_2d_fusion = True
     if 'hilbert' in architecture_name:
         architecture_name = architecture_name.split('+')[0]
         print("Will use Hilbert Patch Reordering")
@@ -453,6 +465,7 @@ def main(args):
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
                 "use_zigzag": use_zigzag,
+                "use_2d_fusion": use_2d_fusion,
                 "ssm_state_dim": args.ssm_state_dim,
                 "ssm_attention_ratio": args.ssm_attention_ratio,
             },

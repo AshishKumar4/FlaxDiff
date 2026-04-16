@@ -287,6 +287,70 @@ class BidirectionalS5Layer(nn.Module):
 
 
 # =============================================================================
+# SpatialFusionConv - 2D state fusion for Direction α
+# =============================================================================
+
+class SpatialFusionConv(nn.Module):
+    """Spatial-Mamba-style 2D state fusion via multi-dilation depthwise conv.
+
+    Given an SSM's 1D output [B, H_P, W_P, F] already reshaped to a 2D grid,
+    apply parallel depthwise 2D convolutions with different dilation rates and
+    sum them as a residual against the input. The output is [B, H_P, W_P, F].
+
+    Motivation: An SSM with exponential state decay has an anisotropic 1D
+    receptive field. Under naive 1D linearization (raster/hilbert/zigzag) the
+    effective 2D neighborhood of a token depends on scan order; Hilbert in
+    particular has high variance in 2D-distance-between-sequentially-adjacent
+    tokens, which by Jensen's inequality hurts gradient flow through the
+    exponential decay. A multi-dilation depthwise 2D conv provides an
+    isotropic, direction-balanced short-range receptive field that complements
+    the SSM's long-range-but-anisotropic information. The sum acts as a
+    residual: the SSM does long-range global mixing, the conv recovers local
+    2D structure that the scan order destroyed.
+
+    Depthwise conv kernels are zero-initialized so at step 0 the fusion is a
+    pure pass-through (y_out = y_in), ensuring stable warmup. AdaLN gates in
+    the outer SSMDiTBlock are also zero-initialized, so the block starts as
+    near-identity and the fusion learns its contribution gradually.
+
+    Reference: Xiao, Zhang, Dou, Chen, "Spatial-Mamba: Effective Visual State
+    Space Models via Structure-Aware State Fusion," ICLR 2025
+    (arxiv:2410.15091).
+    """
+    features: int
+    dilations: Tuple[int, ...] = (1, 2, 3)
+    kernel_size: int = 3
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
+
+    @nn.compact
+    def __call__(self, y_2d):
+        """
+        Args:
+            y_2d: [B, H_P, W_P, F] — SSM output reshaped to 2D row-major grid.
+        Returns:
+            fused: [B, H_P, W_P, F] — y_2d + sum of K dilated depthwise convs.
+        """
+        out = y_2d
+        for dil in self.dilations:
+            dw = nn.Conv(
+                features=self.features,
+                kernel_size=(self.kernel_size, self.kernel_size),
+                strides=(1, 1),
+                padding='SAME',
+                kernel_dilation=(dil, dil),
+                feature_group_count=self.features,  # depthwise
+                use_bias=False,
+                kernel_init=nn.initializers.zeros,
+                dtype=self.dtype,
+                precision=self.precision,
+                name=f"dwconv_dil{dil}",
+            )(y_2d)
+            out = out + dw
+        return out
+
+
+# =============================================================================
 # SSMDiTBlock - Drop-in replacement for DiTBlock
 # =============================================================================
 
@@ -317,6 +381,19 @@ class SSMDiTBlock(nn.Module):
     use_gating: bool = True
     bidirectional: bool = True
 
+    # --- Direction α additions ---
+    # Spatial-Mamba-style 2D state fusion after the SSM scan. When enabled the
+    # block reshapes the scan output to a 2D patch grid, applies multi-dilation
+    # depthwise convolutions, and sums as a residual. See SpatialFusionConv
+    # docstring for full motivation.
+    use_2d_fusion: bool = False
+    # Scan order the parent model uses to linearize 2D patches. One of
+    # 'raster' (row-major, the default), 'hilbert', or 'zigzag'. We need this
+    # inside the block so we can un-permute scan-ordered tokens to a 2D
+    # row-major grid before the conv, then re-permute back to scan order for
+    # the residual path. Defaulting to 'raster' keeps existing callers working.
+    scan_order: str = 'raster'
+
     def setup(self):
         hidden_features = int(self.features * self.mlp_ratio)
 
@@ -342,12 +419,87 @@ class SSMDiTBlock(nn.Module):
             name="ssm"
         )
 
+        # Direction α: optional 2D state fusion after the SSM scan.
+        if self.use_2d_fusion:
+            assert self.scan_order in ('raster', 'hilbert', 'zigzag'), \
+                f"Unknown scan_order {self.scan_order}"
+            self.spatial_fusion = SpatialFusionConv(
+                features=self.features,
+                dilations=(1, 2, 3),
+                kernel_size=3,
+                dtype=self.dtype,
+                precision=self.precision,
+                name="spatial_fusion",
+            )
+
         # MLP - IDENTICAL to DiTBlock
         self.mlp = nn.Sequential([
             nn.Dense(features=hidden_features, dtype=self.dtype, precision=self.precision),
             nn.gelu,
             nn.Dense(features=self.features, dtype=self.dtype, precision=self.precision)
         ])
+
+    def _apply_2d_fusion(self, ssm_output):
+        """Reshape scan-ordered SSM output to 2D row-major grid, apply multi-
+        dilation depthwise conv fusion, reshape back to scan order.
+
+        This is a no-op (equivalent to an all-zero residual) at step 0 because
+        the conv kernels are zero-initialized. Gradient flow into the conv
+        weights from the denoising loss drives them away from zero so the
+        fusion gradually learns to contribute short-range 2D structure that
+        the SSM's anisotropic 1D scan cannot provide.
+        """
+        B, S, F = ssm_output.shape
+        # Assume square patch grid. Every DiT-family model in this project
+        # uses square images with square patch sizes, so H_P == W_P. S is
+        # a Python int (static shape) at JIT trace time, so math.isqrt works.
+        import math
+        H_P = math.isqrt(S)
+        W_P = H_P
+        assert H_P * W_P == S, (
+            f"2D fusion requires a square patch grid; got S={S} which is not a "
+            f"perfect square.")
+
+        # Un-permute scan-ordered tokens to row-major 2D grid order.
+        # hilbert_indices / zigzag_indices return the forward permutation
+        # `scan_idx[h] = k` (row-major index of the h-th scan-order token).
+        # We have scan-ordered tokens `ssm_output[:, h, :]` and want them at
+        # row-major slot k. That's a SCATTER, or equivalently a GATHER with
+        # the inverse permutation `inv[k] = h`. We compute both once at the
+        # start of this method — cheap because index arrays are constant
+        # at JIT time.
+        if self.scan_order == 'hilbert':
+            scan_fwd = hilbert_indices(H_P, W_P)          # [S], scan→rowmajor
+            scan_inv = inverse_permutation(scan_fwd, S)   # [S], rowmajor→scan
+        elif self.scan_order == 'zigzag':
+            scan_fwd = zigzag_indices(H_P, W_P)
+            scan_inv = inverse_permutation(scan_fwd, S)
+        else:  # raster
+            scan_fwd = None
+            scan_inv = None
+
+        if scan_fwd is not None:
+            # Gather to row-major: rowmajor_tokens[k] = scan_tokens[scan_fwd[k]]?
+            # Wait — scan_fwd[h] = k means the h-th scan-position is at rowmajor k.
+            # Equivalently, rowmajor_tokens[k] = scan_tokens[scan_inv[k]].
+            # We want row-major, so gather using scan_inv:
+            ssm_rm = ssm_output[:, scan_inv, :]
+        else:
+            ssm_rm = ssm_output
+
+        # Reshape to 2D grid, fuse, reshape back to flat sequence.
+        y_2d = ssm_rm.reshape(B, H_P, W_P, F)
+        y_fused_2d = self.spatial_fusion(y_2d)
+        y_fused_rm = y_fused_2d.reshape(B, S, F)
+
+        # Re-permute to scan order for the residual path.
+        if scan_fwd is not None:
+            # row-major → scan: scan_tokens[h] = rowmajor_tokens[scan_fwd[h]]
+            y_fused = y_fused_rm[:, scan_fwd, :]
+        else:
+            y_fused = y_fused_rm
+
+        return y_fused
 
     @nn.compact
     def __call__(self, x, conditioning, freqs_cis):
@@ -362,6 +514,10 @@ class SSMDiTBlock(nn.Module):
         norm_x = self.norm1(x)
         x_modulated = norm_x * (1 + scale_attn) + shift_attn
         ssm_output = self.ssm(x_modulated)
+
+        # Direction α: 2D state fusion.
+        if self.use_2d_fusion:
+            ssm_output = self._apply_2d_fusion(ssm_output)
 
         if self.use_gating:
             x = residual + gate_attn * ssm_output
@@ -422,6 +578,13 @@ class HybridSSMAttentionDiT(nn.Module):
     ssm_attention_ratio: str = "3:1"  # e.g., "3:1", "1:1", "all-ssm", "all-attn"
     bidirectional_ssm: bool = True
 
+    # --- Direction α: 2D state fusion ---
+    # When True, each SSM block reshapes its scan output to a 2D patch grid
+    # and applies multi-dilation depthwise conv fusion before the residual.
+    # See SpatialFusionConv docstring for motivation. Zero architectural
+    # overhead when False (default).
+    use_2d_fusion: bool = False
+
     def _build_block_pattern(self):
         """Generate block pattern from ratio string."""
         if self.block_pattern is not None:
@@ -478,6 +641,15 @@ class HybridSSMAttentionDiT(nn.Module):
         blocks = []
         for i, block_type in enumerate(pattern):
             if block_type == 'ssm':
+                # Determine scan_order string for the block to use when
+                # un-permuting before 2D fusion. Mirrors the use_hilbert/
+                # use_zigzag flags on the outer model.
+                if self.use_hilbert:
+                    scan_order = 'hilbert'
+                elif self.use_zigzag:
+                    scan_order = 'zigzag'
+                else:
+                    scan_order = 'raster'
                 blocks.append(SSMDiTBlock(
                     features=self.emb_features,
                     num_heads=self.num_heads,
@@ -489,6 +661,8 @@ class HybridSSMAttentionDiT(nn.Module):
                     precision=self.precision,
                     norm_epsilon=self.norm_epsilon,
                     bidirectional=self.bidirectional_ssm,
+                    use_2d_fusion=self.use_2d_fusion,
+                    scan_order=scan_order,
                     name=f"ssm_block_{i}"
                 ))
             else:  # 'attn'

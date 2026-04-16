@@ -10,12 +10,59 @@ from .sources.videos import VideoTFDSSource, VideoLocalSource, AudioVideoAugment
 from .sources.images import data_source_tfds, tfds_augmenters, data_source_gcs
 from .sources.images import data_source_combined_gcs, gcs_augmenters, gcs_filters
 
-# Configure the following for your datasets
+# Configure the following for your datasets.
+#
+# MSML612 project bucket (gs://msml612-diffusion-data/arrayrecord2/...) — the
+# four datasets we actually built and uploaded in this project. These are the
+# ones you want to use for real LAION-scale training. Paths are relative to
+# the fuse mount at /home/mrwhite0racle/gcs_mount (see ImageGCSSource).
 datasetMap = {
     "oxford_flowers102": {
         "source": data_source_tfds("oxford_flowers102", use_tf=False),
         "augmenter": tfds_augmenters,
     },
+
+    # --- MSML612 project datasets (our current work) ---
+    "laion12m_coco": {
+        # LAION-aesthetics-12M (aesthetic score >=6) unioned with MS-COCO 2017.
+        # 228 shards, 236 GiB, ~15M successful samples. Built via img2dataset.
+        "source": data_source_gcs('arrayrecord2/laion12m_coco'),
+        "augmenter": gcs_augmenters,
+    },
+    "laion2b_aesthetic": {
+        # LAION-2B-en aesthetic >=4.2 subset. 569 shards, 550 GiB. Much larger
+        # than laion12m_coco but noisier. Built via multiple img2dataset resumes.
+        "source": data_source_gcs('arrayrecord2/laion2B-en-aesthetic'),
+        "augmenter": gcs_augmenters,
+    },
+    "diffusiondb": {
+        # DiffusionDB (Stable Diffusion synthetic images + prompts).
+        # 31 shards, 60 GiB, 1.97M samples. Built via convert_hf_to_arrayrecord.
+        "source": data_source_gcs('arrayrecord2/diffusiondb'),
+        "augmenter": gcs_augmenters,
+    },
+    "cc3m": {
+        # Conceptual Captions 3M (natural photos with short captions).
+        # 50 shards, 37 GiB, ~3.3M samples. Shard 00039 is missing
+        # (~65k samples gap, 2% of total). Built via img2dataset.
+        "source": data_source_gcs('arrayrecord2/cc3m'),
+        "augmenter": gcs_augmenters,
+    },
+    "combined_msml612": {
+        # Union of all 4 MSML612 project datasets for full-scale training.
+        # Total ~883 GiB, ~20M+ usable samples. Use this for big training runs.
+        "source": data_source_combined_gcs([
+            'arrayrecord2/laion12m_coco',
+            'arrayrecord2/laion2B-en-aesthetic',
+            'arrayrecord2/diffusiondb',
+            'arrayrecord2/cc3m',
+        ]),
+        "augmenter": gcs_augmenters,
+    },
+
+    # --- Legacy entries from prior mlops-msml605-project (paths may not
+    # exist on the current msml612-diffusion-data bucket; kept for backward
+    # compatibility with scripts that still reference these names) ---
     "cc12m": {
         "source": data_source_gcs('arrayrecord2/cc12m'),
         "augmenter": gcs_augmenters,
