@@ -208,6 +208,41 @@ class BidirectionalS5Layer(nn.Module):
         return y
 
 
+# --- 2D state fusion (Spatial-Mamba style) ---
+
+class SpatialFusionConv(nn.Module):
+    """Multi-dilation depthwise 2D convs summed as a residual over the SSM output grid.
+    The 1D scan scrambles 2D locality; this recovers a direction-balanced local
+    receptive field. Kernels are zero-init so the fusion starts as a pass-through.
+    """
+    features: int
+    dilations: Tuple[int, ...] = (1, 2, 3)
+    kernel_size: int = 3
+    dtype: Optional[Dtype] = None
+    precision: PrecisionLike = None
+
+    @nn.compact
+    def __call__(self, y_2d):
+        # y_2d: [B, H_P, W_P, F], SSM output reshaped to a row-major grid
+        out = y_2d
+        for dil in self.dilations:
+            dw = nn.Conv(
+                features=self.features,
+                kernel_size=(self.kernel_size, self.kernel_size),
+                strides=(1, 1),
+                padding='SAME',
+                kernel_dilation=(dil, dil),
+                feature_group_count=self.features,  # depthwise
+                use_bias=False,
+                kernel_init=nn.initializers.zeros,
+                dtype=self.dtype,
+                precision=self.precision,
+                name=f"dwconv_dil{dil}",
+            )(y_2d)
+            out = out + dw
+        return out
+
+
 # --- SSM DiT Block ---
 
 class SSMDiTBlock(nn.Module):
@@ -227,6 +262,8 @@ class SSMDiTBlock(nn.Module):
     norm_epsilon: float = 1e-5
     use_gating: bool = True
     bidirectional: bool = True
+    use_2d_fusion: bool = False  # 2D state fusion (SpatialFusionConv) after the scan
+    scan_order: str = 'raster'  # parent model's scan order, needed to un-permute for the conv
 
     def setup(self):
         hidden_features = int(self.features * self.mlp_ratio)
@@ -252,11 +289,66 @@ class SSMDiTBlock(nn.Module):
             name="ssm"
         )
 
+        # optional 2D state fusion after the SSM scan
+        if self.use_2d_fusion:
+            assert self.scan_order in ('raster', 'hilbert', 'zigzag'), \
+                f"Unknown scan_order {self.scan_order}"
+            self.spatial_fusion = SpatialFusionConv(
+                features=self.features,
+                dilations=(1, 2, 3),
+                kernel_size=3,
+                dtype=self.dtype,
+                precision=self.precision,
+                name="spatial_fusion",
+            )
+
         self.mlp = nn.Sequential([
             nn.Dense(features=hidden_features, dtype=self.dtype, precision=self.precision),
             nn.gelu,
             nn.Dense(features=self.features, dtype=self.dtype, precision=self.precision)
         ])
+
+    def _apply_2d_fusion(self, ssm_output):
+        """Un-permute scan-ordered SSM output to a 2D grid, fuse, re-permute back."""
+        B, S, F = ssm_output.shape
+        # square patch grid; S is a static python int at trace time
+        import math
+        H_P = math.isqrt(S)
+        W_P = H_P
+        assert H_P * W_P == S, (
+            f"2D fusion requires a square patch grid; got S={S} which is not a "
+            f"perfect square.")
+
+        # hilbert_indices/zigzag_indices give the forward perm scan_idx[h] = k
+        # (row-major index of the h-th scan token). Index arrays are constant
+        # at JIT time so computing both directions is free.
+        if self.scan_order == 'hilbert':
+            scan_fwd = hilbert_indices(H_P, W_P)          # [S], scan→rowmajor
+            scan_inv = inverse_permutation(scan_fwd, S)   # [S], rowmajor→scan
+        elif self.scan_order == 'zigzag':
+            scan_fwd = zigzag_indices(H_P, W_P)
+            scan_inv = inverse_permutation(scan_fwd, S)
+        else:  # raster
+            scan_fwd = None
+            scan_inv = None
+
+        if scan_fwd is not None:
+            # to row-major: rowmajor_tokens[k] = scan_tokens[scan_inv[k]]
+            ssm_rm = ssm_output[:, scan_inv, :]
+        else:
+            ssm_rm = ssm_output
+
+        y_2d = ssm_rm.reshape(B, H_P, W_P, F)
+        y_fused_2d = self.spatial_fusion(y_2d)
+        y_fused_rm = y_fused_2d.reshape(B, S, F)
+
+        if scan_fwd is not None:
+            # back to scan order: scan_tokens[h] = rowmajor_tokens[scan_fwd[h]]
+            y_fused = y_fused_rm[:, scan_fwd, :]
+        else:
+            y_fused = y_fused_rm
+
+        return y_fused
 
     @nn.compact
     def __call__(self, x, conditioning, freqs_cis):
@@ -270,6 +362,9 @@ class SSMDiTBlock(nn.Module):
         norm_x = self.norm1(x)
         x_modulated = norm_x * (1 + scale_attn) + shift_attn
         ssm_output = self.ssm(x_modulated)
+
+        if self.use_2d_fusion:
+            ssm_output = self._apply_2d_fusion(ssm_output)
 
         if self.use_gating:
             x = residual + gate_attn * ssm_output
@@ -317,6 +412,7 @@ class HybridSSMAttentionDiT(nn.Module):
     block_pattern: Optional[Sequence[str]] = None  # e.g., ['ssm','ssm','ssm','attn']
     ssm_attention_ratio: str = "3:1"  # e.g., "3:1", "1:1", "all-ssm", "all-attn"
     bidirectional_ssm: bool = True
+    use_2d_fusion: bool = False  # 2D state fusion in SSM blocks (see SpatialFusionConv)
 
     def _build_block_pattern(self):
         """Generate block pattern from ratio string."""
@@ -374,6 +470,12 @@ class HybridSSMAttentionDiT(nn.Module):
         blocks = []
         for i, block_type in enumerate(pattern):
             if block_type == 'ssm':
+                if self.use_hilbert:
+                    scan_order = 'hilbert'
+                elif self.use_zigzag:
+                    scan_order = 'zigzag'
+                else:
+                    scan_order = 'raster'
                 blocks.append(SSMDiTBlock(
                     features=self.emb_features,
                     num_heads=self.num_heads,
@@ -385,6 +487,8 @@ class HybridSSMAttentionDiT(nn.Module):
                     precision=self.precision,
                     norm_epsilon=self.norm_epsilon,
                     bidirectional=self.bidirectional_ssm,
+                    use_2d_fusion=self.use_2d_fusion,
+                    scan_order=scan_order,
                     name=f"ssm_block_{i}"
                 ))
             else:  # 'attn'
