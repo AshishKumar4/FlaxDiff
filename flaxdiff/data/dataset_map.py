@@ -16,6 +16,40 @@ datasetMap = {
         "source": data_source_tfds("oxford_flowers102", use_tf=False),
         "augmenter": tfds_augmenters,
     },
+
+    # --- msml612 datasets (gs://msml612-diffusion-data, via the gcs fuse mount) ---
+    "laion12m_coco": {
+        # laion-aesthetics-12M (score >=6) + MS-COCO 2017. 228 shards, 236 GiB, ~15M samples
+        "source": data_source_gcs('arrayrecord2/laion12m_coco'),
+        "augmenter": gcs_augmenters,
+    },
+    "laion2b_aesthetic": {
+        # laion-2B-en aesthetic >=4.2 subset. 569 shards, 550 GiB. larger but noisier
+        "source": data_source_gcs('arrayrecord2/laion2B-en-aesthetic'),
+        "augmenter": gcs_augmenters,
+    },
+    "diffusiondb": {
+        # diffusiondb (SD synthetic images + prompts). 31 shards, 60 GiB, 1.97M samples
+        "source": data_source_gcs('arrayrecord2/diffusiondb'),
+        "augmenter": gcs_augmenters,
+    },
+    "cc3m": {
+        # conceptual captions 3M. 50 shards, 37 GiB, ~3.3M samples (shard 00039 missing)
+        "source": data_source_gcs('arrayrecord2/cc3m'),
+        "augmenter": gcs_augmenters,
+    },
+    "combined_msml612": {
+        # all 4 datasets above, ~883 GiB, ~20M+ samples. for big training runs
+        "source": data_source_combined_gcs([
+            'arrayrecord2/laion12m_coco',
+            'arrayrecord2/laion2B-en-aesthetic',
+            'arrayrecord2/diffusiondb',
+            'arrayrecord2/cc3m',
+        ]),
+        "augmenter": gcs_augmenters,
+    },
+
+    # --- older entries from the msml605 project, paths may not exist on the current bucket ---
     "cc12m": {
         "source": data_source_gcs('arrayrecord2/cc12m'),
         "augmenter": gcs_augmenters,
