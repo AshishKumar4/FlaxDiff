@@ -1,107 +1,87 @@
 from .common import EvaluationMetric
 import jax
 import jax.numpy as jnp
-    
+
+
+# Cache the CLIP model so multiple metrics share one copy of the weights
+# instead of loading CLIP-L/14 into HBM once per metric (~600MB each).
+_clip_cache: dict = {}
+
+
+def _get_clip(modelname: str):
+    """Cached (model, processor) pair for the given CLIP modelname."""
+    if modelname not in _clip_cache:
+        from transformers import AutoProcessor, FlaxCLIPModel
+        print(f"[metrics] Loading CLIP model '{modelname}' (cached for reuse)...")
+        model = FlaxCLIPModel.from_pretrained(modelname, dtype=jnp.float16)
+        processor = AutoProcessor.from_pretrained(modelname, use_fast=False, dtype=jnp.float16)
+        _clip_cache[modelname] = (model, processor)
+    return _clip_cache[modelname]
+
+
+def _clip_image_text_cosine(model, pixel_values, input_ids, attention_mask):
+    """CLIP forward pass, returns per-sample cosine(image, text) of shape [B]."""
+    out = model(
+        pixel_values=pixel_values,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+    )
+    gen_img_emb = out.image_embeds
+    txt_emb = out.text_embeds
+    gen_img_emb = gen_img_emb / (jnp.linalg.norm(gen_img_emb, axis=-1, keepdims=True) + 1e-6)
+    txt_emb = txt_emb / (jnp.linalg.norm(txt_emb, axis=-1, keepdims=True) + 1e-6)
+    return jnp.einsum('bd,bd->b', gen_img_emb, txt_emb)
+
+
 def get_clip_metric(
     modelname: str = "openai/clip-vit-large-patch14",
 ):
-    from transformers import AutoProcessor, FlaxCLIPModel
-    model = FlaxCLIPModel.from_pretrained(modelname, dtype=jnp.float16)
-    processor = AutoProcessor.from_pretrained(modelname, use_fast=False, dtype=jnp.float16)
-    
+    """Old CLIP distance metric: mean(1 - cos(image, text)), lower is better.
+    Kept so older runs ranked by best_val/clip_similarity stay comparable;
+    prefer get_clip_score_metric for new runs.
+    """
+    model, processor = _get_clip(modelname)
+
     @jax.jit
     def calc(pixel_values, input_ids, attention_mask):
-        # Get the logits
-        generated_out = model(
-            pixel_values=pixel_values,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
-            
-        gen_img_emb = generated_out.image_embeds
-        txt_emb = generated_out.text_embeds
+        cos = _clip_image_text_cosine(model, pixel_values, input_ids, attention_mask)
+        return jnp.mean(1.0 - cos)
 
-        # 1. Normalize embeddings (essential for cosine similarity/distance)
-        gen_img_emb = gen_img_emb / (jnp.linalg.norm(gen_img_emb, axis=-1, keepdims=True) + 1e-6)
-        txt_emb = txt_emb / (jnp.linalg.norm(txt_emb, axis=-1, keepdims=True) + 1e-6)
-
-        # 2. Calculate cosine similarity
-        # Using einsum for batch dot product: batch (b), embedding_dim (d) -> bd,bd->b
-        # Calculate cosine similarity
-        similarity = jnp.einsum('bd,bd->b', gen_img_emb, txt_emb)
-
-        scaled_distance = (1.0 - similarity)
-        # 4. Average over the batch
-        mean_scaled_distance = jnp.mean(scaled_distance)
-
-        return mean_scaled_distance
-        
-    def clip_metric(
-        generated: jnp.ndarray,
-        batch
-    ):
+    def clip_metric(generated: jnp.ndarray, batch):
         original_conditions = batch['text']
-        
-        # Convert samples from [-1, 1] to [0, 255] and uint8
         generated = (((generated + 1.0) / 2.0) * 255).astype(jnp.uint8)
-        
-        generated_inputs = processor(images=generated, return_tensors="jax", padding=True,)
-        
-        pixel_values = generated_inputs['pixel_values']
-        input_ids = original_conditions['input_ids']
-        attention_mask = original_conditions['attention_mask']
-        
-        return calc(pixel_values, input_ids, attention_mask)
-    
-    return EvaluationMetric(
-        function=clip_metric,
-        name='clip_similarity'
-    )
+        generated_inputs = processor(images=generated, return_tensors="jax", padding=True)
+        return calc(
+            generated_inputs['pixel_values'],
+            original_conditions['input_ids'],
+            original_conditions['attention_mask'],
+        )
+
+    return EvaluationMetric(function=clip_metric, name='clip_similarity')
 
 
 def get_clip_score_metric(
     modelname: str = "openai/clip-vit-large-patch14",
 ):
     """Standard CLIPScore: 100 * max(cos(img, text), 0), higher is better.
-    Typical T2I models score around 25-35 on natural prompts. Prefer this over
-    the older clip_similarity which is actually a distance (lower is better).
+    Typical T2I models score around 25-35 on natural prompts.
     """
-    from transformers import AutoProcessor, FlaxCLIPModel
-    model = FlaxCLIPModel.from_pretrained(modelname, dtype=jnp.float16)
-    processor = AutoProcessor.from_pretrained(modelname, use_fast=False, dtype=jnp.float16)
+    model, processor = _get_clip(modelname)
 
     @jax.jit
     def calc(pixel_values, input_ids, attention_mask):
-        out = model(
-            pixel_values=pixel_values,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
-        gen_img_emb = out.image_embeds
-        txt_emb = out.text_embeds
+        cos = _clip_image_text_cosine(model, pixel_values, input_ids, attention_mask)
+        return jnp.mean(100.0 * jnp.maximum(cos, 0.0))
 
-        # Normalize embeddings
-        gen_img_emb = gen_img_emb / (jnp.linalg.norm(gen_img_emb, axis=-1, keepdims=True) + 1e-6)
-        txt_emb = txt_emb / (jnp.linalg.norm(txt_emb, axis=-1, keepdims=True) + 1e-6)
-
-        # Cosine similarity per pair
-        cos_sim = jnp.einsum('bd,bd->b', gen_img_emb, txt_emb)
-
-        # CLIPScore: 100 * max(cos_sim, 0), averaged
-        clip_score = 100.0 * jnp.maximum(cos_sim, 0.0)
-        return jnp.mean(clip_score)
-
-    def clip_score_metric(
-        generated: jnp.ndarray,
-        batch
-    ):
+    def clip_score_metric(generated: jnp.ndarray, batch):
         original_conditions = batch['text']
         generated = (((generated + 1.0) / 2.0) * 255).astype(jnp.uint8)
-        generated_inputs = processor(images=generated, return_tensors="jax", padding=True,)
-        pixel_values = generated_inputs['pixel_values']
-        input_ids = original_conditions['input_ids']
-        attention_mask = original_conditions['attention_mask']
-        return calc(pixel_values, input_ids, attention_mask)
+        generated_inputs = processor(images=generated, return_tensors="jax", padding=True)
+        return calc(
+            generated_inputs['pixel_values'],
+            original_conditions['input_ids'],
+            original_conditions['attention_mask'],
+        )
 
     return EvaluationMetric(
         function=clip_score_metric,
