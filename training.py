@@ -124,11 +124,13 @@ parser.add_argument('--architecture', type=str,
                         "hierarchical_mmdit",
                         # 'uvit-hilbert',
                         'simple_dit+hilbert',
+                        'simple_dit+zigzag',
                         "simple_udit+hilbert",
                         "simple_mmdit+hilbert",
                         "hierarchical_mmdit+hilbert",
                         "hybrid_dit",
                         "hybrid_dit+hilbert",
+                        "hybrid_dit+zigzag",
                     ], 
                     default="unet", help='Architecture to use')
 parser.add_argument('--emb_features', type=int, default=256, help='Embedding features')
@@ -150,7 +152,8 @@ parser.add_argument('--patch_size', type=int, default=16, help='Patch size for t
 parser.add_argument('--num_layers', type=int, default=12, help='Number of layers in the transformer if using UViT')
 parser.add_argument('--num_heads', type=int, default=12, help='Number of heads in the transformer if using UViT')
 parser.add_argument('--mlp_ratio', type=int, default=4, help='MLP ratio in the transformer if using UViT')
-parser.add_argument('--use_hilbert', type=boolean_string, default=False, help='Use Hilbert patch reordering for the transformer if using UViT')
+parser.add_argument('--use_hilbert', type=boolean_string, default=False, help='Use Hilbert patch reordering for the transformer')
+parser.add_argument('--use_zigzag', type=boolean_string, default=False, help='Use zigzag (ZigMa-style serpentine) patch reordering for the transformer. Mutually exclusive with --use_hilbert.')
 parser.add_argument('--ssm_attention_ratio', type=str, default='3:1', help='SSM to attention ratio for hybrid_dit (e.g., "3:1", "1:1", "all-ssm", "all-attn")')
 parser.add_argument('--ssm_state_dim', type=int, default=64, help='State dimension for S5 SSM blocks')
 
@@ -340,11 +343,17 @@ def main(args):
             DIFFUSION_INPUT_SIZE = DIFFUSION_INPUT_SIZE // 8
     
     use_hilbert = args.use_hilbert
+    use_zigzag = args.use_zigzag
     architecture_name = args.architecture
     if 'hilbert' in architecture_name:
         architecture_name = architecture_name.split('+')[0]
         print("Will use Hilbert Patch Reordering")
         use_hilbert = True
+    elif 'zigzag' in architecture_name:
+        architecture_name = architecture_name.split('+')[0]
+        print("Will use Zigzag (serpentine) Patch Reordering")
+        use_zigzag = True
+    assert not (use_hilbert and use_zigzag), "use_hilbert and use_zigzag are mutually exclusive"
     
     if 'diffusers' in architecture_name:
         model_config = {}
@@ -405,6 +414,7 @@ def main(args):
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
+                "use_zigzag": use_zigzag,
             },
         },
         "simple_mmdit": {
@@ -442,6 +452,7 @@ def main(args):
                 "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
+                "use_zigzag": use_zigzag,
                 "ssm_state_dim": args.ssm_state_dim,
                 "ssm_attention_ratio": args.ssm_attention_ratio,
             },

@@ -245,6 +245,60 @@ def hilbert_patchify(x: jnp.ndarray, patch_size: int) -> Tuple[jnp.ndarray, jnp.
 
     return patches_hilbert, inv_idx
 
+def zigzag_indices(H_P: int, W_P: int) -> jnp.ndarray:
+    """
+    Generate zigzag (serpentine / boustrophedon) scan indices for an H_P x W_P patch grid.
+
+    Even rows (0, 2, 4, ...) traverse left-to-right; odd rows (1, 3, 5, ...)
+    traverse right-to-left. This is the scan pattern proposed in ZigMa
+    (Hu et al., ECCV 2024, arxiv 2403.13802) — at 16x16 tokens ZigMa's Table 7
+    shows zigzag beats Hilbert by 14 FID points on multimodal CelebA, making
+    it the best published scan order for SSM diffusion in our exact regime.
+
+    Returns 1D JAX array where result[i] is the row-major index of the i-th
+    patch in the zigzag sequence. Length H_P * W_P.
+    """
+    indices = []
+    for r in range(H_P):
+        if r % 2 == 0:
+            for c in range(W_P):
+                indices.append(r * W_P + c)
+        else:
+            for c in range(W_P - 1, -1, -1):
+                indices.append(r * W_P + c)
+    return jnp.array(indices, dtype=jnp.int32)
+
+
+def zigzag_patchify(x: jnp.ndarray, patch_size: int) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Extract patches and reorder them according to zigzag (serpentine) scan.
+
+    Mirrors the contract of hilbert_patchify:
+        returns (patches_zigzag, inv_idx) where inv_idx maps row-major index
+        back to zigzag sequence index.
+    """
+    B, H, W, C = x.shape
+    H_P = H // patch_size
+    W_P = W // patch_size
+    total_patches_expected = H_P * W_P
+
+    patches_row_major = patchify(x, patch_size)
+    idx = zigzag_indices(H_P, W_P)
+    inv_idx = inverse_permutation(idx, total_patches_expected)
+    patches_zigzag = patches_row_major[:, idx, :]
+    return patches_zigzag, inv_idx
+
+
+def zigzag_unpatchify(x: jnp.ndarray, inv_idx: jnp.ndarray, patch_size: int, H: int, W: int, C: int) -> jnp.ndarray:
+    """
+    Restore row-major order from zigzag-ordered patches and convert to image.
+    Delegates to hilbert_unpatchify — the scatter is scan-agnostic and only
+    depends on inv_idx, which is already zigzag-specific when produced by
+    zigzag_patchify.
+    """
+    return hilbert_unpatchify(x, inv_idx, patch_size, H, W, C)
+
+
 def hilbert_unpatchify(x: jnp.ndarray, inv_idx: jnp.ndarray, patch_size: int, H: int, W: int, C: int) -> jnp.ndarray:
     """
     Restore the original row-major order of patches and convert back to image.

@@ -24,6 +24,7 @@ from flax.typing import Dtype, PrecisionLike
 
 from .hilbert import (
     hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify,
+    zigzag_indices, zigzag_patchify, zigzag_unpatchify,
     build_2d_sincos_pos_embed,
 )
 from .simple_dit import DiTBlock
@@ -414,6 +415,7 @@ class HybridSSMAttentionDiT(nn.Module):
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False
     use_hilbert: bool = False
+    use_zigzag: bool = False  # ZigMa-style serpentine scan
     norm_groups: int = 0
     activation: Callable = jax.nn.swish
     block_pattern: Optional[Sequence[str]] = None  # e.g., ['ssm','ssm','ssm','attn']
@@ -443,7 +445,10 @@ class HybridSSMAttentionDiT(nn.Module):
             precision=self.precision
         )
 
-        if self.use_hilbert:
+        assert not (self.use_hilbert and self.use_zigzag), \
+            "use_hilbert and use_zigzag are mutually exclusive"
+
+        if self.use_hilbert or self.use_zigzag:
             self.hilbert_proj = nn.Dense(
                 features=self.emb_features,
                 dtype=self.dtype,
@@ -527,27 +532,33 @@ class HybridSSMAttentionDiT(nn.Module):
         H_P = H // self.patch_size
         W_P = W // self.patch_size
 
-        # 1. Patch Embedding (identical to SimpleDiT)
+        # 1. Patch Embedding (identical to SimpleDiT).
+        # Scan order (raster / hilbert / zigzag) is mutually exclusive.
+        hilbert_inv_idx = None
         if self.use_hilbert:
             patches_raw, hilbert_inv_idx = hilbert_patchify(x, self.patch_size)
             patches = self.hilbert_proj(patches_raw)
+        elif self.use_zigzag:
+            patches_raw, hilbert_inv_idx = zigzag_patchify(x, self.patch_size)
+            patches = self.hilbert_proj(patches_raw)
         else:
             patches = self.patch_embed(x)
-            hilbert_inv_idx = None
 
         num_patches = patches.shape[1]
 
         # 2D positional embedding — encodes (row, col) of each patch.
         # The SSM blocks have no implicit positional signal (they ignore RoPE), so we
-        # add a 2D sin-cos position embedding to every patch. For Hilbert mode, we
-        # reorder the row-major position embedding into Hilbert order so each patch
-        # in the sequence is paired with its TRUE 2D position.
+        # add a 2D sin-cos position embedding to every patch. For any non-raster
+        # scan mode, we reorder the row-major position embedding to match the scan
+        # sequence so each patch is paired with its TRUE 2D position.
         pos_embed_2d_rm = build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
         pos_embed_2d_rm = jnp.asarray(pos_embed_2d_rm, dtype=patches.dtype)
         if self.use_hilbert:
-            # hilbert_indices(H_P, W_P)[h] = row-major index of h-th Hilbert patch
-            h_idx = hilbert_indices(H_P, W_P)
-            pos_embed_2d = pos_embed_2d_rm[h_idx]
+            scan_idx = hilbert_indices(H_P, W_P)
+            pos_embed_2d = pos_embed_2d_rm[scan_idx]
+        elif self.use_zigzag:
+            scan_idx = zigzag_indices(H_P, W_P)
+            pos_embed_2d = pos_embed_2d_rm[scan_idx]
         else:
             pos_embed_2d = pos_embed_2d_rm
         patches = patches + pos_embed_2d[None, :, :]
@@ -562,15 +573,14 @@ class HybridSSMAttentionDiT(nn.Module):
             text_emb_pooled = jnp.mean(text_emb, axis=1)
             cond_emb = cond_emb + text_emb_pooled
 
-        # 3. RoPE frequencies for the attention blocks.
-        # When Hilbert is on, sequence index != 2D position. Applying RoPE over
-        # Hilbert-scrambled indices would encode wrong relative distances to the
-        # attention map. The additive 2D sin-cos embedding above already supplies
-        # the correct 2D position signal, so we override RoPE with identity
-        # (cos=1, sin=0) in Hilbert mode — this makes apply_rotary_embedding a
-        # no-op without changing any interface.
+        # 3. RoPE frequencies for the attention blocks. In any non-raster scan
+        # mode (hilbert / zigzag) the sequence index != 2D position and RoPE
+        # would encode wrong relative distances. The additive 2D sin-cos above
+        # already supplies the correct 2D position signal, so we override RoPE
+        # with identity (cos=1, sin=0) — makes apply_rotary_embedding a no-op
+        # without changing any interface.
         freqs_cos, freqs_sin = self.rope(seq_len=num_patches)
-        if self.use_hilbert:
+        if self.use_hilbert or self.use_zigzag:
             freqs_cos = jnp.ones_like(freqs_cos)
             freqs_sin = jnp.zeros_like(freqs_sin)
 
@@ -582,20 +592,14 @@ class HybridSSMAttentionDiT(nn.Module):
         x_out = self.final_norm(x_seq)
         x_out = self.final_proj(x_out)
 
-        # 6. Unpatchify
-        if self.use_hilbert:
+        # 6. Unpatchify. hilbert_unpatchify is scatter-by-inv_idx so both
+        # hilbert and zigzag go through it; raster uses the einops unpatchify.
+        if self.use_hilbert or self.use_zigzag:
             if self.learn_sigma:
-                x_mean, x_logvar = jnp.split(x_out, 2, axis=-1)
-                x_image = hilbert_unpatchify(x_mean, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
-                return x_image
-            else:
-                x_image = hilbert_unpatchify(x_out, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
-                return x_image
-        else:
-            if self.learn_sigma:
-                x_mean, x_logvar = jnp.split(x_out, 2, axis=-1)
-                x = unpatchify(x_mean, channels=self.output_channels)
-                return x
-            else:
-                x = unpatchify(x_out, channels=self.output_channels)
-                return x
+                x_mean, _x_logvar = jnp.split(x_out, 2, axis=-1)
+                return hilbert_unpatchify(x_mean, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+            return hilbert_unpatchify(x_out, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+        if self.learn_sigma:
+            x_mean, _x_logvar = jnp.split(x_out, 2, axis=-1)
+            return unpatchify(x_mean, channels=self.output_channels)
+        return unpatchify(x_out, channels=self.output_channels)

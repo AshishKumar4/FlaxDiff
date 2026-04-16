@@ -15,6 +15,7 @@ from flax.typing import Dtype, PrecisionLike
 # Use our improved Hilbert implementation
 from .hilbert import (
     hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify,
+    zigzag_indices, zigzag_patchify, zigzag_unpatchify,
     build_2d_sincos_pos_embed,
 )
 
@@ -115,6 +116,7 @@ class SimpleDiT(nn.Module):
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False  # Option to predict sigma like in DiT paper
     use_hilbert: bool = False  # Toggle Hilbert patch reorder
+    use_zigzag: bool = False  # Toggle zigzag (serpentine) patch reorder
     norm_groups: int = 0
     activation: Callable = jax.nn.swish
 
@@ -126,8 +128,15 @@ class SimpleDiT(nn.Module):
             precision=self.precision
         )
 
-        # Add projection layer for Hilbert patches
-        if self.use_hilbert:
+        # Sanity check: at most one non-raster scan order
+        assert not (self.use_hilbert and self.use_zigzag), \
+            "use_hilbert and use_zigzag are mutually exclusive"
+
+        # Add projection layer for Hilbert- or zigzag-reordered patches.
+        # Both scan orders replace PatchEmbedding with raw patch extraction +
+        # a Dense projection (since the Conv-based PatchEmbedding doesn't compose
+        # with post-conv reordering cleanly).
+        if self.use_hilbert or self.use_zigzag:
             self.hilbert_proj = nn.Dense(
                 features=self.emb_features,
                 dtype=self.dtype,
@@ -207,15 +216,22 @@ class SimpleDiT(nn.Module):
         H_P = H // self.patch_size
         W_P = W // self.patch_size
 
-        # 1. Patch Embedding
+        # 1. Patch Embedding. The scan order is mutually exclusive:
+        #   - use_hilbert: Hilbert curve traversal
+        #   - use_zigzag:  serpentine (ZigMa-style) traversal
+        #   - neither:     standard row-major raster
+        scan_inv_idx = None
         if self.use_hilbert:
-            # Use hilbert_patchify which handles both patchification and reordering
-            patches_raw, hilbert_inv_idx = hilbert_patchify(x, self.patch_size) # Shape [B, S, P*P*C]
-            # Apply projection
-            patches = self.hilbert_proj(patches_raw) # Shape [B, S, emb_features]
+            patches_raw, scan_inv_idx = hilbert_patchify(x, self.patch_size)
+            patches = self.hilbert_proj(patches_raw)
+        elif self.use_zigzag:
+            patches_raw, scan_inv_idx = zigzag_patchify(x, self.patch_size)
+            patches = self.hilbert_proj(patches_raw)
         else:
-            patches = self.patch_embed(x)  # Shape: [B, num_patches, emb_features]
-            hilbert_inv_idx = None
+            patches = self.patch_embed(x)
+
+        # Keep the existing variable name for downstream compat.
+        hilbert_inv_idx = scan_inv_idx
 
         num_patches = patches.shape[1]
 
@@ -223,14 +239,17 @@ class SimpleDiT(nn.Module):
         # every patch an explicit spatial (row, col) signal that is invariant to
         # the token ORDER in the sequence. In raster mode it co-exists with RoPE
         # (RoPE-ViT ECCV 2024 shows additive + multiplicative are complementary).
-        # In Hilbert mode we reorder the row-major embedding to the Hilbert
-        # sequence order so each token gets the sincos for its TRUE 2D position
-        # even though the token is in a scrambled spot in the sequence.
+        # In a non-raster scan mode we reorder the row-major embedding to match
+        # the scan sequence so each token gets the sincos for its TRUE 2D
+        # position even though the token is in a scrambled spot in the sequence.
         pos_embed_rm = build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
         pos_embed_rm = jnp.asarray(pos_embed_rm, dtype=patches.dtype)
         if self.use_hilbert:
-            h_idx = hilbert_indices(H_P, W_P)
-            pos_embed = pos_embed_rm[h_idx]
+            scan_idx = hilbert_indices(H_P, W_P)
+            pos_embed = pos_embed_rm[scan_idx]
+        elif self.use_zigzag:
+            scan_idx = zigzag_indices(H_P, W_P)
+            pos_embed = pos_embed_rm[scan_idx]
         else:
             pos_embed = pos_embed_rm
         patches = patches + pos_embed[None, :, :]
@@ -254,13 +273,13 @@ class SimpleDiT(nn.Module):
         # Get RoPE frequencies for the sequence length (number of patches)
         # Shape [num_patches, D_head/2]
         freqs_cos, freqs_sin = self.rope(seq_len=num_patches)
-        # In Hilbert mode, the sequence is a Hilbert curve traversal — sequence
-        # index k is a Hilbert index, not a 2D position, so RoPE encodes wrong
-        # relative distances between 2D neighbors. The additive 2D sin-cos above
-        # already supplies the correct spatial signal, so we override RoPE with
-        # identity (cos=1, sin=0) here. This makes apply_rotary_embedding a no-op
-        # inside the attention layer without changing its interface.
-        if self.use_hilbert:
+        # In any non-raster scan mode (Hilbert / zigzag), sequence index is not
+        # a 2D position — RoPE would encode wrong relative distances between
+        # 2D neighbors. The additive 2D sin-cos above already supplies the
+        # correct spatial signal, so we override RoPE with identity (cos=1,
+        # sin=0) here. This makes apply_rotary_embedding a no-op inside the
+        # attention layer without changing its interface.
+        if self.use_hilbert or self.use_zigzag:
             freqs_cos = jnp.ones_like(freqs_cos)
             freqs_sin = jnp.zeros_like(freqs_sin)
 
@@ -273,32 +292,15 @@ class SimpleDiT(nn.Module):
         # Shape: [B, num_patches, patch_pixels (*2 if learn_sigma)]
         x_out = self.final_proj(x_out)
 
-        # 6. Unpatchify
-        if self.use_hilbert:
-            # For Hilbert mode, we need to use the specialized unpatchify function
+        # 6. Unpatchify. hilbert_unpatchify handles any scatter-by-inv_idx,
+        # so both Hilbert and zigzag go through the same path.
+        if self.use_hilbert or self.use_zigzag:
             if self.learn_sigma:
-                # Split into mean and variance predictions
-                x_mean, x_logvar = jnp.split(x_out, 2, axis=-1)
-                x_image = hilbert_unpatchify(x_mean, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
-                # If needed, also unpack the logvar
-                # logvar_image = hilbert_unpatchify(x_logvar, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
-                # return x_image, logvar_image
-                return x_image
-            else:
-                x_image = hilbert_unpatchify(x_out, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
-                return x_image
-        else:
-            # Standard patch ordering - use the existing unpatchify function
-            if self.learn_sigma:
-                # Split into mean and variance predictions
-                x_mean, x_logvar = jnp.split(x_out, 2, axis=-1)
-                x = unpatchify(x_mean, channels=self.output_channels)
-                # Return both mean and logvar if needed by the loss function
-                # For now, just returning the mean prediction like standard diffusion models
-                # logvar = unpatchify(x_logvar, channels=self.output_channels)
-                # return x, logvar
-                return x
-            else:
-                # Shape: [B, H, W, C]
-                x = unpatchify(x_out, channels=self.output_channels)
-                return x
+                x_mean, _x_logvar = jnp.split(x_out, 2, axis=-1)
+                return hilbert_unpatchify(x_mean, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+            return hilbert_unpatchify(x_out, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
+        # Raster: the standard einops-based unpatchify.
+        if self.learn_sigma:
+            x_mean, _x_logvar = jnp.split(x_out, 2, axis=-1)
+            return unpatchify(x_mean, channels=self.output_channels)
+        return unpatchify(x_out, channels=self.output_channels)
