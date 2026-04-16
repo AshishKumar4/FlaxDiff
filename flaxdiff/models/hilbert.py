@@ -240,6 +240,48 @@ def hilbert_patchify(x: jnp.ndarray, patch_size: int) -> Tuple[jnp.ndarray, jnp.
 
     return patches_hilbert, inv_idx
 
+def zigzag_indices(H_P: int, W_P: int) -> jnp.ndarray:
+    """
+    Zigzag (serpentine) scan indices for an H_P x W_P patch grid, as in ZigMa.
+    Even rows go left-to-right, odd rows right-to-left. result[i] is the
+    row-major index of the i-th patch in the zigzag sequence.
+    """
+    indices = []
+    for r in range(H_P):
+        if r % 2 == 0:
+            for c in range(W_P):
+                indices.append(r * W_P + c)
+        else:
+            for c in range(W_P - 1, -1, -1):
+                indices.append(r * W_P + c)
+    return jnp.array(indices, dtype=jnp.int32)
+
+
+def zigzag_patchify(x: jnp.ndarray, patch_size: int) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Extract patches and reorder them in zigzag scan order.
+    Same contract as hilbert_patchify: returns (patches_zigzag, inv_idx).
+    """
+    B, H, W, C = x.shape
+    H_P = H // patch_size
+    W_P = W // patch_size
+    total_patches_expected = H_P * W_P
+
+    patches_row_major = patchify(x, patch_size)
+    idx = zigzag_indices(H_P, W_P)
+    inv_idx = inverse_permutation(idx, total_patches_expected)
+    patches_zigzag = patches_row_major[:, idx, :]
+    return patches_zigzag, inv_idx
+
+
+def zigzag_unpatchify(x: jnp.ndarray, inv_idx: jnp.ndarray, patch_size: int, H: int, W: int, C: int) -> jnp.ndarray:
+    """
+    Restore row-major order from zigzag-ordered patches and convert to image.
+    The scatter in hilbert_unpatchify only depends on inv_idx, so just use it.
+    """
+    return hilbert_unpatchify(x, inv_idx, patch_size, H, W, C)
+
+
 def hilbert_unpatchify(x: jnp.ndarray, inv_idx: jnp.ndarray, patch_size: int, H: int, W: int, C: int) -> jnp.ndarray:
     """
     Restore the original row-major order of patches and convert back to image.
