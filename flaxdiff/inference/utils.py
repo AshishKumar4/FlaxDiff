@@ -28,6 +28,7 @@ from flaxdiff.utils import defaultTextEncodeModel
 from flaxdiff.models.simple_vit import UViT, SimpleUDiT
 from flaxdiff.models.simple_dit import SimpleDiT
 from flaxdiff.models.simple_mmdit import SimpleMMDiT, HierarchicalMMDiT
+from flaxdiff.models.ssm_dit import HybridSSMAttentionDiT
 from orbax.checkpoint import CheckpointManager, CheckpointManagerOptions, PyTreeCheckpointer
 import os
 
@@ -123,6 +124,13 @@ def parse_config(config, overrides=None):
         'simple_dit': SimpleDiT,
         'simple_mmdit': SimpleMMDiT,
         'simple_udit': SimpleUDiT,
+        'hierarchical_mmdit': HierarchicalMMDiT,
+        # Hybrid SSM-Attention DiT family. The +2d / +hilbert / +zigzag
+        # suffixes are training-side flags that get stripped from the
+        # architecture name before lookup; their settings live in the model
+        # config dict (use_2d_fusion, use_hilbert, use_zigzag, etc.) so the
+        # constructor receives them as kwargs.
+        'hybrid_dit': HybridSSMAttentionDiT,
     }
     
     # Map all the leaves of the model config, converting strings to appropriate types
@@ -153,9 +161,23 @@ def parse_config(config, overrides=None):
 
     # Parse architecture and model config
     model_config = conf['model']
-        
+
     # Get architecture type
     architecture = conf.get('architecture', conf.get('arguments', {}).get('architecture', 'unet'))
+
+    # Canonicalize architecture name for MODEL_CLASSES lookup. Hybrid SSM-Attention
+    # DiT variants encode their flavour in the name as +2d / +hilbert / +zigzag
+    # suffixes; the corresponding training-time flags (use_2d_fusion,
+    # use_hilbert, use_zigzag) are already in model_config, so we strip the
+    # suffixes here and let the model class read those flags from kwargs.
+    if isinstance(architecture, str):
+        canonical = architecture
+        for suffix in ('+2d', '+hilbert', '+zigzag'):
+            canonical = canonical.replace(suffix, '')
+        if canonical != architecture:
+            print(f"Canonicalized architecture: '{architecture}' -> '{canonical}' "
+                  f"(suffix flags read from model_config)")
+            architecture = canonical
         
     # Handle autoencoder
     autoencoder_name = conf.get('autoencoder', conf.get('arguments', {}).get('autoencoder'))
