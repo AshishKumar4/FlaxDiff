@@ -19,9 +19,10 @@ class KarrasVENoiseScheduler(GeneralizedNoiseScheduler):
         
     def get_weights(self, steps, shape=(-1, 1, 1, 1)) -> jnp.ndarray:
         sigma = self.get_sigmas(steps)
-        # Add epsilon for numerical stability
-        epsilon = 1e-6
-        weights = ((sigma ** 2 + self.sigma_data ** 2) / ((sigma * self.sigma_data) ** 2 + epsilon))
+        # EDM lambda(sigma) = (sigma^2 + sd^2) / (sigma * sd)^2, written in a
+        # form that needs no epsilon guard (the old guard halved the weight at
+        # sigma_min where (sigma * sd)^2 == 1e-6)
+        weights = 1 / self.sigma_data ** 2 + 1 / sigma ** 2
         return weights.reshape(shape)
     
     def transform_inputs(self, x, steps, num_discrete_chunks=1000) -> tuple[jnp.ndarray, jnp.ndarray]:

@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import jax
+import numpy as np
 from flax import linen as nn
 from typing import Optional, Any, Callable, Sequence, Union
 from flax.typing import Dtype, PrecisionLike
@@ -99,7 +100,10 @@ class FourierEmbedding(nn.Module):
     scale:int = 16
 
     def setup(self):
-        self.freqs = jax.random.normal(jax.random.PRNGKey(42), (self.features // 2, ), dtype=jnp.float32) * self.scale
+        # Fixed frequencies via numpy so they are identical across jax versions
+        # (jax 0.5.0 changed the default PRNG and silently altered these)
+        freqs = np.random.RandomState(42).normal(size=(self.features // 2,))
+        self.freqs = jnp.asarray(freqs, dtype=jnp.float32) * self.scale
 
     def __call__(self, x):
         x = jax.lax.convert_element_type(x, jnp.float32)

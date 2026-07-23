@@ -66,7 +66,6 @@ def test_karras_weights_match_edm_lambda():
     assert jnp.allclose(got, expected, rtol=1e-3)
 
 
-@pytest.mark.xfail(strict=True, reason="bug: epsilon guard distorts the weight near sigma_min")
 def test_karras_weights_at_sigma_min():
     schedule = KarrasVENoiseScheduler(1, sigma_min=0.002, sigma_max=80, rho=7, sigma_data=0.5)
     sigma = jnp.array([0.002])

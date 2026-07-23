@@ -15,8 +15,7 @@ try:
     import jax.experimental.pallas.ops.tpu.flash_attention
 except (ImportError, ModuleNotFoundError):
     pass
-from flaxdiff.predictors import VPredictionTransform, EpsilonPredictionTransform, DiffusionPredictionTransform, DirectPredictionTransform, KarrasPredictionTransform
-from flaxdiff.schedulers import CosineNoiseScheduler, NoiseScheduler, GeneralizedNoiseScheduler, KarrasVENoiseScheduler, EDMNoiseScheduler
+from flaxdiff.predictors import get_diffusion_preset
 from diffusers import FlaxUNet2DConditionModel
 from flaxdiff.samplers.euler import EulerAncestralSampler
 import struct as st
@@ -30,6 +29,7 @@ import os
 from datetime import datetime
 
 import json
+import hashlib
 # For CLIP
 import argparse
 from dataclasses import dataclass
@@ -490,7 +490,8 @@ def main(args):
         model_config['emb_features'] = 768
         
     sorted_args_json = json.dumps(vars(args), sort_keys=True)
-    arguments_hash = hash(sorted_args_json)
+    # hash() is randomized per process; identical args must map to the same experiment
+    arguments_hash = hashlib.sha256(sorted_args_json.encode()).hexdigest()[:16]
     
     text_encoder = defaultTextEncodeModel()
     
@@ -543,10 +544,7 @@ def main(args):
     
     batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
 
-    cosine_schedule = CosineNoiseScheduler(1000, beta_end=1)
-    karas_ve_schedule = KarrasVENoiseScheduler(
-        1, sigma_max=80, rho=7, sigma_data=0.5)
-    edm_schedule = EDMNoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
+    train_schedule, sampling_schedule, prediction_transform = get_diffusion_preset(args.noise_schedule)
     
     if args.experiment_name is not None:
         experiment_name = args.experiment_name
@@ -618,11 +616,10 @@ def main(args):
     trainer = GeneralDiffusionTrainer(
         model, optimizer=solver,
         input_config=input_config,
-        noise_schedule=edm_schedule,
+        noise_schedule=train_schedule,
         rngs=jax.random.PRNGKey(4),
         name=experiment_name,
-        model_output_transform=KarrasPredictionTransform(
-        sigma_data=edm_schedule.sigma_data),
+        model_output_transform=prediction_transform,
         load_from_checkpoint=args.load_from_checkpoint,
         wandb_config=wandb_config,
         distributed_training=args.distributed_training,
@@ -656,7 +653,7 @@ def main(args):
         training_steps_per_epoch=batches,
         epochs=CONFIG['epochs'], 
         sampler_class=EulerAncestralSampler, 
-        sampling_noise_schedule=karas_ve_schedule,
+        sampling_noise_schedule=sampling_schedule,
         val_steps_per_epoch=args.val_steps_per_epoch,
     )
     

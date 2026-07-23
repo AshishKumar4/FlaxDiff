@@ -1,14 +1,7 @@
 import jax
 import jax.numpy as jnp
 import json
-from flaxdiff.schedulers import (
-    CosineNoiseScheduler,
-    KarrasVENoiseScheduler,
-)
-from flaxdiff.predictors import (
-    VPredictionTransform,
-    KarrasPredictionTransform,
-)
+from flaxdiff.predictors import get_diffusion_preset
 from flaxdiff.models.common import kernel_init
 from flaxdiff.models.simple_unet import Unet
 from flaxdiff.models.simple_vit import UViT
@@ -236,17 +229,9 @@ def parse_config(config, overrides=None):
     if 'diffusers' in architecture:
         model = BCHWModelWrapper(model)
     
-    # Create noise scheduler based on configuration
+    # Same preset as training, so the sampling convention always matches
     noise_schedule_type = conf.get('noise_schedule', conf.get('arguments', {}).get('noise_schedule', 'edm'))
-    if noise_schedule_type in ['edm', 'karras']:
-        # For both EDM and karras, we use the karras scheduler for inference
-        noise_schedule = KarrasVENoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
-        prediction_transform = KarrasPredictionTransform(sigma_data=noise_schedule.sigma_data)
-    elif noise_schedule_type == 'cosine':
-        noise_schedule = CosineNoiseScheduler(1000, beta_end=1)
-        prediction_transform = VPredictionTransform()
-    else:
-        raise ValueError(f"Unknown noise schedule: {noise_schedule_type}")
+    _, noise_schedule, prediction_transform = get_diffusion_preset(noise_schedule_type)
     
     # Prepare return dictionary with all components
     result = {

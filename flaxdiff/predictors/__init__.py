@@ -1,6 +1,13 @@
 from typing import Union
 import jax.numpy as jnp
-from ..schedulers import NoiseScheduler, GeneralizedNoiseScheduler, get_coeff_shapes_tuple
+from ..schedulers import (
+    NoiseScheduler,
+    GeneralizedNoiseScheduler,
+    get_coeff_shapes_tuple,
+    CosineNoiseScheduler,
+    KarrasVENoiseScheduler,
+    EDMNoiseScheduler,
+)
 
 ############################################################################################################
 # Prediction Transforms
@@ -94,3 +101,37 @@ class KarrasPredictionTransform(DiffusionPredictionTransform):
         _, sigma = rates
         c_in = 1 / (jnp.sqrt(self.sigma_data ** 2 + sigma ** 2) + epsilon)
         return c_in
+
+############################################################################################################
+# Noise schedule presets
+############################################################################################################
+
+def get_diffusion_preset(
+    name: str,
+    timesteps: int = 1000,
+    sigma_min: float = 0.002,
+    sigma_max: float = 80.0,
+    rho: float = 7.0,
+    sigma_data: float = 0.5,
+) -> tuple[NoiseScheduler, NoiseScheduler, DiffusionPredictionTransform]:
+    """Named (train schedule, sampling schedule, prediction transform) presets.
+
+    The single source of truth for which schedule pairs with which
+    parameterization. Both training and inference build from here, so a model
+    is always sampled with the same convention it was trained with.
+    """
+    if name == 'edm':
+        train = EDMNoiseScheduler(1, sigma_min=sigma_min, sigma_max=sigma_max, rho=rho, sigma_data=sigma_data)
+        sample = KarrasVENoiseScheduler(1, sigma_min=sigma_min, sigma_max=sigma_max, rho=rho, sigma_data=sigma_data)
+        transform = KarrasPredictionTransform(sigma_data=sigma_data)
+    elif name == 'karras':
+        train = KarrasVENoiseScheduler(1, sigma_min=sigma_min, sigma_max=sigma_max, rho=rho, sigma_data=sigma_data)
+        sample = KarrasVENoiseScheduler(1, sigma_min=sigma_min, sigma_max=sigma_max, rho=rho, sigma_data=sigma_data)
+        transform = KarrasPredictionTransform(sigma_data=sigma_data)
+    elif name == 'cosine':
+        train = CosineNoiseScheduler(timesteps, beta_end=1)
+        sample = CosineNoiseScheduler(timesteps, beta_end=1)
+        transform = VPredictionTransform()
+    else:
+        raise ValueError(f"Unknown noise schedule preset: {name}")
+    return train, sample, transform
