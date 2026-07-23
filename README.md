@@ -210,23 +210,21 @@ final_state = trainer.fit(data, batches, epochs=2000, sampler_class=EulerAncestr
 Here is a simplified example for generating images using a trained model:
 
 ```python
-from flaxdiff.samplers import DiffusionSampler
+from flaxdiff.samplers.euler import EulerSampler
 
-class EulerSampler(DiffusionSampler):
-    def take_next_step(self, current_samples, reconstructed_samples, pred_noise, current_step, state, next_step=None):
-        current_alpha, current_sigma = self.noise_schedule.get_rates(current_step)
-        next_alpha, next_sigma = self.noise_schedule.get_rates(next_step)
-        dt = next_sigma - current_sigma
-        x_0_coeff = (current_alpha * next_sigma - next_alpha * current_sigma) / dt
-        dx = (current_samples - x_0_coeff * reconstructed_samples) / current_sigma
-        next_samples = current_samples + dx * dt
-        return next_samples, state
+sampler = EulerSampler(
+    trainer.model,
+    noise_schedule=karas_ve_schedule,
+    model_output_transform=trainer.model_output_transform,
+    input_config=input_config,
+)
 
-# Create sampler
-sampler = EulerSampler(trainer.model, trainer.state.ema_params, edm_schedule, model_output_transform=trainer.model_output_transform)
-
-# Generate images
-samples = sampler.generate_images(num_images=64, diffusion_steps=100, start_step=1000, end_step=0)
+samples = sampler.generate_samples(
+    params=trainer.state.ema_params,
+    num_samples=64,
+    resolution=128,
+    diffusion_steps=100,
+)
 plotImages(samples, dpi=300)
 ```
 
