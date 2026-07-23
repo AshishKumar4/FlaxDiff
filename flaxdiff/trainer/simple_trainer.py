@@ -349,52 +349,10 @@ class SimpleTrainer:
             print("Error saving checkpoint outer", e)
 
     def _define_train_step(self, **kwargs):
-        model = self.model
-        loss_fn = self.loss_fn
-        distributed_training = self.distributed_training
+        raise NotImplementedError("Subclasses must define their train step")
 
-        def train_step(train_state: SimpleTrainState, rng_state: RandomMarkovState, batch, local_device_indexes):
-            """Train for a single step."""
-            images = batch['image']
-            labels = batch['label']
-
-            def model_loss(params):
-                preds = model.apply(params, images)
-                expected_output = labels
-                nloss = loss_fn(preds, expected_output)
-                loss = jnp.mean(nloss)
-                return loss
-            loss, grads = jax.value_and_grad(model_loss)(train_state.params)
-            if distributed_training:
-                grads = jax.lax.pmean(grads, "data")
-            train_state = train_state.apply_gradients(grads=grads)
-            return train_state, loss, rng_state
-        
-        if distributed_training:
-            train_step = shard_map(train_step, mesh=self.mesh, in_specs=(P(), P(), P('data'), P('data')), out_specs=(P(), P('data'), P()))
-            train_step = jax.pmap(train_step)
-        return train_step
-
-    def _define_validation_step(self):
-        model = self.model
-        loss_fn = self.loss_fn
-        distributed_training = self.distributed_training
-
-        def validation_step(state: SimpleTrainState, batch):
-            preds = model.apply(state.params, batch['image'])
-            expected_output = batch['label']
-            loss = jnp.mean(loss_fn(preds, expected_output))
-            if distributed_training:
-                loss = jax.lax.pmean(loss, "data")
-            metric_updates = state.metrics.single_from_model_output(
-                loss=loss, logits=preds, labels=expected_output)
-            metrics = state.metrics.merge(metric_updates)
-            state = state.replace(metrics=metrics)
-            return state
-        if distributed_training:
-            validation_step = shard_map(validation_step, mesh=self.mesh, in_specs=(P(), P('data')), out_specs=(P()))
-            validation_step = jax.pmap(validation_step)
-        return validation_step
+    def _define_validation_step(self, **kwargs):
+        raise NotImplementedError("Subclasses must define their validation step")
 
     def summary(self):
         input_vars = self.get_input_ones()
