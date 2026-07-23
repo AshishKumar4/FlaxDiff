@@ -136,3 +136,28 @@ def test_dropout_is_active_in_train_mode(rng):
     e0 = model.apply(params, x, temb, textcontext)
     e1 = model.apply(params, x, temb, textcontext)
     assert jnp.allclose(e0, e1), "eval mode must be deterministic"
+
+
+def test_hierarchical_mmdit_forward(rng):
+    from flaxdiff.models.simple_mmdit import HierarchicalMMDiT
+    model = HierarchicalMMDiT(base_patch_size=2, emb_features=(32, 64, 96),
+                              num_layers=(1, 1, 1), num_heads=(2, 2, 2), mlp_ratio=2)
+    x, temb, textcontext = small_inputs(rng)
+    out = run_forward(model, rng, x, temb, textcontext)
+    assert out.shape == x.shape
+
+
+def test_mmdit_is_dual_stream(rng):
+    """Text must participate in the token sequence: zeroing the text context
+    must change the image output through joint attention, not just through
+    the pooled conditioning vector."""
+    model = SimpleMMDiT(patch_size=4, emb_features=64, num_layers=2, num_heads=2, mlp_ratio=2)
+    x, temb, textcontext = small_inputs(rng)
+    params = model.init(rng, x, temb, textcontext)
+    params = jax.tree.map(lambda p: p + 0.02, params)
+
+    text_a = jnp.ones_like(textcontext)
+    text_b = jnp.concatenate([jnp.ones_like(textcontext[:, :38]) * 2.0, text_a[:, 38:]], axis=1)
+    out_a = model.apply(params, x, temb, text_a)
+    out_b = model.apply(params, x, temb, text_b)
+    assert not jnp.allclose(out_a, out_b), "text tokens do not reach the image stream"

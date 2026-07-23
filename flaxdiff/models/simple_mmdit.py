@@ -1,174 +1,139 @@
+"""
+MM-DiT (SD3-style multi-modal DiT) and a hierarchical variant.
+
+The block is a true dual-stream MM-DiT: text and image tokens keep separate
+qkv/mlp/modulation weights and mix through a single joint attention over the
+concatenated sequence. The previous implementation mean-pooled the text into
+the adaLN vector (text never entered the token sequence) and ran attention
+and MLP in parallel off one norm, which roughly halved the effective depth -
+it was a text-modulated DiT, not an MM-DiT.
+"""
+
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from typing import Callable, Any, Optional, Tuple, Sequence, Union, List
+from typing import Optional, Sequence
 import einops
-from functools import partial
 from flax.typing import Dtype, PrecisionLike
 
-# Imports from local modules
-from .vit_common import PatchEmbedding, unpatchify, RotaryEmbedding, RoPEAttention
-from .common import kernel_init, FourierEmbedding, TimeProjection
-from .attention import NormalAttention  # Base for RoPEAttention
-# Replace common.hilbert_indices with improved implementation from hilbert.py
-from .hilbert import hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify
-
-# --- MM-DiT AdaLN-Zero ---
-class MMAdaLNZero(nn.Module):
-    """
-    Adaptive Layer Normalization Zero (AdaLN-Zero) tailored for MM-DiT.
-    Projects time and text embeddings separately, combines them, and then
-    generates modulation parameters (scale, shift, gate) for attention and MLP paths.
-    """
-    features: int
-    dtype: Optional[Dtype] = None
-    precision: PrecisionLike = None
-    norm_epsilon: float = 1e-5
-    use_mean_pooling: bool = True  # Whether to use mean pooling for sequence inputs
-
-    @nn.compact
-    def __call__(self, x, t_emb, text_emb):
-        # x shape: [B, S, F]
-        # t_emb shape: [B, D_t]
-        # text_emb shape: [B, S_text, D_text] or [B, D_text]
-
-        # First normalize the input features
-        norm = nn.LayerNorm(epsilon=self.norm_epsilon,
-                            use_scale=False, use_bias=False, dtype=self.dtype)
-        norm_x = norm(x)  # Shape: [B, S, F]
-
-        # Process time embedding: ensure it has a sequence dimension for later broadcasting
-        if t_emb.ndim == 2:  # [B, D_t]
-            t_emb = jnp.expand_dims(t_emb, axis=1)  # [B, 1, D_t]
-
-        # Process text embedding: if it has a sequence dimension different from x
-        if text_emb.ndim == 2:  # [B, D_text]
-            text_emb = jnp.expand_dims(text_emb, axis=1)  # [B, 1, D_text]
-        elif text_emb.ndim == 3 and self.use_mean_pooling and text_emb.shape[1] != x.shape[1]:
-            # Mean pooling is standard in MM-DiT for handling different sequence lengths
-            text_emb = jnp.mean(
-                text_emb, axis=1, keepdims=True)  # [B, 1, D_text]
-
-        # Project time embedding
-        t_params = nn.Dense(
-            features=6 * self.features,
-            dtype=self.dtype,
-            precision=self.precision,
-            kernel_init=nn.initializers.zeros,  # Zero init is standard in AdaLN-Zero
-            name="ada_t_proj"
-        )(t_emb)  # Shape: [B, 1, 6*F]
-
-        # Project text embedding
-        text_params = nn.Dense(
-            features=6 * self.features,
-            dtype=self.dtype,
-            precision=self.precision,
-            kernel_init=nn.initializers.zeros,  # Zero init
-            name="ada_text_proj"
-        )(text_emb)  # Shape: [B, 1, 6*F] or [B, S_text, 6*F]
-
-        # If text_params still has a sequence dim different from t_params, mean pool it
-        if t_params.shape[1] != text_params.shape[1]:
-            text_params = jnp.mean(text_params, axis=1, keepdims=True)
-
-        # Combine parameters (summing is standard in MM-DiT)
-        ada_params = t_params + text_params  # Shape: [B, 1, 6*F]
-
-        # Split into scale, shift, gate for MLP and Attention
-        scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
-            ada_params, 6, axis=-1)  # Each shape: [B, 1, F]
-
-        scale_mlp = jnp.clip(scale_mlp, -10.0, 10.0)
-        shift_mlp = jnp.clip(shift_mlp, -10.0, 10.0)
-        # Apply modulation for Attention path (broadcasting handled by JAX)
-        x_attn = norm_x * (1 + scale_attn) + shift_attn
-
-        # Apply modulation for MLP path
-        x_mlp = norm_x * (1 + scale_mlp) + shift_mlp
-
-        # Return modulated outputs and gates
-        return x_attn, gate_attn, x_mlp, gate_mlp
+from .dit_common import (
+    PatchSequenceEmbed, ConditioningEmbed, PatchSequenceOutput,
+    neutralized_rope_freqs,
+)
+from .vit_common import RotaryEmbedding, AdaLNParams, apply_rotary_embedding
 
 
-# --- MM-DiT Block ---
 class MMDiTBlock(nn.Module):
-    """
-    A Transformer block adapted for MM-DiT, using MMAdaLNZero for conditioning.
+    """Dual-stream MM-DiT block: per-modality weights, joint attention.
+
+    Both streams are modulated adaLN-Zero style from the same conditioning
+    vector but with separate parameters, then attend jointly over
+    concat([txt, img]) and go through separate sequential MLPs.
     """
     features: int
     num_heads: int
-    rope_emb: RotaryEmbedding  # Pass RoPE module
     mlp_ratio: int = 4
     dropout_rate: float = 0.0
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    # Keep option, though RoPEAttention doesn't use it
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
+    qk_norm: bool = False
 
     def setup(self):
         hidden_features = int(self.features * self.mlp_ratio)
-        # Use the new MMAdaLNZero block
-        self.ada_ln_zero = MMAdaLNZero(
-            self.features, dtype=self.dtype, precision=self.precision, norm_epsilon=self.norm_epsilon)
+        dim_head = self.features // self.num_heads
+        qkv = lambda name: nn.DenseGeneral(
+            features=[self.num_heads, dim_head], axis=-1,
+            dtype=self.dtype, precision=self.precision, use_bias=True, name=name)
+        out_proj = lambda name: nn.DenseGeneral(
+            self.features, axis=(-2, -1),
+            dtype=self.dtype, precision=self.precision, name=name)
+        mlp = lambda name: nn.Sequential([
+            nn.Dense(features=hidden_features, dtype=self.dtype, precision=self.precision),
+            nn.gelu,
+            nn.Dense(features=self.features, dtype=self.dtype, precision=self.precision),
+        ], name=name)
+        norm = lambda name: nn.LayerNorm(
+            epsilon=self.norm_epsilon, use_scale=False, use_bias=False,
+            dtype=self.dtype, name=name)
 
-        # RoPEAttention remains the same
-        self.attention = RoPEAttention(
-            query_dim=self.features,
-            heads=self.num_heads,
-            dim_head=self.features // self.num_heads,
-            dtype=self.dtype,
-            precision=self.precision,
-            use_bias=True,  # Bias is common in DiT attention proj
-            force_fp32_for_softmax=self.force_fp32_for_softmax,
-            rope_emb=self.rope_emb  # Pass RoPE module instance
-        )
+        # image stream
+        self.img_ada = AdaLNParams(self.features, dtype=self.dtype, precision=self.precision)
+        self.img_norm1, self.img_norm2 = norm("img_norm1"), norm("img_norm2")
+        self.img_q, self.img_k, self.img_v = qkv("img_to_q"), qkv("img_to_k"), qkv("img_to_v")
+        self.img_out = out_proj("img_out")
+        self.img_mlp = mlp("img_mlp")
 
-        # Standard MLP block remains the same
-        self.mlp = nn.Sequential([
-            nn.Dense(features=hidden_features, dtype=self.dtype,
-                     precision=self.precision),
-            nn.gelu,  # Consider swish/silu if preferred
-            nn.Dense(features=self.features, dtype=self.dtype,
-                     precision=self.precision)
-        ])
+        # text stream
+        self.txt_ada = AdaLNParams(self.features, dtype=self.dtype, precision=self.precision)
+        self.txt_norm1, self.txt_norm2 = norm("txt_norm1"), norm("txt_norm2")
+        self.txt_q, self.txt_k, self.txt_v = qkv("txt_to_q"), qkv("txt_to_k"), qkv("txt_to_v")
+        self.txt_out = out_proj("txt_out")
+        self.txt_mlp = mlp("txt_mlp")
+
+        if self.qk_norm:
+            self.img_q_norm = nn.RMSNorm(dtype=self.dtype, name="img_q_norm")
+            self.img_k_norm = nn.RMSNorm(dtype=self.dtype, name="img_k_norm")
+            self.txt_q_norm = nn.RMSNorm(dtype=self.dtype, name="txt_q_norm")
+            self.txt_k_norm = nn.RMSNorm(dtype=self.dtype, name="txt_k_norm")
 
         self.dropout = nn.Dropout(rate=self.dropout_rate)
 
     @nn.compact
-    def __call__(self, x, t_emb, text_emb, freqs_cis, train: bool = False):
-        # x shape: [B, S, F]
-        # t_emb shape: [B, D_t] or [B, 1, D_t]
-        # text_emb shape: [B, D_text] or [B, 1, D_text]
+    def __call__(self, img, txt, conditioning, freqs_cis, train: bool = False):
+        S_txt = txt.shape[1]
+        i_scale_mlp, i_shift_mlp, i_gate_mlp, i_scale_attn, i_shift_attn, i_gate_attn = jnp.split(
+            self.img_ada(conditioning), 6, axis=-1)
+        t_scale_mlp, t_shift_mlp, t_gate_mlp, t_scale_attn, t_shift_attn, t_gate_attn = jnp.split(
+            self.txt_ada(conditioning), 6, axis=-1)
 
-        residual = x
+        # --- Joint attention ---
+        img_h = self.img_norm1(img) * (1 + i_scale_attn) + i_shift_attn
+        txt_h = self.txt_norm1(txt) * (1 + t_scale_attn) + t_shift_attn
 
-        # Apply MMAdaLNZero with separate time and text embeddings
-        x_attn, gate_attn, x_mlp, gate_mlp = self.ada_ln_zero(
-            x, t_emb, text_emb)
+        q_i, k_i, v_i = self.img_q(img_h), self.img_k(img_h), self.img_v(img_h)
+        q_t, k_t, v_t = self.txt_q(txt_h), self.txt_k(txt_h), self.txt_v(txt_h)
+        if self.qk_norm:
+            q_i, k_i = self.img_q_norm(q_i), self.img_k_norm(k_i)
+            q_t, k_t = self.txt_q_norm(q_t), self.txt_k_norm(k_t)
 
-        # Attention block (remains the same)
-        attn_output = self.attention(
-            x_attn, context=None, freqs_cis=freqs_cis)  # Self-attention only
-        attn_output = self.dropout(attn_output, deterministic=not train)
-        x = residual + gate_attn * attn_output
+        # RoPE carries 2D position for image tokens only
+        if freqs_cis is not None:
+            freqs_cos, freqs_sin = freqs_cis
+            q_i = einops.rearrange(q_i, 'b s h d -> b h s d')
+            k_i = einops.rearrange(k_i, 'b s h d -> b h s d')
+            q_i = apply_rotary_embedding(q_i, freqs_cos, freqs_sin)
+            k_i = apply_rotary_embedding(k_i, freqs_cos, freqs_sin)
+            q_i = einops.rearrange(q_i, 'b h s d -> b s h d')
+            k_i = einops.rearrange(k_i, 'b h s d -> b s h d')
 
-        # MLP block (remains the same)
-        mlp_output = self.mlp(x_mlp)
-        mlp_output = self.dropout(mlp_output, deterministic=not train)
-        x = x + gate_mlp * mlp_output
+        q = jnp.concatenate([q_t, q_i], axis=1)
+        k = jnp.concatenate([k_t, k_i], axis=1)
+        v = jnp.concatenate([v_t, v_i], axis=1)
 
-        return x
+        attn = nn.dot_product_attention(
+            q, k, v, dtype=self.dtype, broadcast_dropout=False, dropout_rng=None,
+            precision=self.precision, force_fp32_for_softmax=self.force_fp32_for_softmax,
+            deterministic=True)
+        txt_attn, img_attn = attn[:, :S_txt], attn[:, S_txt:]
+
+        img_attn = self.dropout(self.img_out(img_attn), deterministic=not train)
+        txt_attn = self.dropout(self.txt_out(txt_attn), deterministic=not train)
+        img = img + i_gate_attn * img_attn
+        txt = txt + t_gate_attn * txt_attn
+
+        # --- Sequential MLPs ---
+        img_h = self.img_norm2(img) * (1 + i_scale_mlp) + i_shift_mlp
+        img = img + i_gate_mlp * self.dropout(self.img_mlp(img_h), deterministic=not train)
+        txt_h = self.txt_norm2(txt) * (1 + t_scale_mlp) + t_shift_mlp
+        txt = txt + t_gate_mlp * self.dropout(self.txt_mlp(txt_h), deterministic=not train)
+
+        return img, txt
 
 
-# --- SimpleMMDiT ---
 class SimpleMMDiT(nn.Module):
-    """
-    A Simple Multi-Modal Diffusion Transformer (MM-DiT) implementation.
-    Integrates time and text conditioning using separate projections within
-    each transformer block, following the MM-DiT approach. Uses RoPE for
-    patch positional encoding.
-    """
+    """SD3-style MM-DiT: a plain stack of dual-stream blocks."""
     output_channels: int = 3
     patch_size: int = 16
     emb_features: int = 768
@@ -178,48 +143,39 @@ class SimpleMMDiT(nn.Module):
     dropout_rate: float = 0.0  # Typically 0 for diffusion
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    # Passed down, but RoPEAttention uses NormalAttention
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
-    learn_sigma: bool = False  # Option to predict sigma like in DiT paper
-    use_hilbert: bool = False  # Toggle Hilbert patch reorder
+    learn_sigma: bool = False
+    qk_norm: bool = False
+    use_hilbert: bool = False
+    use_zigzag: bool = False
+
+    @property
+    def scan_order(self):
+        assert not (self.use_hilbert and self.use_zigzag), \
+            "use_hilbert and use_zigzag are mutually exclusive"
+        return 'hilbert' if self.use_hilbert else 'zigzag' if self.use_zigzag else 'raster'
 
     def setup(self):
-        self.patch_embed = PatchEmbedding(
+        self.embed = PatchSequenceEmbed(
             patch_size=self.patch_size,
-            embedding_dim=self.emb_features,
+            emb_features=self.emb_features,
+            scan_order=self.scan_order,
             dtype=self.dtype,
-            precision=self.precision
+            precision=self.precision,
         )
-
-        # Time embedding projection (output dim: emb_features)
-        self.time_embed = nn.Sequential([
-            FourierEmbedding(features=self.emb_features),
-            TimeProjection(features=self.emb_features *
-                           self.mlp_ratio),  # Intermediate projection
-            nn.Dense(features=self.emb_features, dtype=self.dtype,
-                     precision=self.precision)  # Final projection
-        ], name="time_embed")
-
-        # Add projection layer for Hilbert patches
-        if self.use_hilbert:
-            self.hilbert_proj = nn.Dense(
-                features=self.emb_features,
-                dtype=self.dtype,
-                precision=self.precision,
-                name="hilbert_projection"
-            )
-        # Text context projection (output dim: emb_features)
-        # Input dim depends on the text encoder output, assumed to be handled externally
-        self.text_proj = nn.Dense(features=self.emb_features, dtype=self.dtype,
-                                  precision=self.precision, name="text_context_proj")
-
-        # Rotary Positional Embedding (for patches)
-        # Dim per head, max_len should cover max number of patches
+        self.conditioning = ConditioningEmbed(
+            emb_features=self.emb_features,
+            mlp_ratio=self.mlp_ratio,
+            dtype=self.dtype,
+            precision=self.precision,
+        )
+        # text tokens enter the sequence, so they need their own projection
+        self.txt_embed = nn.Dense(
+            features=self.emb_features, dtype=self.dtype,
+            precision=self.precision, name="txt_embed")
         self.rope = RotaryEmbedding(
             dim=self.emb_features // self.num_heads, max_seq_len=4096, dtype=self.dtype)
-
-        # Transformer Blocks (use MMDiTBlock)
         self.blocks = [
             MMDiTBlock(
                 features=self.emb_features,
@@ -230,107 +186,35 @@ class SimpleMMDiT(nn.Module):
                 precision=self.precision,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
                 norm_epsilon=self.norm_epsilon,
-                rope_emb=self.rope,  # Pass RoPE instance
+                qk_norm=self.qk_norm,
                 name=f"mmdit_block_{i}"
             ) for i in range(self.num_layers)
         ]
-
-        # Final Layer (Normalization + Linear Projection)
-        self.final_norm = nn.LayerNorm(
-            epsilon=self.norm_epsilon, dtype=self.dtype, name="final_norm")
-        # self.final_norm = nn.RMSNorm(epsilon=self.norm_epsilon, dtype=self.dtype, name="final_norm") # Alternative
-
-        # Predict patch pixels + potentially sigma
-        output_dim = self.patch_size * self.patch_size * self.output_channels
-        if self.learn_sigma:
-            output_dim *= 2  # Predict both mean and variance (or log_variance)
-
-        self.final_proj = nn.Dense(
-            features=output_dim,
-            dtype=jnp.float32,  # fp32 output head - the loss is computed in fp32
+        self.output = PatchSequenceOutput(
+            patch_size=self.patch_size,
+            output_channels=self.output_channels,
+            learn_sigma=self.learn_sigma,
+            modulated=True,
+            norm_epsilon=self.norm_epsilon,
+            dtype=self.dtype,
             precision=self.precision,
-            kernel_init=nn.initializers.zeros,  # Initialize final layer to zero
-            name="final_proj"
         )
 
     @nn.compact
     def __call__(self, x, temb, textcontext, train: bool = False):  # textcontext is required
-        B, H, W, C = x.shape
-        assert H % self.patch_size == 0 and W % self.patch_size == 0, "Image dimensions must be divisible by patch size"
         assert textcontext is not None, "textcontext must be provided for SimpleMMDiT"
+        B, H, W, C = x.shape
 
-        # 1. Patch Embedding
-        if self.use_hilbert:
-            # Use hilbert_patchify which handles both patchification and reordering
-            patches_raw, hilbert_inv_idx = hilbert_patchify(
-                x, self.patch_size)  # Shape [B, S, P*P*C]
-            # Apply projection
-            # Shape [B, S, emb_features]
-            patches = self.hilbert_proj(patches_raw)
-        else:
-            # Shape: [B, num_patches, emb_features]
-            patches = self.patch_embed(x)
-            hilbert_inv_idx = None
+        img, inv_idx = self.embed(x)
+        txt = self.txt_embed(textcontext)
+        cond_emb = self.conditioning(temb, textcontext)
+        freqs_cis = neutralized_rope_freqs(self.rope, img.shape[1], self.scan_order)
 
-        num_patches = patches.shape[1]
-        x_seq = patches
-
-        # 2. Prepare Conditioning Signals
-        t_emb = self.time_embed(temb)      # Shape: [B, emb_features]
-        # Assuming textcontext is [B, context_seq_len, context_dim] or [B, context_dim]
-        # If [B, context_seq_len, context_dim], usually mean/pool or take CLS token first.
-        # Assuming textcontext is already pooled/CLS token: [B, context_dim]
-        text_emb = self.text_proj(textcontext)  # Shape: [B, emb_features]
-
-        # 3. Apply RoPE Frequencies (only to patch tokens)
-        seq_len = x_seq.shape[1]
-        freqs_cos, freqs_sin = self.rope(seq_len)  # Shapes: [S, D_head/2]
-
-        # 4. Apply Transformer Blocks
         for block in self.blocks:
-            # Pass t_emb and text_emb separately to the block
-            x_seq = block(x_seq, t_emb, text_emb,
-                          freqs_cis=(freqs_cos, freqs_sin), train=train)
+            img, txt = block(img, txt, conditioning=cond_emb, freqs_cis=freqs_cis, train=train)
 
-        # 5. Final Layer
-        x_seq = self.final_norm(x_seq)
-        # Shape: [B, num_patches, P*P*C (*2 if learn_sigma)]
-        x_seq = self.final_proj(x_seq)
+        return self.output(img, inv_idx, H, W, conditioning=cond_emb)
 
-        # 6. Unpatchify
-        if self.use_hilbert:
-            # For Hilbert mode, we need to use the specialized unpatchify function
-            if self.learn_sigma:
-                # Split into mean and variance predictions
-                x_mean, x_logvar = jnp.split(x_seq, 2, axis=-1)
-                x_image = hilbert_unpatchify(
-                    x_mean, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
-                # If needed, also unpack the logvar
-                # logvar_image = hilbert_unpatchify(x_logvar, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
-                # return x_image, logvar_image
-                return x_image
-            else:
-                x_image = hilbert_unpatchify(
-                    x_seq, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
-                return x_image
-        else:
-            # Standard patch ordering - use the existing unpatchify function
-            if self.learn_sigma:
-                # Split into mean and variance predictions
-                x_mean, x_logvar = jnp.split(x_seq, 2, axis=-1)
-                x = unpatchify(x_mean, channels=self.output_channels)
-                # Return both mean and logvar if needed by the loss function
-                # For now, just returning the mean prediction like standard diffusion models
-                # logvar = unpatchify(x_logvar, channels=self.output_channels)
-                # return x, logvar
-                return x
-            else:
-                # Shape: [B, H, W, C]
-                x = unpatchify(x_seq, channels=self.output_channels)
-                return x
-
-
-# --- Hierarchical MM-DiT components ---
 
 class PatchMerging(nn.Module):
     """
@@ -428,19 +312,18 @@ class PatchExpanding(nn.Module):
         return expanded, new_H, new_W
 
 
-# --- Hierarchical MM-DiT ---
 class HierarchicalMMDiT(nn.Module):
-    """
-    A Hierarchical Multi-Modal Diffusion Transformer (MM-DiT) implementation
-    based on the PixArt-α architecture. Processes images at multiple resolutions
-    with skip connections between encoder and decoder paths.
-    Follows a U-Net like structure: Fine -> Coarse (Encoder) -> Coarse -> Fine (Decoder).
+    """U-shaped MM-DiT: dual-stream blocks per stage with patch merging on the
+    way down and expansion + skip fusion on the way up.
+
+    Raster order only - the merge/expand grid reshapes assume row-major token
+    order, so a hilbert scan would scramble the neighborhoods being merged.
     """
     output_channels: int = 3
     base_patch_size: int = 8  # Patch size at the *finest* resolution level (stage 0)
-    emb_features: Sequence[int] = (512, 768, 1024)  # Feature dimensions for stages 0, 1, 2 (fine to coarse)
-    num_layers: Sequence[int] = (4, 4, 14)  # Layers per stage (can be asymmetric encoder/decoder if needed)
-    num_heads: Sequence[int] = (8, 12, 16)  # Heads per stage (fine to coarse)
+    emb_features: Sequence[int] = (512, 768, 1024)  # Feature dims for stages, fine to coarse
+    num_layers: Sequence[int] = (4, 4, 14)  # Layers per stage, fine to coarse
+    num_heads: Sequence[int] = (8, 12, 16)  # Heads per stage, fine to coarse
     mlp_ratio: int = 4
     dropout_rate: float = 0.0
     dtype: Optional[Dtype] = None
@@ -448,72 +331,47 @@ class HierarchicalMMDiT(nn.Module):
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False
-    use_hilbert: bool = False
+    qk_norm: bool = False
 
     def setup(self):
         assert len(self.emb_features) == len(self.num_layers) == len(self.num_heads), \
             "Feature dimensions, layers, and heads must have the same number of stages"
-
         num_stages = len(self.emb_features)
 
-        # 1. Initial Patch Embedding (FINEST level - stage 0)
-        self.patch_embed = PatchEmbedding(
+        self.embed = PatchSequenceEmbed(
             patch_size=self.base_patch_size,
-            embedding_dim=self.emb_features[0], # Finest embedding dim
-            dtype=self.dtype,
-            precision=self.precision
-        )
-
-        # 2. Time/Text Embeddings (Projected for each stage)
-        # Base projection to largest dimension first for stability/capacity
-        base_t_emb_dim = self.emb_features[-1]
-        self.time_embed_base = nn.Sequential([
-            FourierEmbedding(features=base_t_emb_dim),
-            TimeProjection(features=base_t_emb_dim * self.mlp_ratio),
-            nn.Dense(features=base_t_emb_dim, dtype=self.dtype, precision=self.precision)
-        ], name="time_embed_base")
-        self.text_proj_base = nn.Dense(
-            features=base_t_emb_dim,
+            emb_features=self.emb_features[0],
+            scan_order='raster',
             dtype=self.dtype,
             precision=self.precision,
-            name="text_context_proj_base"
         )
-        # Projections for each stage (0 to N-1)
-        self.t_emb_projs = [
-            nn.Dense(features=self.emb_features[i], dtype=self.dtype, precision=self.precision, name=f"t_emb_proj_stage{i}")
+        # Base conditioning at the finest dim, projected per stage
+        self.conditioning = ConditioningEmbed(
+            emb_features=self.emb_features[0],
+            mlp_ratio=self.mlp_ratio,
+            dtype=self.dtype,
+            precision=self.precision,
+        )
+        self.cond_projs = [
+            nn.Dense(features=self.emb_features[i], dtype=self.dtype,
+                     precision=self.precision, name=f"cond_proj_stage{i}")
             for i in range(num_stages)
         ]
-        self.text_emb_projs = [
-            nn.Dense(features=self.emb_features[i], dtype=self.dtype, precision=self.precision, name=f"text_emb_proj_stage{i}")
+        # Per-stage text streams (dims differ per stage)
+        self.txt_embeds = [
+            nn.Dense(features=self.emb_features[i], dtype=self.dtype,
+                     precision=self.precision, name=f"txt_embed_stage{i}")
             for i in range(num_stages)
         ]
-
-        # 3. Hilbert projection (if used, applied after initial patch embedding)
-        if self.use_hilbert:
-            self.hilbert_proj = nn.Dense(
-                features=self.emb_features[0], # Match finest embedding dim
-                dtype=self.dtype,
-                precision=self.precision,
-                name="hilbert_projection"
-            )
-
-        # 4. RoPE embeddings for each stage (0 to N-1)
         self.ropes = [
             RotaryEmbedding(
                 dim=self.emb_features[i] // self.num_heads[i],
-                max_seq_len=4096, # Adjust if needed based on max patch count per stage
-                dtype=self.dtype,
-                name=f"rope_stage_{i}"
-            )
+                max_seq_len=4096, dtype=self.dtype, name=f"rope_stage_{i}")
             for i in range(num_stages)
         ]
 
-        # 5. --- Encoder Path (Fine to Coarse) ---
-        encoder_blocks = []
-        patch_mergers = []
-        for stage in range(num_stages):
-            # Blocks for this stage
-            stage_blocks = [
+        def stage_blocks(stage, prefix):
+            return [
                 MMDiTBlock(
                     features=self.emb_features[stage],
                     num_heads=self.num_heads[stage],
@@ -521,204 +379,88 @@ class HierarchicalMMDiT(nn.Module):
                     dropout_rate=self.dropout_rate,
                     dtype=self.dtype,
                     precision=self.precision,
-                        force_fp32_for_softmax=self.force_fp32_for_softmax,
+                    force_fp32_for_softmax=self.force_fp32_for_softmax,
                     norm_epsilon=self.norm_epsilon,
-                    rope_emb=self.ropes[stage],
-                    name=f"encoder_block_stage{stage}_{i}"
-                )
-                # Assuming symmetric layers for now, adjust if needed (e.g., self.num_encoder_layers[stage])
-                for i in range(self.num_layers[stage])
+                    qk_norm=self.qk_norm,
+                    name=f"{prefix}_block_stage{stage}_{i}"
+                ) for i in range(self.num_layers[stage])
             ]
-            encoder_blocks.append(stage_blocks)
 
-            # Patch Merging layer (except for the last/coarsest stage)
-            if stage < num_stages - 1:
-                patch_mergers.append(
-                    PatchMerging(
-                        out_features=self.emb_features[stage + 1], # Target next stage dim
-                        dtype=self.dtype,
-                        precision=self.precision,
-                        norm_epsilon=self.norm_epsilon,
-                        name=f"patch_merger_{stage}"
-                    )
-                )
-        self.encoder_blocks = encoder_blocks
-        self.patch_mergers = patch_mergers
-        
-        # 6. --- Decoder Path (Coarse to Fine) ---
-        decoder_blocks = []
-        patch_expanders = []
-        fusion_layers = []
-        # Iterate from second coarsest stage (N-2) down to finest (0)
-        for stage in range(num_stages - 2, -1, -1):
-            # Patch Expanding layer (Expands from stage+1 to stage)
-            patch_expanders.append(
-                PatchExpanding(
-                    out_features=self.emb_features[stage], # Target current stage dim
-                    dtype=self.dtype,
-                    precision=self.precision,
-                    norm_epsilon=self.norm_epsilon,
-                    name=f"patch_expander_{stage}" # Naming indicates target stage
-                )
-            )
-            # Fusion layer (Combines skip[stage] and expanded[stage+1]->[stage])
-            fusion_layers.append(
-                nn.Sequential([ # Use Sequential for Norm + Dense
-                    nn.LayerNorm(epsilon=self.norm_epsilon, dtype=self.dtype, name=f"fusion_norm_{stage}"),
-                    nn.Dense(
-                        features=self.emb_features[stage], # Output current stage dim
-                        dtype=self.dtype,
-                        precision=self.precision,
-                        name=f"fusion_dense_{stage}"
-                    )
-                ])
-            )
+        # --- Encoder path (fine to coarse) ---
+        self.encoder_blocks = [stage_blocks(s, "encoder") for s in range(num_stages)]
+        self.patch_mergers = [
+            PatchMerging(
+                out_features=self.emb_features[s + 1],
+                dtype=self.dtype,
+                precision=self.precision,
+                norm_epsilon=self.norm_epsilon,
+                name=f"patch_merger_{s}"
+            ) for s in range(num_stages - 1)
+        ]
 
-            # Blocks for this stage (stage N-2 down to 0)
-            # Assuming symmetric layers for now
-            stage_blocks = [
-                MMDiTBlock(
-                    features=self.emb_features[stage],
-                    num_heads=self.num_heads[stage],
-                    mlp_ratio=self.mlp_ratio,
-                    dropout_rate=self.dropout_rate,
-                    dtype=self.dtype,
-                    precision=self.precision,
-                        force_fp32_for_softmax=self.force_fp32_for_softmax,
-                    norm_epsilon=self.norm_epsilon,
-                    rope_emb=self.ropes[stage],
-                    name=f"decoder_block_stage{stage}_{i}"
-                )
-                for i in range(self.num_layers[stage])
-            ]
-            # Append blocks in order: stage N-2, N-3, ..., 0
-            decoder_blocks.append(stage_blocks)
+        # --- Decoder path (coarse to fine), ordered for stages N-2, ..., 0 ---
+        decoder_stages = list(range(num_stages - 2, -1, -1))
+        self.patch_expanders = [
+            PatchExpanding(
+                out_features=self.emb_features[s],
+                dtype=self.dtype,
+                precision=self.precision,
+                norm_epsilon=self.norm_epsilon,
+                name=f"patch_expander_{s}"
+            ) for s in decoder_stages
+        ]
+        self.fusion_layers = [
+            nn.Sequential([
+                nn.LayerNorm(epsilon=self.norm_epsilon, dtype=self.dtype),
+                nn.Dense(features=self.emb_features[s], dtype=self.dtype,
+                         precision=self.precision),
+            ], name=f"fusion_{s}") for s in decoder_stages
+        ]
+        self.decoder_blocks = [stage_blocks(s, "decoder") for s in decoder_stages]
 
-        self.patch_expanders = patch_expanders
-        self.fusion_layers = fusion_layers
-        self.decoder_blocks = decoder_blocks
-        
-        # Note: The lists expanders, fusion_layers, decoder_blocks are now ordered
-        # corresponding to stages N-2, N-3, ..., 0.
-
-        # 7. Final Layer
-        self.final_norm = nn.LayerNorm(
-            epsilon=self.norm_epsilon, dtype=self.dtype, name="final_norm")
-
-        # Output projection to pixels (at finest resolution)
-        output_dim = self.base_patch_size * self.base_patch_size * self.output_channels
-        if self.learn_sigma:
-            output_dim *= 2  # Predict both mean and variance
-
-        self.final_proj = nn.Dense(
-            features=output_dim,
-            dtype=jnp.float32,  # fp32 output head - the loss is computed in fp32
+        self.output = PatchSequenceOutput(
+            patch_size=self.base_patch_size,
+            output_channels=self.output_channels,
+            learn_sigma=self.learn_sigma,
+            modulated=True,
+            norm_epsilon=self.norm_epsilon,
+            dtype=self.dtype,
             precision=self.precision,
-            kernel_init=nn.initializers.zeros,  # Zero init
-            name="final_proj"
         )
 
+    @nn.compact
     def __call__(self, x, temb, textcontext, train: bool = False):
+        assert textcontext is not None, "textcontext must be provided"
         B, H, W, C = x.shape
         num_stages = len(self.emb_features)
-        finest_patch_size = self.base_patch_size
+        assert H % (self.base_patch_size * (2**(num_stages - 1))) == 0 and \
+               W % (self.base_patch_size * (2**(num_stages - 1))) == 0, \
+            f"Image dimensions ({H},{W}) must be divisible by effective coarsest patch size {self.base_patch_size * (2**(num_stages - 1))}"
 
-        # Assertions
-        assert H % (finest_patch_size * (2**(num_stages - 1))) == 0 and \
-               W % (finest_patch_size * (2**(num_stages - 1))) == 0, \
-            f"Image dimensions ({H},{W}) must be divisible by effective coarsest patch size {finest_patch_size * (2**(num_stages - 1))}"
-        assert textcontext is not None, "textcontext must be provided"
+        img, _ = self.embed(x)
+        cond_base = self.conditioning(temb, textcontext)
+        conds = [proj(cond_base) for proj in self.cond_projs]
+        txts = [embed(textcontext) for embed in self.txt_embeds]
 
-        # 1. Initial Patch Embedding (Finest Level - stage 0)
-        H_patches = H // finest_patch_size
-        W_patches = W // finest_patch_size
-        total_patches = H_patches * W_patches # Calculate total patches
-        hilbert_inv_idx = None
-        if self.use_hilbert:
-            # Calculate Hilbert indices and inverse permutation for the *finest* grid
-            fine_idx = hilbert_indices(H_patches, W_patches)
-            # Pass the total number of patches as total_size
-            hilbert_inv_idx = inverse_permutation(fine_idx, total_size=total_patches) # Store for unpatchify
-
-            # Apply Hilbert patchify at the finest level
-            patches_raw, _ = hilbert_patchify(x, finest_patch_size) # We already have inv_idx
-            x_seq = self.hilbert_proj(patches_raw) # Shape [B, S_fine, emb[0]]
-        else:
-            x_seq = self.patch_embed(x) # Shape [B, S_fine, emb[0]]
-            
-        # 2. Prepare Conditioning Signals for each stage
-        t_emb_base = self.time_embed_base(temb)
-        text_emb_base = self.text_proj_base(textcontext)
-        t_embs = [proj(t_emb_base) for proj in self.t_emb_projs] # List for stages 0 to N-1
-        text_embs = [proj(text_emb_base) for proj in self.text_emb_projs] # List for stages 0 to N-1
-
-        # --- Encoder Path (Fine to Coarse: stages 0 to N-1) ---
-        skip_features = {}
-        current_H_patches, current_W_patches = H_patches, W_patches
+        # --- Encoder path ---
+        H_P, W_P = H // self.base_patch_size, W // self.base_patch_size
+        skips = {}
         for stage in range(num_stages):
-            # Apply RoPE for current stage
-            seq_len = x_seq.shape[1]
-            freqs_cos, freqs_sin = self.ropes[stage](seq_len)
-
-            # Apply blocks for this stage
+            freqs_cis = self.ropes[stage](seq_len=img.shape[1])
+            txt = txts[stage]
             for block in self.encoder_blocks[stage]:
-                x_seq = block(x_seq, t_embs[stage], text_embs[stage], freqs_cis=(freqs_cos, freqs_sin), train=train)
-
-            # Store skip features (before merging)
-            skip_features[stage] = x_seq
-
-            # Apply Patch Merging (if not the last/coarsest stage)
+                img, txt = block(img, txt, conditioning=conds[stage], freqs_cis=freqs_cis, train=train)
+            skips[stage] = img
             if stage < num_stages - 1:
-                x_seq, current_H_patches, current_W_patches = self.patch_mergers[stage](
-                    x_seq, current_H_patches, current_W_patches
-                )
+                img, H_P, W_P = self.patch_mergers[stage](img, H_P, W_P)
 
-        # --- Bottleneck ---
-        # x_seq now holds the output of the coarsest stage (stage N-1)
+        # --- Decoder path ---
+        for i, stage in enumerate(range(num_stages - 2, -1, -1)):
+            img, H_P, W_P = self.patch_expanders[i](img, H_P, W_P)
+            img = self.fusion_layers[i](jnp.concatenate([img, skips[stage]], axis=-1))
+            freqs_cis = self.ropes[stage](seq_len=img.shape[1])
+            txt = txts[stage]
+            for block in self.decoder_blocks[i]:
+                img, txt = block(img, txt, conditioning=conds[stage], freqs_cis=freqs_cis, train=train)
 
-        # --- Decoder Path (Coarse to Fine: stages N-2 down to 0) ---
-        # Decoder lists (expanders, fusion, blocks) are ordered for stages N-2, ..., 0
-        for i, stage in enumerate(range(num_stages - 2, -1, -1)): # stage = N-2, N-3, ..., 0; i = 0, 1, ..., N-2
-            # Apply Patch Expanding (Expand from stage+1 feature map to stage feature map)
-            x_seq, current_H_patches, current_W_patches = self.patch_expanders[i](
-                x_seq, current_H_patches, current_W_patches
-            )
-
-            # Fusion with skip connection from corresponding encoder stage
-            skip = skip_features[stage]
-            x_seq = jnp.concatenate([x_seq, skip], axis=-1) # Concatenate along feature dim
-            x_seq = self.fusion_layers[i](x_seq) # Apply fusion (Norm + Dense)
-
-            # Apply RoPE for current stage
-            seq_len = x_seq.shape[1]
-            freqs_cos, freqs_sin = self.ropes[stage](seq_len)
-
-            # Apply blocks for this stage
-            for block in self.decoder_blocks[i]: # Use index i for the decoder block list
-                x_seq = block(x_seq, t_embs[stage], text_embs[stage], freqs_cis=(freqs_cos, freqs_sin), train=train)
-
-        # --- Final Layer ---
-        # x_seq should now be at the finest resolution (stage 0 features)
-        x_seq = self.final_norm(x_seq)
-        x_seq = self.final_proj(x_seq) # Project to patch pixel values
-
-        # --- Unpatchify ---
-        if self.use_hilbert:
-            # Use the inverse Hilbert index calculated for the *finest* grid
-            assert hilbert_inv_idx is not None, "Hilbert inverse index should exist if use_hilbert is True"
-            if self.learn_sigma:
-                x_mean, x_logvar = jnp.split(x_seq, 2, axis=-1)
-                out = hilbert_unpatchify(x_mean, hilbert_inv_idx, finest_patch_size, H, W, self.output_channels)
-                # Optionally return logvar: logvar_image = hilbert_unpatchify(x_logvar, hilbert_inv_idx, finest_patch_size, H, W, self.output_channels)
-            else:
-                out = hilbert_unpatchify(x_seq, hilbert_inv_idx, finest_patch_size, H, W, self.output_channels)
-        else:
-            # Standard unpatchify
-            if self.learn_sigma:
-                 x_mean, x_logvar = jnp.split(x_seq, 2, axis=-1)
-                 out = unpatchify(x_mean, channels=self.output_channels)
-                 # Optionally return logvar: logvar = unpatchify(x_logvar, channels=self.output_channels)
-            else:
-                 out = unpatchify(x_seq, channels=self.output_channels)
-
-        return out
+        return self.output(img, None, H, W, conditioning=conds[0])

@@ -186,14 +186,16 @@ class AdaLNParams(nn.Module): # Renamed for clarity
         if conditioning.ndim == 2:
              conditioning = jnp.expand_dims(conditioning, axis=1)
 
-        # Project conditioning to get 6 params per feature
+        # SiLU then a zero-init projection, as in the DiT paper - without the
+        # nonlinearity every block's 6 modulation vectors are just an affine
+        # map of the same shared vector
         ada_params = nn.Dense(
             features=6 * self.features,
             dtype=self.dtype,
             precision=self.precision,
             kernel_init=nn.initializers.zeros,
             name="ada_proj"
-        )(conditioning)
+        )(nn.silu(conditioning))
         # Return all params (or split if preferred, but maybe return tuple/dict)
         # Shape: [B, 1, 6*F]
         return ada_params # Or split and return tuple: jnp.split(ada_params, 6, axis=-1)
