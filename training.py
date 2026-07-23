@@ -5,14 +5,8 @@ from typing import Any, Tuple, Mapping, Callable, List, Dict
 from functools import partial
 import flax.training.dynamic_scale
 import jax.experimental.multihost_utils
-from flaxdiff.models.common import kernel_init
-from flaxdiff.models.simple_unet import Unet
-from flaxdiff.models.simple_vit import UViT, SimpleUDiT
-from flaxdiff.models.simple_dit import SimpleDiT
-from flaxdiff.models.simple_mmdit import SimpleMMDiT, HierarchicalMMDiT
-from flaxdiff.models.ssm_dit import HybridSSMAttentionDiT
+from flaxdiff.models.registry import build_model, canonicalize_architecture
 from flaxdiff.predictors import get_diffusion_preset
-from diffusers import FlaxUNet2DConditionModel
 from flaxdiff.samplers.euler import EulerAncestralSampler
 import struct as st
 import flax
@@ -109,29 +103,9 @@ parser.add_argument('--dataset_path', type=str,
 parser.add_argument('--noise_schedule', type=str, default='edm',
                     choices=['cosine', 'karras', 'edm'], help='Noise schedule')
 
-parser.add_argument('--architecture', type=str, 
-                    choices=[
-                        "unet", 
-                        # "uvit", 
-                        "simple_udit", 
-                        "diffusers_unet_simple", 
-                        "simple_dit", 
-                        "simple_mmdit", 
-                        "hierarchical_mmdit",
-                        # 'uvit-hilbert',
-                        'simple_dit+hilbert',
-                        'simple_dit+zigzag',
-                        "simple_udit+hilbert",
-                        "simple_mmdit+hilbert",
-                        "hierarchical_mmdit+hilbert",
-                        "hybrid_dit",
-                        "hybrid_dit+hilbert",
-                        "hybrid_dit+zigzag",
-                        "hybrid_dit+2d",
-                        "hybrid_dit+2d+hilbert",
-                        "hybrid_dit+2d+zigzag",
-                    ], 
-                    default="unet", help='Architecture to use')
+# Any name from flaxdiff.models.registry, optionally with +2d/+hilbert/+zigzag
+# suffixes; validated by build_model against the registry itself
+parser.add_argument('--architecture', type=str, default="unet", help='Architecture to use')
 parser.add_argument('--emb_features', type=int, default=256, help='Embedding features')
 parser.add_argument('--feature_depths', type=int, nargs='+', default=[64, 128, 256, 512], help='Feature depths')
 parser.add_argument('--attention_heads', type=int, default=8, help='Number of attention heads')
@@ -233,26 +207,6 @@ def main(args):
     print(f"Number of devices: {jax.device_count()}")
     print(f"Local devices: {jax.local_devices()}")
 
-    DTYPE_MAP = {
-        'bfloat16': jnp.bfloat16,
-        'float32': jnp.float32,
-        'None': None,
-        None: None,
-    }
-
-    PRECISION_MAP = {
-        'high': jax.lax.Precision.HIGH,
-        'default': jax.lax.Precision.DEFAULT,
-        'highes': jax.lax.Precision.HIGHEST,
-        'None': None,
-        None: None,
-    }
-
-    ACTIVATION_MAP = {
-        'swish': jax.nn.swish,
-        'mish': jax.nn.mish,
-    }
-    
     OPTIMIZER_MAP = {
         'adam' : optax.adam,
         'adamw' : optax.adamw,
@@ -263,8 +217,10 @@ def main(args):
     if args.checkpoint_fs == 'gcs':
         CHECKPOINT_DIR = f"gs://{CHECKPOINT_DIR}"
 
-    DTYPE = DTYPE_MAP[args.dtype]
-    PRECISION = PRECISION_MAP[args.precision]
+    # Model configs carry plain strings; build_model resolves them, so the
+    # logged wandb config is exactly the construction input
+    DTYPE = args.dtype
+    PRECISION = args.precision
 
     GRAIN_WORKER_COUNT = args.GRAIN_WORKER_COUNT
     GRAIN_READ_THREAD_COUNT = args.GRAIN_READ_THREAD_COUNT
@@ -339,23 +295,10 @@ def main(args):
             INPUT_CHANNELS = 4
             DIFFUSION_INPUT_SIZE = DIFFUSION_INPUT_SIZE // 8
     
-    use_hilbert = args.use_hilbert
-    use_zigzag = args.use_zigzag
-    use_2d_fusion = args.use_2d_fusion
-    architecture_name = args.architecture
-    # parse '+2d' first so it can coexist with '+hilbert' or '+zigzag'
-    if '+2d' in architecture_name:
-        architecture_name = architecture_name.replace('+2d', '')
-        print("Will use 2D state fusion (Spatial-Mamba-style) in SSM blocks")
-        use_2d_fusion = True
-    if 'hilbert' in architecture_name:
-        architecture_name = architecture_name.split('+')[0]
-        print("Will use Hilbert Patch Reordering")
-        use_hilbert = True
-    elif 'zigzag' in architecture_name:
-        architecture_name = architecture_name.split('+')[0]
-        print("Will use Zigzag (serpentine) Patch Reordering")
-        use_zigzag = True
+    architecture_name, suffix_flags = canonicalize_architecture(args.architecture)
+    use_hilbert = args.use_hilbert or suffix_flags.get('use_hilbert', False)
+    use_zigzag = args.use_zigzag or suffix_flags.get('use_zigzag', False)
+    use_2d_fusion = args.use_2d_fusion or suffix_flags.get('use_2d_fusion', False)
     assert not (use_hilbert and use_zigzag), "use_hilbert and use_zigzag are mutually exclusive"
     
     if 'diffusers' in architecture_name:
@@ -369,9 +312,8 @@ def main(args):
         }
     
     
-    MODEL_ARCHITECUTRES = {
+    ARCHITECTURE_KWARGS = {
         "unet": {
-            "class": Unet,
             "kwargs": {
                 "feature_depths": args.feature_depths,
                 "attention_configs": attention_configs,
@@ -383,7 +325,6 @@ def main(args):
             },
         },
         "uvit": {
-            "class": UViT,
             "kwargs": {
                 "patch_size":  args.patch_size,
                 "num_layers":  args.num_layers,
@@ -396,7 +337,6 @@ def main(args):
             },
         },
         "simple_udit": {
-            "class": SimpleUDiT,
             "kwargs": {
                 "patch_size":  args.patch_size,
                 "num_layers":  args.num_layers,
@@ -407,7 +347,6 @@ def main(args):
             },
         },
         "simple_dit": {
-            "class": SimpleDiT,
             "kwargs": {
                 "patch_size":  args.patch_size,
                 "num_layers":  args.num_layers,
@@ -419,7 +358,6 @@ def main(args):
             },
         },
         "simple_mmdit": {
-            "class": SimpleMMDiT,
             "kwargs": {
                 "patch_size":  args.patch_size,
                 "num_layers":  args.num_layers,
@@ -430,7 +368,6 @@ def main(args):
             },
         },
         "hierarchical_mmdit": {
-            "class": HierarchicalMMDiT,
             "kwargs": {
                 "base_patch_size": args.patch_size // 2,  # Use half the patch size for base
                 "emb_features": (args.emb_features - 256, args.emb_features, args.emb_features + 256),  # Default dims per stage
@@ -442,7 +379,6 @@ def main(args):
             },
         },
         "hybrid_dit": {
-            "class": HybridSSMAttentionDiT,
             "kwargs": {
                 "patch_size": args.patch_size,
                 "num_layers": args.num_layers,
@@ -457,7 +393,6 @@ def main(args):
             },
         },
         "diffusers_unet_simple": {
-            "class": FlaxUNet2DConditionModel,
             "kwargs": {
                 "sample_size": DIFFUSION_INPUT_SIZE,
                 "in_channels": INPUT_CHANNELS,
@@ -472,8 +407,7 @@ def main(args):
         }
     }
     
-    model_architecture = MODEL_ARCHITECUTRES[architecture_name]['class']
-    model_config.update(MODEL_ARCHITECUTRES[architecture_name]['kwargs'])
+    model_config.update(ARCHITECTURE_KWARGS[architecture_name]['kwargs'])
     
     if architecture_name == 'uvit':
         model_config['emb_features'] = 768
@@ -564,19 +498,7 @@ def main(args):
         
     print("Experiment_Name:", experiment_name)
 
-    # Map the activation string to the actual function only for construction.
-    # model_config is aliased into CONFIG (already logged to wandb), so mutating
-    # it here used to leak a live function object into the stored config.
-    construction_config = dict(model_config)
-    if 'activation' in construction_config:
-        construction_config['activation'] = ACTIVATION_MAP[construction_config['activation']]
-
-    model = model_architecture(**construction_config)
-    
-    # If using the Diffusers UNet, we need to wrap it 
-    if 'diffusers' in architecture_name:
-        from flaxdiff.models.general import BCHWModelWrapper
-        model = BCHWModelWrapper(model)
+    model = build_model(architecture_name, model_config)
 
     learning_rate = CONFIG['learning_rate']
     optimizer = OPTIMIZER_MAP[args.optimizer]

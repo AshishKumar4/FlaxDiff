@@ -108,3 +108,33 @@ def test_training_and_inference_share_schedule_presets():
         result = parse_config(make_config(arguments_overrides={"noise_schedule": name}))
         assert type(result["noise_schedule"]) is type(sample)
         assert type(result["prediction_transform"]) is type(transform)
+
+
+def test_registry_builds_every_architecture():
+    """Every registry entry must construct from a minimal string config -
+    the same call path training and inference share."""
+    from flaxdiff.models.registry import MODEL_REGISTRY, build_model
+
+    base = {"emb_features": 64, "dtype": "float32", "precision": "default",
+            "output_channels": 3, "patch_size": 4, "num_layers": 2, "num_heads": 2}
+    per_arch = {
+        "unet": {"feature_depths": [16, 32], "attention_configs": [None, None],
+                 "num_res_blocks": 1, "num_middle_res_blocks": 1,
+                 "activation": "swish", "norm_groups": 4},
+        "uvit": {"num_layers": 4},
+        "simple_udit": {"num_layers": 4},
+        "hierarchical_mmdit": {"emb_features": (32, 64, 96), "num_layers": (1, 1, 1),
+                               "num_heads": (2, 2, 2), "base_patch_size": 2},
+    }
+    for name in MODEL_REGISTRY:
+        config = {**base, **per_arch.get(name, {})}
+        model = build_model(name, config)
+        assert type(model).__name__ == MODEL_REGISTRY[name].__name__
+
+
+def test_registry_suffix_canonicalization():
+    from flaxdiff.models.registry import canonicalize_architecture
+
+    name, flags = canonicalize_architecture("hybrid_dit+2d+hilbert")
+    assert name == "hybrid_dit"
+    assert flags == {"use_2d_fusion": True, "use_hilbert": True}
