@@ -127,26 +127,41 @@ class PatchSequenceOutput(nn.Module):
     patch_size: int
     output_channels: int
     learn_sigma: bool = False
+    modulated: bool = False  # adaLN shift/scale on the final norm (DiT FinalLayer)
     norm_epsilon: float = 1e-5
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
 
-    def setup(self):
-        self.final_norm = nn.LayerNorm(
-            epsilon=self.norm_epsilon, dtype=self.dtype, name="final_norm")
+    @nn.compact
+    def __call__(self, tokens, inv_idx, H, W, conditioning=None):
+        features = tokens.shape[-1]
+        x_out = nn.LayerNorm(
+            epsilon=self.norm_epsilon, use_scale=not self.modulated,
+            use_bias=not self.modulated, dtype=self.dtype, name="final_norm")(tokens)
+        if self.modulated:
+            assert conditioning is not None, "modulated output head needs the conditioning vector"
+            if conditioning.ndim == 2:
+                conditioning = jnp.expand_dims(conditioning, axis=1)
+            shift, scale = jnp.split(nn.Dense(
+                features=2 * features,
+                dtype=self.dtype,
+                precision=self.precision,
+                kernel_init=nn.initializers.zeros,
+                name="final_ada_proj",
+            )(nn.silu(conditioning)), 2, axis=-1)
+            x_out = x_out * (1 + scale) + shift
+
         output_dim = self.patch_size * self.patch_size * self.output_channels
         if self.learn_sigma:
             output_dim *= 2
-        self.final_proj = nn.Dense(
+        x_out = nn.Dense(
             features=output_dim,
             dtype=jnp.float32,  # fp32 output head - the loss is computed in fp32
             precision=self.precision,
             kernel_init=nn.initializers.zeros,
             name="final_proj",
-        )
+        )(x_out)
 
-    def __call__(self, tokens, inv_idx, H, W):
-        x_out = self.final_proj(self.final_norm(tokens))
         if self.learn_sigma:
             x_out, _x_logvar = jnp.split(x_out, 2, axis=-1)
         if inv_idx is not None:
