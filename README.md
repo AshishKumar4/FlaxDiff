@@ -108,15 +108,18 @@ Implemented in `flaxdiff.models`:
 
 ## Installation
 
-To install FlaxDiff, you need to have Python 3.10 or higher. Install the required dependencies using:
+To install FlaxDiff, you need to have Python 3.10 or higher:
 
 ```bash
-pip install -r requirements.txt
+pip install flaxdiff
 ```
 
-The models were trained and tested with jax==0.4.28 and flax==0.8.4. However, when I updated to the latest jax==0.4.30 and flax==0.8.5, 
-the models stopped training. There seems to have been some major change breaking the training dynamics and therefore I would recommend
-sticking to the versions mentioned in the requirements.txt
+Or for development, clone the repo and install in editable mode with the test dependencies:
+
+```bash
+pip install -e .[test]
+pytest -m "not network"
+```
 
 ## Getting Started
 
