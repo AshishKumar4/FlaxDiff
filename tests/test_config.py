@@ -125,6 +125,9 @@ def test_registry_builds_every_architecture():
         "simple_udit": {"num_layers": 4},
         "hierarchical_mmdit": {"emb_features": (32, 64, 96), "num_layers": (1, 1, 1),
                                "num_heads": (2, 2, 2), "base_patch_size": 2},
+        "unet_3d": {"feature_depths": [16, 32], "attention_configs": [None, None],
+                    "num_res_blocks": 1, "num_middle_res_blocks": 1,
+                    "activation": "swish", "norm_groups": 4, "temporal_heads": 2},
     }
     for name in MODEL_REGISTRY:
         config = {**base, **per_arch.get(name, {})}

@@ -328,6 +328,28 @@ def main(args):
                 "norm_groups": args.norm_groups,
             },
         },
+        "unet_3d": {
+            "kwargs": {
+                "feature_depths": args.feature_depths,
+                "attention_configs": attention_configs,
+                "num_res_blocks": args.num_res_blocks,
+                "num_middle_res_blocks": args.num_middle_res_blocks,
+                "named_norms": args.named_norms,
+                "activation": args.activation,
+                "norm_groups": args.norm_groups,
+            },
+        },
+        "video_dit": {
+            "kwargs": {
+                "patch_size":  args.patch_size,
+                "num_layers":  args.num_layers,
+                "num_heads":  args.num_heads,
+                "dropout_rate": args.dropout_rate,
+                "mlp_ratio": args.mlp_ratio,
+                "use_hilbert": use_hilbert,
+                "use_zigzag": use_zigzag,
+            },
+        },
         "uvit": {
             "kwargs": {
                 "patch_size":  args.patch_size,
