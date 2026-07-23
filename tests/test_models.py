@@ -101,17 +101,21 @@ def test_hybrid_dit_forward(rng, kwargs):
     assert out.shape == x.shape
 
 
-@pytest.mark.xfail(strict=True, reason="bug: UViT applies the hilbert permutation twice")
-def test_uvit_hilbert_matches_raster_information(rng):
-    """A zero-layer sanity check: with the permutation applied and inverted once,
-    patch content must land back at its own spatial position. UViT permutes twice
-    on the way in but inverts once on the way out, scrambling the output."""
-    from flaxdiff.models.hilbert import hilbert_patchify, hilbert_unpatchify, hilbert_indices, inverse_permutation
+def test_uvit_hilbert_forward(rng):
+    """UViT used to apply the hilbert permutation twice on the way in but
+    invert it only once on the way out, scrambling every output spatially."""
+    model = UViT(patch_size=4, emb_features=64, num_layers=4, num_heads=2, use_hilbert=True)
+    x, temb, textcontext = small_inputs(rng)
+    out = run_forward(model, rng, x, temb, textcontext)
+    assert out.shape == x.shape
 
-    x = jax.random.normal(rng, (1, 16, 16, 3))
+
+def test_hilbert_patchify_roundtrip(rng):
+    """patchify returns patches in hilbert order plus the inverse permutation;
+    unpatchify with that permutation must be an exact identity."""
+    from flaxdiff.models.hilbert import hilbert_patchify, hilbert_unpatchify
+
+    x = jax.random.normal(rng, (2, 16, 16, 3))
     patches, inv_idx = hilbert_patchify(x, 4)
-    # UViT's forward applies idx again on the already-permuted patches
-    idx = hilbert_indices(4, 4)
-    double_permuted = patches[:, idx, :]
-    rec = hilbert_unpatchify(double_permuted, inv_idx, 4, 16, 16, 3)
+    rec = hilbert_unpatchify(patches, inv_idx, 4, 16, 16, 3)
     assert jnp.allclose(rec, x)

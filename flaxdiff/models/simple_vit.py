@@ -182,13 +182,10 @@ class UViT(nn.Module):
 
         hilbert_inv_idx = None
         if self.use_hilbert:
-            patches_raw, hilbert_inv_idx_calc = hilbert_patchify(
-                x, self.patch_size)
+            # hilbert_patchify already returns the patches in hilbert order
+            # along with the inverse permutation for the output path
+            patches_raw, hilbert_inv_idx = hilbert_patchify(x, self.patch_size)
             x_patches = self.hilbert_proj(patches_raw)
-            idx = hilbert_indices(H_P, W_P)
-            hilbert_inv_idx = inverse_permutation(
-                idx, total_size=num_patches)
-            x_patches = x_patches[:, idx, :]
         else:
             x_patches = self.patch_embed(x)
 
@@ -396,10 +393,8 @@ class SimpleUDiT(nn.Module):
 
         hilbert_inv_idx = None
         if self.use_hilbert:
-            patches_raw, _ = hilbert_patchify(x, self.patch_size)
+            patches_raw, hilbert_inv_idx = hilbert_patchify(x, self.patch_size)
             x_seq = self.hilbert_proj(patches_raw)
-            idx = hilbert_indices(H_P, W_P)
-            hilbert_inv_idx = inverse_permutation(idx, total_size=num_patches)
         else:
             x_seq = self.patch_embed(x)
 

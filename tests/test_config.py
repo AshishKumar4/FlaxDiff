@@ -75,3 +75,26 @@ def test_parse_config_preserves_dotted_values():
     model = result["model"]
     # a dropped key falls back to the class default (swish) instead of erroring
     assert model.activation is jax.nn.mish, "activation was silently dropped"
+
+
+def test_training_and_inference_share_schedule_presets():
+    """--noise_schedule must mean the same thing at train and inference time.
+    Both sides now build from get_diffusion_preset."""
+    from flaxdiff.predictors import get_diffusion_preset
+
+    train, sample, transform = get_diffusion_preset("edm")
+    assert type(train).__name__ == "EDMNoiseScheduler"
+    assert type(sample).__name__ == "KarrasVENoiseScheduler"
+    assert type(transform).__name__ == "KarrasPredictionTransform"
+
+    train, sample, transform = get_diffusion_preset("cosine")
+    assert type(train).__name__ == "CosineNoiseScheduler"
+    assert type(sample).__name__ == "CosineNoiseScheduler"
+    assert type(transform).__name__ == "VPredictionTransform"
+
+    # parse_config must agree with the preset for every name
+    for name in ("edm", "karras", "cosine"):
+        _, sample, transform = get_diffusion_preset(name)
+        result = parse_config(make_config(arguments_overrides={"noise_schedule": name}))
+        assert type(result["noise_schedule"]) is type(sample)
+        assert type(result["prediction_transform"]) is type(transform)
