@@ -80,3 +80,36 @@ def test_restore_preserves_optimizer_state(tmp_path):
     old_ema = jax.tree.leaves(trainer.state.ema_params)
     new_ema = jax.tree.leaves(restored.state.ema_params)
     assert all(np.allclose(a, b) for a, b in zip(old_ema, new_ema)), "ema params were reset"
+
+
+def test_fit_video_model(tmp_path):
+    """Video end to end: 5D batches through the real trainer and the video DiT."""
+    from flaxdiff.models.video_dit import VideoDiT
+
+    train_schedule, _, transform = get_diffusion_preset("edm")
+    trainer = GeneralDiffusionTrainer(
+        model=VideoDiT(patch_size=4, emb_features=16, num_layers=1, num_heads=2, mlp_ratio=1),
+        optimizer=optax.adam(1e-3),
+        noise_schedule=train_schedule,
+        model_output_transform=transform,
+        input_config=DiffusionInputConfig(
+            sample_data_key="video",
+            sample_data_shape=(3, RES, RES, 3),
+            conditions=[],
+        ),
+        rngs=jax.random.PRNGKey(0),
+        name="video-smoke",
+        wandb_config=None,
+        distributed_training=False,
+        checkpoint_base_path=str(tmp_path),
+    )
+
+    def video_batches():
+        frames = np.tile(np.linspace(0, 255, RES, dtype=np.float32)[None, None, :, None, None],
+                         (4, 3, 1, RES, 3))
+        while True:
+            yield {"video": jnp.asarray(frames)}
+
+    data = {"train": video_batches, "train_len": 16, "local_batch_size": 4}
+    state = trainer.fit(data, training_steps_per_epoch=2, epochs=1, val_steps_per_epoch=0)
+    assert int(state.step) == 2

@@ -88,6 +88,7 @@ class DiffusionInputConfig:
     ) -> Dict[str, Tuple[int, ...]]:
         """Get the shapes of the input data."""
         if len(self.sample_data_shape) == 3:
+            T = None
             H, W, C = self.sample_data_shape
         elif len(self.sample_data_shape) == 4:
             T, H, W, C = self.sample_data_shape
@@ -99,8 +100,10 @@ class DiffusionInputConfig:
             W = W // downscale_factor
             C = autoencoder.latent_channels
         
+        # Video models init against the full (T, H, W, C) sample shape
+        sample_shape = (H, W, C) if T is None else (T, H, W, C)
         input_shapes = {
-            sample_model_key: (H, W, C),
+            sample_model_key: sample_shape,
             time_embeddings_model_key: (),
         }
         for cond in self.conditions:
