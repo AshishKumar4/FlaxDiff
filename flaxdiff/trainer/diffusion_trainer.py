@@ -300,7 +300,6 @@ class DiffusionTrainer(SimpleTrainer):
                 resolution=image_size,
                 num_samples=len(labels_seq),
                 diffusion_steps=diffusion_steps,
-                start_step=1000,
                 end_step=0,
                 priors=None,
                 model_conditioning_inputs=(labels_seq,),

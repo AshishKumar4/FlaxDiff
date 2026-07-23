@@ -7,7 +7,7 @@ from flax import linen as nn
 from typing import List, Tuple, Dict, Any, Optional
 
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
-from ..schedulers import NoiseScheduler
+from ..schedulers import NoiseScheduler, get_coeff_shapes_tuple
 from ..utils import RandomMarkovState, MarkovState, clip_images
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, PartitionSpec as P
@@ -25,7 +25,6 @@ class DiffusionSampler:
         input_config: DiffusionInputConfig,
         guidance_scale: float = 0.0,
         autoencoder: AutoEncoder = None,
-        timestep_spacing: str = 'linear',
     ):
         """Initialize the diffusion sampler.
         
@@ -36,26 +35,15 @@ class DiffusionSampler:
             model_output_transform: Transform for model predictions
             guidance_scale: Scale for classifier-free guidance (0.0 means disabled)
             autoencoder: Optional autoencoder for latent diffusion
-            timestep_spacing: Strategy for timestep spacing in sampling
-                             'linear' - Default equal spacing
-                             'quadratic' - Emphasizes early steps
-                             'karras' - Based on EDM paper, better with fewer steps
-                             'exponential' - Concentrates steps near the end
         """
         self.model = model
         self.noise_schedule = noise_schedule
         self.model_output_transform = model_output_transform
         self.guidance_scale = guidance_scale
         self.autoencoder = autoencoder
-        self.timestep_spacing = timestep_spacing
         self.input_config = input_config
         
         unconditionals = input_config.get_unconditionals()
-        
-        # For Karras spacing if needed
-        if hasattr(noise_schedule, 'min_inv_rho') and hasattr(noise_schedule, 'max_inv_rho'):
-            self.min_inv_rho = noise_schedule.min_inv_rho
-            self.max_inv_rho = noise_schedule.max_inv_rho
         
         if self.guidance_scale > 0:
             # Classifier free guidance
@@ -65,7 +53,7 @@ class DiffusionSampler:
                 # Concatenate unconditional and conditional inputs
                 x_t_cat = jnp.concatenate([x_t] * 2, axis=0)
                 t_cat = jnp.concatenate([t] * 2, axis=0)
-                rates_cat = self.noise_schedule.get_rates(t_cat)
+                rates_cat = self.noise_schedule.get_rates(t_cat, get_coeff_shapes_tuple(x_t_cat))
                 c_in_cat = self.model_output_transform.get_input_scale(rates_cat)
                 
                 final_conditionals = []
@@ -92,7 +80,7 @@ class DiffusionSampler:
         else:
             # Unconditional sampling
             def sample_model(params, x_t, t, *conditioning_inputs):
-                rates = self.noise_schedule.get_rates(t)
+                rates = self.noise_schedule.get_rates(t, get_coeff_shapes_tuple(x_t))
                 c_in = self.model_output_transform.get_input_scale(rates)
                 model_output = self.model.apply(
                     params, 
@@ -136,7 +124,7 @@ class DiffusionSampler:
         Returns:
             Tuple of (new samples, updated state)
         """
-        step_ones = jnp.ones((len(current_samples),), dtype=jnp.int32)
+        step_ones = jnp.ones((len(current_samples),), dtype=jnp.float32)
         current_step = step_ones * current_step
         next_step = step_ones * next_step
         
@@ -175,74 +163,30 @@ class DiffusionSampler:
         raise NotImplementedError("Subclasses must implement take_next_step method")
 
 
-    def scale_steps(self, steps):
-        """Scale timesteps to match the noise schedule's range."""
-        scale_factor = self.noise_schedule.max_timesteps / 1000
-        return steps * scale_factor
-
-
     def get_steps(self, start_step, end_step, diffusion_steps):
-        """Get the sequence of timesteps for the diffusion process.
-        
+        """Get the descending sequence of timesteps for the diffusion process.
+
+        Timesteps are in the noise schedule's own domain: [0, max_timesteps],
+        so [0, 1] for the continuous schedules and [0, T] for the discrete ones.
+        Note that for a Karras schedule, linear spacing in t is already the
+        rho-spacing in sigma from the EDM paper.
+
         Args:
-            start_step: Starting timestep (typically the max)
+            start_step: Starting timestep (typically max_timesteps)
             end_step: Ending timestep (typically 0)
             diffusion_steps: Number of steps to use
-            
+
         Returns:
             Array of timesteps for sampling
         """
         step_range = start_step - end_step
         if diffusion_steps is None or diffusion_steps == 0:
-            diffusion_steps = step_range
-        diffusion_steps = min(diffusion_steps, step_range)
-        
-        # Linear spacing (default)
-        if getattr(self, 'timestep_spacing', 'linear') == 'linear':
-            steps = jnp.linspace(
-                end_step, start_step,
-                diffusion_steps, dtype=jnp.int16
-            )[::-1]
-        
-        # Quadratic spacing (emphasizes early steps)
-        elif self.timestep_spacing == 'quadratic':
-            steps = jnp.linspace(0, 1, diffusion_steps) ** 2
-            steps = (start_step - end_step) * steps + end_step
-            steps = jnp.asarray(steps, dtype=jnp.int16)[::-1]
-            
-        # Karras spacing from the EDM paper - often gives better results with fewer steps
-        elif self.timestep_spacing == 'karras':
-            # Implementation based on the EDM paper's recommendations
-            sigma_min = end_step / start_step
-            sigma_max = 1.0
-            rho = 7.0  # Karras paper default, controls the distribution
-            
-            # Create log-spaced steps in sigma space
-            sigmas = jnp.exp(jnp.linspace(
-                jnp.log(sigma_max), jnp.log(sigma_min), diffusion_steps
-            ))
-            steps = jnp.clip(
-                (sigmas ** (1 / rho) - self.min_inv_rho) / 
-                (self.max_inv_rho - self.min_inv_rho), 
-                0, 1
-            ) * start_step
-            steps = jnp.asarray(steps, dtype=jnp.int16)
-            
-        # Exponential spacing (concentrates steps near the end)
-        elif self.timestep_spacing == 'exponential':
-            steps = jnp.linspace(0, 1, diffusion_steps)
-            steps = jnp.exp(steps * jnp.log((start_step + 1) / (end_step + 1))) * (end_step + 1) - 1
-            steps = jnp.clip(steps, end_step, start_step)
-            steps = jnp.asarray(steps, dtype=jnp.int16)[::-1]
-        
-        # Fallback to linear spacing
-        else:
-            steps = jnp.linspace(
-                end_step, start_step,
-                diffusion_steps, dtype=jnp.int16
-            )[::-1]
-            
-        return steps
+            diffusion_steps = int(step_range)
+        if self.noise_schedule.max_timesteps > 1:
+            # Discrete schedules cannot take more steps than they have entries
+            diffusion_steps = min(diffusion_steps, int(step_range))
+
+        return jnp.linspace(start_step, end_step, diffusion_steps, dtype=jnp.float32)
 
 
     def generate_samples(
@@ -374,8 +318,8 @@ class DiffusionSampler:
             steps = self.get_steps(start_step, end_step, diffusion_steps)
 
         for i in tqdm.tqdm(range(0, len(steps))):
-            current_step = self.scale_steps(steps[i])
-            next_step = self.scale_steps(steps[i+1] if i+1 < len(steps) else 0)
+            current_step = steps[i]
+            next_step = steps[i+1] if i+1 < len(steps) else end_step
             
             if i != len(steps) - 1:
                 samples, rngstate = sample_step(
@@ -397,7 +341,6 @@ class DiffusionSampler:
         Returns:
             Tuple of (variance, image_size, image_channels)
         """
-        start_step = self.scale_steps(start_step)
         alpha_n, sigma_n = self.noise_schedule.get_rates(start_step)
         variance = jnp.sqrt(alpha_n ** 2 + sigma_n ** 2)
         

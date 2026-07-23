@@ -392,7 +392,6 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                 num_samples=batch_size,
                 sequence_length=sequence_length,  # Will be None for images
                 diffusion_steps=diffusion_steps,
-                start_step=1000,
                 end_step=0,
                 priors=None,
                 model_conditioning_inputs=tuple(model_conditioning_inputs),

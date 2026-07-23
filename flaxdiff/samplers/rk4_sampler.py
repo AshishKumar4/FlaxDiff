@@ -2,13 +2,14 @@ import jax
 import jax.numpy as jnp
 from .common import DiffusionSampler
 from ..utils import RandomMarkovState, MarkovState
-from ..schedulers import GeneralizedNoiseScheduler
+from ..schedulers import GeneralizedNoiseScheduler, get_coeff_shapes_tuple
 
 class RK4Sampler(DiffusionSampler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         assert issubclass(type(self.noise_schedule), GeneralizedNoiseScheduler), "Noise schedule must be a GeneralizedNoiseScheduler"
-        @jax.jit
+        # Not jitted here: sample_model_fn is a python callable, the model call
+        # inside it is already jitted
         def get_derivative(sample_model_fn, x_t, sigma, state:RandomMarkovState, model_conditioning_inputs) -> tuple[jnp.ndarray, RandomMarkovState]:
             t = self.noise_schedule.get_timesteps(sigma)
             x_0, eps, _ = sample_model_fn(x_t, t, *model_conditioning_inputs)
@@ -17,11 +18,12 @@ class RK4Sampler(DiffusionSampler):
         self.get_derivative = get_derivative
 
     def sample_step(self, sample_model_fn, current_samples:jnp.ndarray, current_step, model_conditioning_inputs, next_step=None, state:MarkovState=None) -> tuple[jnp.ndarray, MarkovState]:
-        step_ones = jnp.ones((current_samples.shape[0], ), dtype=jnp.int32)
+        step_ones = jnp.ones((current_samples.shape[0], ), dtype=jnp.float32)
         current_step = step_ones * current_step
         next_step = step_ones * next_step
-        _, current_sigma = self.noise_schedule.get_rates(current_step)
-        _, next_sigma = self.noise_schedule.get_rates(next_step)
+        shape = get_coeff_shapes_tuple(current_samples)
+        _, current_sigma = self.noise_schedule.get_rates(current_step, shape)
+        _, next_sigma = self.noise_schedule.get_rates(next_step, shape)
 
         dt = next_sigma - current_sigma
 
