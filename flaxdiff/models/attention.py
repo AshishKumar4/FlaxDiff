@@ -12,6 +12,39 @@ import functools
 import math
 from .common import kernel_init
 
+def scaled_dot_product_attention(query, key, value, dtype=None, precision=None,
+                                 force_fp32_for_softmax=True, implementation=None):
+    """The one attention kernel path for every attention module.
+
+    Inputs are [B, S, H, D]. The param trees of the callers never change with
+    the implementation, so checkpoints are interchangeable across hardware:
+
+    - None: flax reference attention (einsum + softmax). Runs everywhere and
+      honors force_fp32_for_softmax; the default.
+    - 'xla' / 'cudnn': jax.nn.dot_product_attention, which dispatches to the
+      fused cudnn flash kernel on supported GPUs.
+    - 'tpu': the pallas TPU flash kernel, with the 1/sqrt(d) scale passed
+      explicitly (the deleted EfficientAttention passed none, which inflated
+      the logits by sqrt(d) and made its checkpoints poisonous).
+    """
+    if implementation is None:
+        return nn.dot_product_attention(
+            query, key, value, dtype=dtype, broadcast_dropout=False,
+            dropout_rng=None, precision=precision,
+            force_fp32_for_softmax=force_fp32_for_softmax, deterministic=True)
+    if implementation in ('xla', 'cudnn'):
+        return jax.nn.dot_product_attention(query, key, value, implementation=implementation)
+    if implementation == 'tpu':
+        from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
+        # pallas wants [B, H, S, D]
+        q = jnp.moveaxis(query, -2, -3)
+        k = jnp.moveaxis(key, -2, -3)
+        v = jnp.moveaxis(value, -2, -3)
+        out = flash_attention(q, k, v, None, sm_scale=1.0 / math.sqrt(query.shape[-1]))
+        return jnp.moveaxis(out, -3, -2)
+    raise ValueError(f"Unknown attention implementation: {implementation}")
+
+
 class NormalAttention(nn.Module):
     """
     Simple implementation of the normal attention.
@@ -25,6 +58,7 @@ class NormalAttention(nn.Module):
     # kernel_init: Callable = kernel_init(1.0)
     force_fp32_for_softmax: bool = True
     qk_norm: bool = False  # RMSNorm on q/k per head (SD3-style bf16 logit safety)
+    attention_impl: Optional[str] = None  # None (reference) | 'xla' | 'cudnn' | 'tpu'
 
     def setup(self):
         inner_dim = self.dim_head * self.heads
@@ -73,10 +107,10 @@ class NormalAttention(nn.Module):
             query = self.q_norm(query)
             key = self.k_norm(key)
         
-        hidden_states = nn.dot_product_attention(
-            query, key, value, dtype=self.dtype, broadcast_dropout=False, 
-            dropout_rng=None, precision=self.precision, force_fp32_for_softmax=self.force_fp32_for_softmax,
-            deterministic=True
+        hidden_states = scaled_dot_product_attention(
+            query, key, value, dtype=self.dtype, precision=self.precision,
+            force_fp32_for_softmax=self.force_fp32_for_softmax,
+            implementation=self.attention_impl,
         )
         proj = self.proj_attn(hidden_states)
         proj = proj.reshape(orig_x_shape)
@@ -156,6 +190,7 @@ class BasicTransformerBlock(nn.Module):
     only_pure_attention:bool = False
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-4
+    attention_impl: Optional[str] = None
     
     def setup(self):
         attenBlock = NormalAttention
@@ -169,7 +204,8 @@ class BasicTransformerBlock(nn.Module):
             use_bias=self.use_bias,
             dtype=self.dtype,
             # kernel_init=self.kernel_init,
-            force_fp32_for_softmax=self.force_fp32_for_softmax
+            force_fp32_for_softmax=self.force_fp32_for_softmax,
+            attention_impl=self.attention_impl
         )
         self.attention2 = attenBlock(
             query_dim=self.query_dim,
@@ -180,7 +216,8 @@ class BasicTransformerBlock(nn.Module):
             use_bias=self.use_bias,
             dtype=self.dtype,
             # kernel_init=self.kernel_init,
-            force_fp32_for_softmax=self.force_fp32_for_softmax
+            force_fp32_for_softmax=self.force_fp32_for_softmax,
+            attention_impl=self.attention_impl
         )
         
         self.ff = FlaxFeedForward(dim=self.query_dim, dtype=self.dtype, precision=self.precision)
@@ -214,6 +251,7 @@ class TransformerBlock(nn.Module):
     use_self_and_cross:bool = True
     only_pure_attention:bool = False
     force_fp32_for_softmax: bool = True
+    attention_impl: Optional[str] = None
     # kernel_init: Callable = kernel_init(1.0)
     norm_inputs: bool = True
     explicitly_add_residual: bool = True
@@ -255,6 +293,7 @@ class TransformerBlock(nn.Module):
             use_cross_only=(not self.use_self_and_cross),
             only_pure_attention=self.only_pure_attention,
             force_fp32_for_softmax=self.force_fp32_for_softmax,
+            attention_impl=self.attention_impl,
             norm_epsilon=self.norm_epsilon
             # kernel_init=self.kernel_init
         )(projected_x, context)

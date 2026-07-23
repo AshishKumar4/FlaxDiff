@@ -5,7 +5,7 @@ from typing import Any, Optional
 import einops
 from flax.typing import Dtype, PrecisionLike
 
-from .attention import NormalAttention
+from .attention import NormalAttention, scaled_dot_product_attention
 
 def unpatchify(x, channels=3, H_P=None, W_P=None):
     patch_size = int((x.shape[2] // channels) ** 0.5)
@@ -158,10 +158,10 @@ class RoPEAttention(NormalAttention):
         query = einops.rearrange(query, 'b h s d -> b s h d')
         key = einops.rearrange(key, 'b h s d -> b s h d')
 
-        hidden_states = nn.dot_product_attention(
-            query, key, value, dtype=self.dtype, broadcast_dropout=False,
-            dropout_rng=None, precision=self.precision, force_fp32_for_softmax=self.force_fp32_for_softmax,
-            deterministic=True
+        hidden_states = scaled_dot_product_attention(
+            query, key, value, dtype=self.dtype, precision=self.precision,
+            force_fp32_for_softmax=self.force_fp32_for_softmax,
+            implementation=self.attention_impl,
         )
 
         proj = self.proj_attn(hidden_states)

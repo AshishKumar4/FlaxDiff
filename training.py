@@ -109,6 +109,9 @@ parser.add_argument('--architecture', type=str, default="unet", help='Architectu
 parser.add_argument('--emb_features', type=int, default=256, help='Embedding features')
 parser.add_argument('--feature_depths', type=int, nargs='+', default=[64, 128, 256, 512], help='Feature depths')
 parser.add_argument('--attention_heads', type=int, default=8, help='Number of attention heads')
+parser.add_argument('--attention_impl', type=str, default=None,
+                    choices=[None, 'xla', 'cudnn', 'tpu'],
+                    help='Fused attention kernel: None (reference), cudnn (GPU flash), tpu (pallas flash)')
 parser.add_argument('--use_projection', type=boolean_string, default=False, help='Use projection')
 parser.add_argument('--use_self_and_cross', type=boolean_string, default=True, help='Use self and cross attention')
 parser.add_argument('--only_pure_attention', type=boolean_string, default=True, help='Use only pure attention or proper transformer in the attention blocks') 
@@ -309,6 +312,7 @@ def main(args):
             "dtype": DTYPE,
             "precision": PRECISION,
             "output_channels": INPUT_CHANNELS,
+            "attention_impl": args.attention_impl,
         }
     
     

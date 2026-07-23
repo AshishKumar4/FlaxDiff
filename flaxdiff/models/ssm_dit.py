@@ -34,6 +34,7 @@ class HybridSSMAttentionDiT(nn.Module):
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False
     qk_norm: bool = False
+    attention_impl: Optional[str] = None
     use_hilbert: bool = False
     use_zigzag: bool = False  # ZigMa-style serpentine scan
     block_pattern: Optional[Sequence[str]] = None  # e.g., ['ssm','ssm','ssm','attn']
@@ -113,6 +114,7 @@ class HybridSSMAttentionDiT(nn.Module):
                     force_fp32_for_softmax=self.force_fp32_for_softmax,
                     norm_epsilon=self.norm_epsilon,
                     qk_norm=self.qk_norm,
+                    attention_impl=self.attention_impl,
                     name=f"dit_block_{i}"
                 ))
         self.blocks = blocks

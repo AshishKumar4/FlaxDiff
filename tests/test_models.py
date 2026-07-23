@@ -161,3 +161,17 @@ def test_mmdit_is_dual_stream(rng):
     out_a = model.apply(params, x, temb, text_a)
     out_b = model.apply(params, x, temb, text_b)
     assert not jnp.allclose(out_a, out_b), "text tokens do not reach the image stream"
+
+
+def test_attention_impl_parity(rng):
+    """Every attention implementation must share one param tree and produce
+    the same outputs. 'xla' (the jax.nn fused entrypoint) is verifiable on
+    CPU; cudnn/tpu dispatch to the same wrapper."""
+    ref = SimpleDiT(patch_size=4, emb_features=64, num_layers=2, num_heads=2, mlp_ratio=2)
+    xla = SimpleDiT(patch_size=4, emb_features=64, num_layers=2, num_heads=2, mlp_ratio=2,
+                    attention_impl="xla")
+    x, temb, textcontext = small_inputs(rng)
+    params = ref.init(rng, x, temb, textcontext)
+    out_ref = ref.apply(params, x, temb, textcontext)
+    out_xla = xla.apply(params, x, temb, textcontext)
+    assert jnp.max(jnp.abs(out_ref - out_xla)) < 1e-4
