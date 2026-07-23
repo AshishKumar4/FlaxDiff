@@ -22,10 +22,21 @@ from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics, convert_to
 
 from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
 from flax.training import dynamic_scale as dynamic_scale_lib
-
-# Reuse the TrainState from the DiffusionTrainer
-from .diffusion_trainer import TrainState, DiffusionTrainer
 import shutil
+
+
+class TrainState(SimpleTrainState):
+    rngs: jax.random.PRNGKey
+    ema_params: dict
+
+    def apply_ema(self, decay: float = 0.999):
+        new_ema_params = jax.tree_util.tree_map(
+            lambda ema, param: decay * ema + (1 - decay) * param,
+            self.ema_params,
+            self.params,
+        )
+        return self.replace(ema_params=new_ema_params)
+
 
 from flaxdiff.metrics.common import EvaluationMetric
 
@@ -66,7 +77,7 @@ def generate_modelname(
     
     return model_name
 
-class GeneralDiffusionTrainer(DiffusionTrainer):
+class GeneralDiffusionTrainer(SimpleTrainer):
     """
     General trainer for diffusion models supporting both images and videos.
     
@@ -91,6 +102,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                  wandb_config: Dict[str, Any] = None,
                  eval_metrics: List[EvaluationMetric] = None,
                  best_tracker_metric: str = "train/best_loss",
+                 ema_decay: float = 0.999,
                  **kwargs
                  ):
         """
@@ -142,18 +154,25 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             self.modelname = modelname
             wandb_config['config']['modelname'] = modelname
         
+        self.noise_schedule = noise_schedule
+        self.model_output_transform = model_output_transform
+        self.unconditional_prob = unconditional_prob
+        self.autoencoder = autoencoder
+        self.ema_decay = ema_decay
+
+        if native_resolution is None:
+            sample_shape = input_config.sample_data_shape
+            native_resolution = sample_shape[-2]
+            if autoencoder is not None:
+                native_resolution = native_resolution * autoencoder.downscale_factor
+        self.native_resolution = native_resolution
+
         super().__init__(
             model=model,
             input_shapes=input_shapes,
             optimizer=optimizer,
-            noise_schedule=noise_schedule,
-            unconditional_prob=unconditional_prob,
-            autoencoder=autoencoder,
-            model_output_transform=model_output_transform,
             rngs=rngs,
             name=name,
-            native_resolution=native_resolution,
-            encoder=None,  # Don't use the default encoder from the parent class
             wandb_config=wandb_config,
             **kwargs
         )
@@ -175,6 +194,45 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             for m in eval_metrics:
                 self.metric_higher_is_better[f"val/{m.name}"] = getattr(m, 'higher_is_better', False)
     
+    def generate_states(
+        self,
+        optimizer: optax.GradientTransformation,
+        rngs: jax.random.PRNGKey,
+        model: nn.Module = None,
+        use_dynamic_scale: bool = False
+    ) -> Tuple[TrainState, TrainState]:
+        print("Generating states for DiffusionTrainer")
+        rngs, subkey = jax.random.split(rngs)
+
+        input_vars = self.get_input_ones()
+        params = model.init(subkey, **input_vars)
+
+        state = TrainState.create(
+            apply_fn=model.apply,
+            params=params,
+            ema_params=params,
+            tx=optimizer,
+            rngs=rngs,
+            metrics=Metrics.empty(),
+            dynamic_scale = dynamic_scale_lib.DynamicScale() if use_dynamic_scale else None
+        )
+        return state, state
+
+    def fit(self, data, training_steps_per_epoch, epochs, val_steps_per_epoch=8, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
+        local_batch_size = data['local_batch_size']
+        validation_step_args = {
+            "sampler_class": sampler_class,
+            "sampling_noise_schedule": sampling_noise_schedule,
+        }
+        return super().fit(
+            data, 
+            train_steps_per_epoch=training_steps_per_epoch, 
+            epochs=epochs, 
+            train_step_args={"batch_size": local_batch_size}, 
+            val_steps_per_epoch=val_steps_per_epoch,
+            validation_step_args=validation_step_args,
+        )
+
     def _is_video_data(self):
         sample_data_shape = self.input_config.sample_data_shape
         return len(sample_data_shape) == 5

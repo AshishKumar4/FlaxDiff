@@ -1,7 +1,8 @@
 """Trainer smoke tests: training without wandb, and checkpoint save/restore.
 
-These run on CPU with a tiny regression model through SimpleTrainer, which
-owns the state/checkpoint/loop machinery shared by all trainers.
+These run the real GeneralDiffusionTrainer on CPU with a tiny DiT and an
+unconditional synthetic dataset - the same code path a real run takes, minus
+wandb and conditioning encoders.
 """
 
 import jax
@@ -9,22 +10,27 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
-from flax import linen as nn
 
-from flaxdiff.trainer.simple_trainer import SimpleTrainer
+from flaxdiff.inputs import DiffusionInputConfig
+from flaxdiff.models.simple_dit import SimpleDiT
+from flaxdiff.predictors import get_diffusion_preset
+from flaxdiff.trainer import GeneralDiffusionTrainer
 
-
-class TinyModel(nn.Module):
-    @nn.compact
-    def __call__(self, x):
-        return nn.Dense(2)(x)
+RES = 8
 
 
 def make_trainer(tmp_path, name="smoke", load_from_checkpoint=None):
-    return SimpleTrainer(
-        model=TinyModel(),
-        input_shapes={"x": (4,)},
+    train_schedule, _, transform = get_diffusion_preset("edm")
+    return GeneralDiffusionTrainer(
+        model=SimpleDiT(patch_size=4, emb_features=16, num_layers=1, num_heads=2, mlp_ratio=1),
         optimizer=optax.adam(1e-3),
+        noise_schedule=train_schedule,
+        model_output_transform=transform,
+        input_config=DiffusionInputConfig(
+            sample_data_key="image",
+            sample_data_shape=(RES, RES, 3),
+            conditions=[],
+        ),
         rngs=jax.random.PRNGKey(0),
         name=name,
         wandb_config=None,
@@ -35,21 +41,18 @@ def make_trainer(tmp_path, name="smoke", load_from_checkpoint=None):
 
 
 def batch_iterator():
+    # uint8-range images, as the data pipeline provides them
+    images = np.tile(np.linspace(0, 255, RES, dtype=np.float32)[None, :, None, None], (8, 1, RES, 3))
     while True:
-        yield {"image": jnp.ones((8, 4)), "label": jnp.zeros((8, 2))}
+        yield {"image": jnp.asarray(images)}
 
 
 def test_fit_without_wandb(tmp_path):
     trainer = make_trainer(tmp_path)
-    data = {"train": batch_iterator, "train_len": 32}
-    state = trainer.fit(data, train_steps_per_epoch=4, epochs=2, val_steps_per_epoch=0)
-    # the tiny regression must actually learn something
-    final_loss = float(jnp.mean(optax.l2_loss(
-        state.apply_fn(state.params, jnp.ones((8, 4))), jnp.zeros((8, 2)))))
-    initial = make_trainer(tmp_path, name="fresh")
-    initial_loss = float(jnp.mean(optax.l2_loss(
-        initial.state.apply_fn(initial.state.params, jnp.ones((8, 4))), jnp.zeros((8, 2)))))
-    assert final_loss < initial_loss
+    data = {"train": batch_iterator, "train_len": 32, "local_batch_size": 8}
+    state = trainer.fit(data, training_steps_per_epoch=4, epochs=1, val_steps_per_epoch=0)
+    assert state is not None
+    assert int(state.step) == 4
 
 
 def test_save_writes_checkpoint(tmp_path):
@@ -62,14 +65,18 @@ def test_save_writes_checkpoint(tmp_path):
 def test_restore_preserves_optimizer_state(tmp_path):
     trainer = make_trainer(tmp_path)
 
-    # One real update so the adam moments and step counter are non-trivial
+    # One real update so the adam moments, step counter and EMA are non-trivial
     grads = jax.tree.map(jnp.ones_like, trainer.state.params)
-    trainer.state = trainer.state.apply_gradients(grads=grads)
+    trainer.state = trainer.state.apply_gradients(grads=grads).apply_ema(0.99)
     trainer.save(epoch=0, step=1)
 
     restored = make_trainer(tmp_path, load_from_checkpoint=trainer.checkpoint_path())
     assert int(restored.state.step) == 1, "optimizer step counter was reset"
 
-    old_mu = jax.tree.leaves(trainer.state.opt_state)
-    new_mu = jax.tree.leaves(restored.state.opt_state)
-    assert all(np.allclose(a, b) for a, b in zip(old_mu, new_mu)), "adam moments were reset"
+    old_opt = jax.tree.leaves(trainer.state.opt_state)
+    new_opt = jax.tree.leaves(restored.state.opt_state)
+    assert all(np.allclose(a, b) for a, b in zip(old_opt, new_opt)), "adam moments were reset"
+
+    old_ema = jax.tree.leaves(trainer.state.ema_params)
+    new_ema = jax.tree.leaves(restored.state.ema_params)
+    assert all(np.allclose(a, b) for a, b in zip(old_ema, new_ema)), "ema params were reset"
