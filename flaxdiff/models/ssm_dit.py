@@ -55,6 +55,7 @@ class S5Layer(nn.Module):
     def __call__(self, u):
         # u: [B, S, F]
         B, S, F = u.shape
+        assert F == self.features, f"S5Layer built for {self.features} features, got {F}"
 
         # A: diagonal complex state matrix, HiPPO init, parameterized as
         # log of the negative real part for stability
@@ -257,7 +258,6 @@ class SSMDiTBlock(nn.Module):
     dropout_rate: float = 0.0
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    use_flash_attention: bool = False  # Ignored, interface compat
     force_fp32_for_softmax: bool = True  # Ignored, interface compat
     norm_epsilon: float = 1e-5
     use_gating: bool = True
@@ -308,6 +308,8 @@ class SSMDiTBlock(nn.Module):
             nn.Dense(features=self.features, dtype=self.dtype, precision=self.precision)
         ])
 
+        self.dropout = nn.Dropout(rate=self.dropout_rate)
+
     def _apply_2d_fusion(self, ssm_output):
         """Un-permute scan-ordered SSM output to a 2D grid, fuse, re-permute back."""
         B, S, F = ssm_output.shape
@@ -351,7 +353,7 @@ class SSMDiTBlock(nn.Module):
         return y_fused
 
     @nn.compact
-    def __call__(self, x, conditioning, freqs_cis):
+    def __call__(self, x, conditioning, freqs_cis, train: bool = False):
         # Get scale/shift/gate parameters
         scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
             self.ada_params_module(conditioning), 6, axis=-1
@@ -365,6 +367,7 @@ class SSMDiTBlock(nn.Module):
 
         if self.use_2d_fusion:
             ssm_output = self._apply_2d_fusion(ssm_output)
+        ssm_output = self.dropout(ssm_output, deterministic=not train)
 
         if self.use_gating:
             x = residual + gate_attn * ssm_output
@@ -376,6 +379,7 @@ class SSMDiTBlock(nn.Module):
         norm_x_mlp = self.norm2(x)
         x_mlp_modulated = norm_x_mlp * (1 + scale_mlp) + shift_mlp
         mlp_output = self.mlp(x_mlp_modulated)
+        mlp_output = self.dropout(mlp_output, deterministic=not train)
 
         if self.use_gating:
             x = residual + gate_mlp * mlp_output
@@ -401,14 +405,11 @@ class HybridSSMAttentionDiT(nn.Module):
     dropout_rate: float = 0.0
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    use_flash_attention: bool = False
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False
     use_hilbert: bool = False
     use_zigzag: bool = False  # ZigMa-style serpentine scan
-    norm_groups: int = 0
-    activation: Callable = jax.nn.swish
     block_pattern: Optional[Sequence[str]] = None  # e.g., ['ssm','ssm','ssm','attn']
     ssm_attention_ratio: str = "3:1"  # e.g., "3:1", "1:1", "all-ssm", "all-attn"
     bidirectional_ssm: bool = True
@@ -500,8 +501,7 @@ class HybridSSMAttentionDiT(nn.Module):
                     dropout_rate=self.dropout_rate,
                     dtype=self.dtype,
                     precision=self.precision,
-                    use_flash_attention=self.use_flash_attention,
-                    force_fp32_for_softmax=self.force_fp32_for_softmax,
+                        force_fp32_for_softmax=self.force_fp32_for_softmax,
                     norm_epsilon=self.norm_epsilon,
                     name=f"dit_block_{i}"
                 ))
@@ -517,14 +517,14 @@ class HybridSSMAttentionDiT(nn.Module):
 
         self.final_proj = nn.Dense(
             features=output_dim,
-            dtype=self.dtype,
+            dtype=jnp.float32,  # fp32 output head - the loss is computed in fp32
             precision=self.precision,
             kernel_init=nn.initializers.zeros,
             name="final_proj"
         )
 
     @nn.compact
-    def __call__(self, x, temb, textcontext=None):
+    def __call__(self, x, temb, textcontext=None, train: bool = False):
         B, H, W, C = x.shape
         assert H % self.patch_size == 0 and W % self.patch_size == 0
 
@@ -579,7 +579,7 @@ class HybridSSMAttentionDiT(nn.Module):
 
         # 4. Hybrid blocks (SSM and attention interleaved)
         for block in self.blocks:
-            x_seq = block(x_seq, conditioning=cond_emb, freqs_cis=(freqs_cos, freqs_sin))
+            x_seq = block(x_seq, conditioning=cond_emb, freqs_cis=(freqs_cos, freqs_sin), train=train)
 
         # 5. Final output
         x_out = self.final_norm(x_seq)

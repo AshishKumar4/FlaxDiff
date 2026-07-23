@@ -180,7 +180,6 @@ class ConvLayer(nn.Module):
                 kernel_size=self.kernel_size,
                 strides=self.strides,
                 padding="SAME",
-                param_dtype=self.dtype,
                 dtype=self.dtype,
                 precision=self.precision
             )

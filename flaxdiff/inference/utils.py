@@ -140,9 +140,15 @@ def parse_config(config, overrides=None):
                     new_config[key] = ACTIVATION_MAP[value]
                 elif value == 'None':
                     new_config[key] = None
-                elif '.'in value:
-                    # Ignore any other string that contains a dot
-                    print(f"Ignoring key {key} with value {value} as it contains a dot.")
+                elif value.startswith('jax.') or value.startswith('jax._src.'):
+                    # Resolve function paths like 'jax.nn.mish' by attribute walk;
+                    # jax._src paths leak from old configs that stored the live
+                    # function object instead of its name
+                    attr_path = value.replace('jax._src.nn.functions', 'jax.nn')
+                    obj = jax
+                    for part in attr_path.split('.')[1:]:
+                        obj = getattr(obj, part)
+                    new_config[key] = obj
                 else:
                     new_config[key] = value
             else:
@@ -221,6 +227,15 @@ def parse_config(config, overrides=None):
     model_class = MODEL_CLASSES.get(architecture)
     if not model_class:
         raise ValueError(f"Unknown architecture: {architecture}. Supported architectures: {', '.join(MODEL_CLASSES.keys())}")
+    
+    # Drop config keys the model no longer has fields for (older runs logged
+    # since-removed flags like use_flash_attention)
+    import dataclasses
+    valid_fields = {f.name for f in dataclasses.fields(model_class)}
+    dropped = sorted(set(model_kwargs) - valid_fields)
+    if dropped:
+        print(f"Dropping config keys not accepted by {model_class.__name__}: {dropped}")
+    model_kwargs = {k: v for k, v in model_kwargs.items() if k in valid_fields}
     
     # Instantiate the model
     model = model_class(**model_kwargs)

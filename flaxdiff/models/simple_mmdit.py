@@ -103,7 +103,6 @@ class MMDiTBlock(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     # Keep option, though RoPEAttention doesn't use it
-    use_flash_attention: bool = False
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
 
@@ -134,8 +133,10 @@ class MMDiTBlock(nn.Module):
                      precision=self.precision)
         ])
 
+        self.dropout = nn.Dropout(rate=self.dropout_rate)
+
     @nn.compact
-    def __call__(self, x, t_emb, text_emb, freqs_cis):
+    def __call__(self, x, t_emb, text_emb, freqs_cis, train: bool = False):
         # x shape: [B, S, F]
         # t_emb shape: [B, D_t] or [B, 1, D_t]
         # text_emb shape: [B, D_text] or [B, 1, D_text]
@@ -149,10 +150,12 @@ class MMDiTBlock(nn.Module):
         # Attention block (remains the same)
         attn_output = self.attention(
             x_attn, context=None, freqs_cis=freqs_cis)  # Self-attention only
+        attn_output = self.dropout(attn_output, deterministic=not train)
         x = residual + gate_attn * attn_output
 
         # MLP block (remains the same)
         mlp_output = self.mlp(x_mlp)
+        mlp_output = self.dropout(mlp_output, deterministic=not train)
         x = x + gate_mlp * mlp_output
 
         return x
@@ -176,13 +179,10 @@ class SimpleMMDiT(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     # Passed down, but RoPEAttention uses NormalAttention
-    use_flash_attention: bool = False
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False  # Option to predict sigma like in DiT paper
     use_hilbert: bool = False  # Toggle Hilbert patch reorder
-    norm_groups: int = 0
-    activation: Callable = jax.nn.swish
 
     def setup(self):
         self.patch_embed = PatchEmbedding(
@@ -228,7 +228,6 @@ class SimpleMMDiT(nn.Module):
                 dropout_rate=self.dropout_rate,
                 dtype=self.dtype,
                 precision=self.precision,
-                use_flash_attention=self.use_flash_attention,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
                 norm_epsilon=self.norm_epsilon,
                 rope_emb=self.rope,  # Pass RoPE instance
@@ -248,14 +247,14 @@ class SimpleMMDiT(nn.Module):
 
         self.final_proj = nn.Dense(
             features=output_dim,
-            dtype=self.dtype,
+            dtype=jnp.float32,  # fp32 output head - the loss is computed in fp32
             precision=self.precision,
             kernel_init=nn.initializers.zeros,  # Initialize final layer to zero
             name="final_proj"
         )
 
     @nn.compact
-    def __call__(self, x, temb, textcontext):  # textcontext is required
+    def __call__(self, x, temb, textcontext, train: bool = False):  # textcontext is required
         B, H, W, C = x.shape
         assert H % self.patch_size == 0 and W % self.patch_size == 0, "Image dimensions must be divisible by patch size"
         assert textcontext is not None, "textcontext must be provided for SimpleMMDiT"
@@ -291,7 +290,7 @@ class SimpleMMDiT(nn.Module):
         for block in self.blocks:
             # Pass t_emb and text_emb separately to the block
             x_seq = block(x_seq, t_emb, text_emb,
-                          freqs_cis=(freqs_cos, freqs_sin))
+                          freqs_cis=(freqs_cos, freqs_sin), train=train)
 
         # 5. Final Layer
         x_seq = self.final_norm(x_seq)
@@ -446,13 +445,10 @@ class HierarchicalMMDiT(nn.Module):
     dropout_rate: float = 0.0
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    use_flash_attention: bool = False
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False
     use_hilbert: bool = False
-    norm_groups: int = 0 # Not used in this structure, maybe remove later
-    activation: Callable = jax.nn.swish # Not used directly here, used in MLP inside MMDiTBlock
 
     def setup(self):
         assert len(self.emb_features) == len(self.num_layers) == len(self.num_heads), \
@@ -525,8 +521,7 @@ class HierarchicalMMDiT(nn.Module):
                     dropout_rate=self.dropout_rate,
                     dtype=self.dtype,
                     precision=self.precision,
-                    use_flash_attention=self.use_flash_attention,
-                    force_fp32_for_softmax=self.force_fp32_for_softmax,
+                        force_fp32_for_softmax=self.force_fp32_for_softmax,
                     norm_epsilon=self.norm_epsilon,
                     rope_emb=self.ropes[stage],
                     name=f"encoder_block_stage{stage}_{i}"
@@ -589,8 +584,7 @@ class HierarchicalMMDiT(nn.Module):
                     dropout_rate=self.dropout_rate,
                     dtype=self.dtype,
                     precision=self.precision,
-                    use_flash_attention=self.use_flash_attention,
-                    force_fp32_for_softmax=self.force_fp32_for_softmax,
+                        force_fp32_for_softmax=self.force_fp32_for_softmax,
                     norm_epsilon=self.norm_epsilon,
                     rope_emb=self.ropes[stage],
                     name=f"decoder_block_stage{stage}_{i}"
@@ -618,13 +612,13 @@ class HierarchicalMMDiT(nn.Module):
 
         self.final_proj = nn.Dense(
             features=output_dim,
-            dtype=self.dtype,
+            dtype=jnp.float32,  # fp32 output head - the loss is computed in fp32
             precision=self.precision,
             kernel_init=nn.initializers.zeros,  # Zero init
             name="final_proj"
         )
 
-    def __call__(self, x, temb, textcontext):
+    def __call__(self, x, temb, textcontext, train: bool = False):
         B, H, W, C = x.shape
         num_stages = len(self.emb_features)
         finest_patch_size = self.base_patch_size
@@ -668,7 +662,7 @@ class HierarchicalMMDiT(nn.Module):
 
             # Apply blocks for this stage
             for block in self.encoder_blocks[stage]:
-                x_seq = block(x_seq, t_embs[stage], text_embs[stage], freqs_cis=(freqs_cos, freqs_sin))
+                x_seq = block(x_seq, t_embs[stage], text_embs[stage], freqs_cis=(freqs_cos, freqs_sin), train=train)
 
             # Store skip features (before merging)
             skip_features[stage] = x_seq
@@ -701,7 +695,7 @@ class HierarchicalMMDiT(nn.Module):
 
             # Apply blocks for this stage
             for block in self.decoder_blocks[i]: # Use index i for the decoder block list
-                x_seq = block(x_seq, t_embs[stage], text_embs[stage], freqs_cis=(freqs_cos, freqs_sin))
+                x_seq = block(x_seq, t_embs[stage], text_embs[stage], freqs_cis=(freqs_cos, freqs_sin), train=train)
 
         # --- Final Layer ---
         # x_seq should now be at the finest resolution (stage 0 features)

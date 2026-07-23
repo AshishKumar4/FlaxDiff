@@ -30,7 +30,7 @@ class Unet(nn.Module):
             self.conv_out_norm = norm()
         
     @nn.compact
-    def __call__(self, x, temb, textcontext):
+    def __call__(self, x, temb, textcontext, train: bool = False):
         # print("embedding features", self.emb_features)
         temb = FourierEmbedding(features=self.emb_features)(temb)
         temb = TimeProjection(features=self.emb_features)(temb)
@@ -74,7 +74,6 @@ class Unet(nn.Module):
                 if attention_config is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
                     x = TransformerBlock(heads=attention_config['heads'], dtype=attention_config.get('dtype', jnp.float32),
                                         dim_head=dim_in // attention_config['heads'],
-                                        use_flash_attention=attention_config.get("flash_attention", False),
                                         use_projection=attention_config.get("use_projection", False),
                                         use_self_and_cross=attention_config.get("use_self_and_cross", True),
                                         precision=attention_config.get("precision", self.precision),
@@ -115,7 +114,6 @@ class Unet(nn.Module):
             if middle_attention is not None and j == self.num_middle_res_blocks - 1:   # Apply attention only on the last block
                 x = TransformerBlock(heads=middle_attention['heads'], dtype=middle_attention.get('dtype', jnp.float32), 
                                     dim_head=middle_dim_out // middle_attention['heads'],
-                                    use_flash_attention=middle_attention.get("flash_attention", False),
                                     use_linear_attention=False,
                                     use_projection=middle_attention.get("use_projection", False),
                                     use_self_and_cross=False,
@@ -161,7 +159,6 @@ class Unet(nn.Module):
                 if attention_config is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
                     x = TransformerBlock(heads=attention_config['heads'], dtype=attention_config.get('dtype', jnp.float32), 
                                         dim_head=dim_out // attention_config['heads'],
-                                        use_flash_attention=attention_config.get("flash_attention", False),
                                         use_projection=attention_config.get("use_projection", False),
                                         use_self_and_cross=attention_config.get("use_self_and_cross", True),
                                         precision=attention_config.get("precision", self.precision),

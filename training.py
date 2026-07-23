@@ -11,10 +11,6 @@ from flaxdiff.models.simple_vit import UViT, SimpleUDiT
 from flaxdiff.models.simple_dit import SimpleDiT
 from flaxdiff.models.simple_mmdit import SimpleMMDiT, HierarchicalMMDiT
 from flaxdiff.models.ssm_dit import HybridSSMAttentionDiT
-try:
-    import jax.experimental.pallas.ops.tpu.flash_attention
-except (ImportError, ModuleNotFoundError):
-    pass
 from flaxdiff.predictors import get_diffusion_preset
 from diffusers import FlaxUNet2DConditionModel
 from flaxdiff.samplers.euler import EulerAncestralSampler
@@ -139,7 +135,6 @@ parser.add_argument('--architecture', type=str,
 parser.add_argument('--emb_features', type=int, default=256, help='Embedding features')
 parser.add_argument('--feature_depths', type=int, nargs='+', default=[64, 128, 256, 512], help='Feature depths')
 parser.add_argument('--attention_heads', type=int, default=8, help='Number of attention heads')
-parser.add_argument('--flash_attention', type=boolean_string, default=False, help='Use Flash Attention')
 parser.add_argument('--use_projection', type=boolean_string, default=False, help='Use projection')
 parser.add_argument('--use_self_and_cross', type=boolean_string, default=True, help='Use self and cross attention')
 parser.add_argument('--only_pure_attention', type=boolean_string, default=True, help='Use only pure attention or proper transformer in the attention blocks') 
@@ -314,14 +309,14 @@ def main(args):
     if args.attention_heads > 0:
         attention_configs += [
             {
-                "heads": args.attention_heads, "dtype": DTYPE, "flash_attention": args.flash_attention,
+                "heads": args.attention_heads, "dtype": DTYPE,
                 "use_projection": args.use_projection, "use_self_and_cross": args.use_self_and_cross,
                 "only_pure_attention": args.only_pure_attention,    
             },
         ] * (len(args.feature_depths) - 2)
         attention_configs += [
             {
-                "heads": args.attention_heads, "dtype": DTYPE, "flash_attention": False,
+                "heads": args.attention_heads, "dtype": DTYPE,
                 "use_projection": False, "use_self_and_cross": args.use_self_and_cross,
                 "only_pure_attention": args.only_pure_attention
             },
@@ -370,9 +365,7 @@ def main(args):
             "emb_features": args.emb_features,
             "dtype": DTYPE,
             "precision": PRECISION,
-            "activation": args.activation,
             "output_channels": INPUT_CHANNELS,
-            "norm_groups": args.norm_groups,
         }
     
     
@@ -385,6 +378,8 @@ def main(args):
                 "num_res_blocks": args.num_res_blocks,
                 "num_middle_res_blocks": args.num_middle_res_blocks,
                 "named_norms": args.named_norms,
+                "activation": args.activation,
+                "norm_groups": args.norm_groups,
             },
         },
         "uvit": {
@@ -393,9 +388,9 @@ def main(args):
                 "patch_size":  args.patch_size,
                 "num_layers":  args.num_layers,
                 "num_heads":  args.num_heads,
-                "dropout_rate": args.dropout_rate,
                 "add_residualblock_output": args.add_residualblock_output,
-                "use_flash_attention": args.flash_attention,
+                "activation": args.activation,
+                "norm_groups": args.norm_groups,
                 "use_self_and_cross": args.use_self_and_cross,
                 "use_hilbert": use_hilbert,
             },
@@ -407,7 +402,6 @@ def main(args):
                 "num_layers":  args.num_layers,
                 "num_heads":  args.num_heads,
                 "dropout_rate": args.dropout_rate,
-                "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
             },
@@ -419,7 +413,6 @@ def main(args):
                 "num_layers":  args.num_layers,
                 "num_heads":  args.num_heads,
                 "dropout_rate": args.dropout_rate,
-                "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
                 "use_zigzag": use_zigzag,
@@ -432,7 +425,6 @@ def main(args):
                 "num_layers":  args.num_layers,
                 "num_heads":  args.num_heads,
                 "dropout_rate": args.dropout_rate,
-                "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
             },
@@ -445,7 +437,6 @@ def main(args):
                 "num_layers": (args.num_layers // 3, args.num_layers // 2, args.num_layers),  # Default layers per stage
                 "num_heads": (args.num_heads - 2, args.num_heads, args.num_heads + 2),  # Default heads per stage
                 "dropout_rate": args.dropout_rate,
-                "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
             },
@@ -457,7 +448,6 @@ def main(args):
                 "num_layers": args.num_layers,
                 "num_heads": args.num_heads,
                 "dropout_rate": args.dropout_rate,
-                "use_flash_attention": args.flash_attention,
                 "mlp_ratio": args.mlp_ratio,
                 "use_hilbert": use_hilbert,
                 "use_zigzag": use_zigzag,
@@ -476,7 +466,6 @@ def main(args):
                 "block_out_channels":args.feature_depths,
                 "cross_attention_dim":args.emb_features,
                 "dtype": DTYPE,
-                "use_memory_efficient_attention": args.flash_attention,
                 "attention_head_dim": args.attention_heads,
                 "only_cross_attention": not args.use_self_and_cross,
             },
@@ -575,10 +564,14 @@ def main(args):
         
     print("Experiment_Name:", experiment_name)
 
-    if 'activation' in model_config:
-        model_config['activation'] = ACTIVATION_MAP[model_config['activation']]
-        
-    model = model_architecture(**model_config)
+    # Map the activation string to the actual function only for construction.
+    # model_config is aliased into CONFIG (already logged to wandb), so mutating
+    # it here used to leak a live function object into the stored config.
+    construction_config = dict(model_config)
+    if 'activation' in construction_config:
+        construction_config['activation'] = ACTIVATION_MAP[construction_config['activation']]
+
+    model = model_architecture(**construction_config)
     
     # If using the Diffusers UNet, we need to wrap it 
     if 'diffusers' in architecture_name:

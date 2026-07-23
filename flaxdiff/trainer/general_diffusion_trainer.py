@@ -279,6 +279,8 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             # Generate noise
             local_rng_state, noise_key = local_rng_state.get_random_key()
             noise = jax.random.normal(noise_key, shape=data.shape, dtype=jnp.float32)
+
+            local_rng_state, dropout_key = local_rng_state.get_random_key()
             
             # Forward diffusion process
             rates = noise_schedule.get_rates(noise_level, get_coeff_shapes_tuple(data))
@@ -288,7 +290,10 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
             def model_loss(params):
                 # Apply model
                 inputs = noise_schedule.transform_inputs(noisy_data * c_in, noise_level)
-                preds = model.apply(params, *inputs, *all_conditional_inputs)
+                preds = model.apply(
+                    params, *inputs, *all_conditional_inputs,
+                    train=True, rngs={'dropout': dropout_key},
+                )
                 
                 # Transform predictions and calculate loss
                 preds = model_output_transform.pred_transform(noisy_data, preds, rates)
@@ -312,8 +317,8 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                 # Handle NaN/Inf gradients
                 select_fn = functools.partial(jnp.where, is_finite)
                 new_state = new_state.replace(
-                    opt_state=jax.tree_map(select_fn, new_state.opt_state, train_state.opt_state),
-                    params=jax.tree_map(select_fn, new_state.params, train_state.params)
+                    opt_state=jax.tree.map(select_fn, new_state.opt_state, train_state.opt_state),
+                    params=jax.tree.map(select_fn, new_state.params, train_state.params)
                 )
             else:
                 # Standard gradient computation

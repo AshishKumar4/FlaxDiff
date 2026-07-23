@@ -175,6 +175,7 @@ class DiffusionTrainer(SimpleTrainer):
             
             local_rng_state, rngs = local_rng_state.get_random_key()
             noise: jax.Array = jax.random.normal(rngs, shape=images.shape, dtype=jnp.float32)
+            local_rng_state, dropout_key = local_rng_state.get_random_key()
             
             # Make sure image is also float32
             images = images.astype(jnp.float32)
@@ -183,7 +184,10 @@ class DiffusionTrainer(SimpleTrainer):
             noisy_images, c_in, expected_output = model_output_transform.forward_diffusion(images, noise, rates)
 
             def model_loss(params):
-                preds = model.apply(params, *noise_schedule.transform_inputs(noisy_images*c_in, noise_level), label_seq)
+                preds = model.apply(
+                    params, *noise_schedule.transform_inputs(noisy_images*c_in, noise_level), label_seq,
+                    train=True, rngs={'dropout': dropout_key},
+                )
                 preds = model_output_transform.pred_transform(noisy_images, preds, rates)
                 nloss = loss_fn(preds, expected_output)
                 # Ignore the loss contribution of images with zero standard deviation

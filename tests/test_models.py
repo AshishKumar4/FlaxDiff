@@ -34,7 +34,7 @@ def test_unet_forward(rng):
     model = Unet(
         emb_features=64,
         feature_depths=[16, 32],
-        attention_configs=[None, {"heads": 2, "dtype": jnp.float32, "flash_attention": False,
+        attention_configs=[None, {"heads": 2, "dtype": jnp.float32,
                                   "use_projection": False, "use_self_and_cross": False}],
         num_res_blocks=1,
         num_middle_res_blocks=1,
@@ -53,7 +53,6 @@ def test_simple_dit_forward(rng):
     assert out.dtype == jnp.float32
 
 
-@pytest.mark.xfail(strict=True, reason="bug: DiT final_proj keeps compute dtype, bf16 output vs fp32 loss")
 def test_simple_dit_bf16_outputs_fp32(rng):
     model = SimpleDiT(patch_size=4, emb_features=64, num_layers=2, num_heads=2,
                       mlp_ratio=2, dtype=jnp.bfloat16)
@@ -119,3 +118,22 @@ def test_hilbert_patchify_roundtrip(rng):
     patches, inv_idx = hilbert_patchify(x, 4)
     rec = hilbert_unpatchify(patches, inv_idx, 4, 16, 16, 3)
     assert jnp.allclose(rec, x)
+
+
+def test_dropout_is_active_in_train_mode(rng):
+    """--dropout_rate used to be threaded into every block and applied nowhere."""
+    model = SimpleDiT(patch_size=4, emb_features=64, num_layers=2, num_heads=2,
+                      mlp_ratio=2, dropout_rate=0.5)
+    x, temb, textcontext = small_inputs(rng)
+    params = model.init(rng, x, temb, textcontext)
+    # nudge every param off init: the zero-initialized adaLN gates and final
+    # projection make a fresh DiT output exactly zero, hiding dropout
+    params = jax.tree.map(lambda p: p + 0.02, params)
+
+    d0 = model.apply(params, x, temb, textcontext, train=True, rngs={"dropout": jax.random.PRNGKey(1)})
+    d1 = model.apply(params, x, temb, textcontext, train=True, rngs={"dropout": jax.random.PRNGKey(2)})
+    assert not jnp.allclose(d0, d1), "different dropout rngs must give different outputs"
+
+    e0 = model.apply(params, x, temb, textcontext)
+    e1 = model.apply(params, x, temb, textcontext)
+    assert jnp.allclose(e0, e1), "eval mode must be deterministic"
