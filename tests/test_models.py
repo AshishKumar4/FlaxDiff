@@ -204,3 +204,53 @@ def test_video_dit_temporal_mixing(rng):
     x_perturbed = x.at[:, 0].add(1.0)
     out_b = model.apply(params, x_perturbed, temb, None)
     assert not jnp.allclose(out_a[:, 2], out_b[:, 2]), "no information flow across frames"
+
+
+def test_unet3d_inflation_reproduces_2d_unet(rng):
+    """A UNet3D inflated from a 2D Unet checkpoint must reproduce the 2D model
+    frame by frame exactly - the temporal blocks are zero-initialized, so
+    training starts from the pretrained image model and only learns motion."""
+    from flaxdiff.models.unet_3d import UNet3D, inflate_unet_params
+
+    config = dict(
+        emb_features=64,
+        feature_depths=[16, 32],
+        attention_configs=[None, {"heads": 2, "dtype": jnp.float32,
+                                  "use_projection": False, "use_self_and_cross": False}],
+        num_res_blocks=1,
+        num_middle_res_blocks=1,
+    )
+    model_2d = Unet(**config)
+    model_3d = UNet3D(**config, temporal_heads=2)
+
+    x = jax.random.normal(rng, (2, 3, 16, 16, 3))
+    temb = jnp.ones((2,))
+    textcontext = jnp.ones((2, 77, 768), dtype=jnp.float32)
+
+    params_2d = model_2d.init(rng, x[:, 0], temb, textcontext)
+    params_3d = model_3d.init(jax.random.PRNGKey(7), x, temb, textcontext)
+    inflated = {"params": inflate_unet_params(params_2d["params"], params_3d["params"])}
+
+    out_3d = model_3d.apply(inflated, x, temb, textcontext)
+    frames_2d = jnp.stack(
+        [model_2d.apply(params_2d, x[:, t], temb, textcontext) for t in range(3)], axis=1)
+    assert out_3d.shape == x.shape
+    assert jnp.max(jnp.abs(out_3d - frames_2d)) < 1e-5, "inflated UNet3D does not match the 2D model"
+
+
+def test_unet3d_temporal_mixing_after_training_signal(rng):
+    """Once the temporal gate is nudged off zero, frames must exchange information."""
+    from flaxdiff.models.unet_3d import UNet3D
+
+    model = UNet3D(emb_features=64, feature_depths=[16, 32],
+                   attention_configs=[None, None], num_res_blocks=1,
+                   num_middle_res_blocks=1, temporal_heads=2)
+    x = jax.random.normal(rng, (1, 3, 16, 16, 3))
+    temb = jnp.ones((1,))
+    textcontext = jnp.ones((1, 77, 768), dtype=jnp.float32)
+    params = model.init(rng, x, temb, textcontext)
+    params = jax.tree.map(lambda p: p + 0.02, params)
+
+    out_a = model.apply(params, x, temb, textcontext)
+    out_b = model.apply(params, x.at[:, 0].add(1.0), temb, textcontext)
+    assert not jnp.allclose(out_a[:, 2], out_b[:, 2]), "no information flow across frames"

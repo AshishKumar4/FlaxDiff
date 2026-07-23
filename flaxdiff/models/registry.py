@@ -17,6 +17,7 @@ from .simple_dit import SimpleDiT
 from .simple_mmdit import SimpleMMDiT, HierarchicalMMDiT
 from .ssm_dit import HybridSSMAttentionDiT
 from .video_dit import VideoDiT
+from .unet_3d import UNet3D
 
 MODEL_REGISTRY = {
     'unet': Unet,
@@ -27,6 +28,7 @@ MODEL_REGISTRY = {
     'hierarchical_mmdit': HierarchicalMMDiT,
     'hybrid_dit': HybridSSMAttentionDiT,
     'video_dit': VideoDiT,
+    'unet_3d': UNet3D,
 }
 
 ARCHITECTURE_SUFFIX_FLAGS = {
