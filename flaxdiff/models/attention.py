@@ -24,6 +24,7 @@ class NormalAttention(nn.Module):
     use_bias: bool = True
     # kernel_init: Callable = kernel_init(1.0)
     force_fp32_for_softmax: bool = True
+    qk_norm: bool = False  # RMSNorm on q/k per head (SD3-style bf16 logit safety)
 
     def setup(self):
         inner_dim = self.dim_head * self.heads
@@ -39,6 +40,10 @@ class NormalAttention(nn.Module):
         self.query = dense(name="to_q")
         self.key = dense(name="to_k")
         self.value = dense(name="to_v")
+
+        if self.qk_norm:
+            self.q_norm = nn.RMSNorm(dtype=self.dtype, name="q_norm")
+            self.k_norm = nn.RMSNorm(dtype=self.dtype, name="k_norm")
 
         self.proj_attn = nn.DenseGeneral(
             self.query_dim, 
@@ -64,6 +69,9 @@ class NormalAttention(nn.Module):
         query = self.query(x)
         key = self.key(context)
         value = self.value(context)
+        if self.qk_norm:
+            query = self.q_norm(query)
+            key = self.k_norm(key)
         
         hidden_states = nn.dot_product_attention(
             query, key, value, dtype=self.dtype, broadcast_dropout=False, 

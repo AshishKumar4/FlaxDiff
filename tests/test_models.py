@@ -61,7 +61,6 @@ def test_simple_dit_bf16_outputs_fp32(rng):
     assert out.dtype == jnp.float32
 
 
-@pytest.mark.xfail(strict=True, reason="bug: unpatchify assumes a square patch grid")
 def test_simple_dit_non_square(rng):
     model = SimpleDiT(patch_size=4, emb_features=64, num_layers=2, num_heads=2, mlp_ratio=2)
     x = jax.random.normal(rng, (2, 16, 64, 3))

@@ -7,13 +7,15 @@ from flax.typing import Dtype, PrecisionLike
 
 from .attention import NormalAttention
 
-def unpatchify(x, channels=3):
+def unpatchify(x, channels=3, H_P=None, W_P=None):
     patch_size = int((x.shape[2] // channels) ** 0.5)
-    h = w = int(x.shape[1] ** .5)
-    assert h * w == x.shape[1] and patch_size ** 2 * \
-        channels == x.shape[2], f"Invalid shape: {x.shape}, should be {h*w}, {patch_size**2*channels}"
+    if H_P is None or W_P is None:
+        # No grid given - only valid for square grids
+        H_P = W_P = int(x.shape[1] ** .5)
+    assert H_P * W_P == x.shape[1] and patch_size ** 2 * \
+        channels == x.shape[2], f"Invalid shape: {x.shape}, should be {H_P*W_P}, {patch_size**2*channels}"
     x = einops.rearrange(
-        x, 'B (h w) (p1 p2 C) -> B (h p1) (w p2) C', h=h, p1=patch_size, p2=patch_size)
+        x, 'B (h w) (p1 p2 C) -> B (h p1) (w p2) C', h=H_P, w=W_P, p1=patch_size, p2=patch_size)
     return x
 
 
@@ -128,6 +130,9 @@ class RoPEAttention(NormalAttention):
         query = self.query(x)      # [B, S, H, D]
         key = self.key(context)    # [B, S_ctx, H, D]
         value = self.value(context)  # [B, S_ctx, H, D]
+        if self.qk_norm:
+            query = self.q_norm(query)
+            key = self.k_norm(key)
 
         if freqs_cis is None and self.rope_emb is not None:
             seq_len_q = query.shape[1]  # Use query's sequence length

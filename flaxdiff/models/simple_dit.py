@@ -1,109 +1,17 @@
-import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from typing import Callable, Any, Optional, Tuple, Sequence, Union
-import einops
-from functools import partial
-
-# Re-use existing components if they are suitable
-from .vit_common import PatchEmbedding, unpatchify, RotaryEmbedding, RoPEAttention, AdaLNParams
-from .common import kernel_init, FourierEmbedding, TimeProjection
-# Using NormalAttention for RoPE integration
-from .attention import NormalAttention
+from typing import Optional
 from flax.typing import Dtype, PrecisionLike
 
-# Use our improved Hilbert implementation
-from .hilbert import (
-    hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify,
-    zigzag_indices, zigzag_patchify, zigzag_unpatchify,
-    build_2d_sincos_pos_embed,
+from .dit_common import (
+    PatchSequenceEmbed, ConditioningEmbed, PatchSequenceOutput,
+    ModulatedBlock, neutralized_rope_freqs,
 )
+from .vit_common import RotaryEmbedding
 
-# --- DiT Block ---
-class DiTBlock(nn.Module):
-    features: int
-    num_heads: int
-    rope_emb: RotaryEmbedding
-    mlp_ratio: int = 4
-    dropout_rate: float = 0.0
-    dtype: Optional[Dtype] = None
-    precision: PrecisionLike = None
-    force_fp32_for_softmax: bool = True
-    norm_epsilon: float = 1e-5
-    use_gating: bool = True # Add flag to easily disable gating
-
-    def setup(self):
-        hidden_features = int(self.features * self.mlp_ratio)
-        # Get modulation parameters (scale, shift, gates)
-        self.ada_params_module = AdaLNParams( # Use the modified module
-            self.features, dtype=self.dtype, precision=self.precision)
-
-        # Layer Norms - one before Attn, one before MLP
-        self.norm1 = nn.LayerNorm(epsilon=self.norm_epsilon, use_scale=False, use_bias=False, dtype=self.dtype, name="norm1")
-        self.norm2 = nn.LayerNorm(epsilon=self.norm_epsilon, use_scale=False, use_bias=False, dtype=self.dtype, name="norm2")
-
-        self.attention = RoPEAttention(
-            query_dim=self.features,
-            heads=self.num_heads,
-            dim_head=self.features // self.num_heads,
-            dtype=self.dtype,
-            precision=self.precision,
-            use_bias=True,
-            force_fp32_for_softmax=self.force_fp32_for_softmax,
-            rope_emb=self.rope_emb
-        )
-
-        self.mlp = nn.Sequential([
-            nn.Dense(features=hidden_features, dtype=self.dtype, precision=self.precision),
-            nn.gelu, # Or swish as specified in SimpleDiT? Consider consistency.
-            nn.Dense(features=self.features, dtype=self.dtype, precision=self.precision)
-        ])
-
-        self.dropout = nn.Dropout(rate=self.dropout_rate)
-
-    @nn.compact
-    def __call__(self, x, conditioning, freqs_cis, train: bool = False):
-        # Get scale/shift/gate parameters
-        # Shape: [B, 1, 6*F] -> split into 6 of [B, 1, F]
-        scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
-             self.ada_params_module(conditioning), 6, axis=-1
-        )
-
-        # --- Attention Path ---
-        residual = x
-        norm_x_attn = self.norm1(x)
-        # Modulate after norm
-        x_attn_modulated = norm_x_attn * (1 + scale_attn) + shift_attn
-        attn_output = self.attention(x_attn_modulated, context=None, freqs_cis=freqs_cis)
-        attn_output = self.dropout(attn_output, deterministic=not train)
-
-        if self.use_gating:
-             x = residual + gate_attn * attn_output
-        else:
-             x = residual + attn_output # Original DiT style without gate
-
-        # --- MLP Path ---
-        residual = x
-        norm_x_mlp = self.norm2(x) # Apply second LayerNorm
-        # Modulate after norm
-        x_mlp_modulated = norm_x_mlp * (1 + scale_mlp) + shift_mlp
-        mlp_output = self.mlp(x_mlp_modulated)
-        mlp_output = self.dropout(mlp_output, deterministic=not train)
-
-        if self.use_gating:
-             x = residual + gate_mlp * mlp_output
-        else:
-             x = residual + mlp_output # Original DiT style without gate
-
-        return x
-
-
-# --- Patch Embedding (reuse or define if needed) ---
-# Assuming PatchEmbedding exists in simple_vit.py and is suitable
-
-# --- DiT ---
 
 class SimpleDiT(nn.Module):
+    """Standard DiT: a plain stack of adaLN-Zero attention blocks."""
     output_channels: int = 3
     patch_size: int = 16
     emb_features: int = 768
@@ -113,178 +21,68 @@ class SimpleDiT(nn.Module):
     dropout_rate: float = 0.0  # Typically 0 for diffusion
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    # Passed down, but RoPEAttention uses NormalAttention
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
-    learn_sigma: bool = False  # Option to predict sigma like in DiT paper
-    use_hilbert: bool = False  # Toggle Hilbert patch reorder
-    use_zigzag: bool = False  # Toggle zigzag (serpentine) patch reorder
+    learn_sigma: bool = False
+    qk_norm: bool = False
+    use_hilbert: bool = False
+    use_zigzag: bool = False
 
-    def setup(self):
-        self.patch_embed = PatchEmbedding(
-            patch_size=self.patch_size,
-            embedding_dim=self.emb_features,
-            dtype=self.dtype,
-            precision=self.precision
-        )
-
+    @property
+    def scan_order(self):
         assert not (self.use_hilbert and self.use_zigzag), \
             "use_hilbert and use_zigzag are mutually exclusive"
+        return 'hilbert' if self.use_hilbert else 'zigzag' if self.use_zigzag else 'raster'
 
-        # Add projection layer for Hilbert/zigzag reordered patches (raw patch
-        # extraction + Dense instead of the Conv-based PatchEmbedding)
-        if self.use_hilbert or self.use_zigzag:
-            self.hilbert_proj = nn.Dense(
-                features=self.emb_features,
-                dtype=self.dtype,
-                precision=self.precision,
-                name="hilbert_projection"
-            )
-
-        # Time embedding projection
-        self.time_embed = nn.Sequential([
-            FourierEmbedding(features=self.emb_features),
-            TimeProjection(features=self.emb_features *
-                           self.mlp_ratio),  # Project to MLP dim
-            nn.Dense(features=self.emb_features, dtype=self.dtype,
-                     precision=self.precision)  # Final projection
-        ])
-
-        # Text context projection (if used)
-        # Assuming textcontext is already projected to some dimension, project it to match emb_features
-        # This might need adjustment based on how text context is provided
-        self.text_proj = nn.Dense(features=self.emb_features, dtype=self.dtype,
-                                  precision=self.precision, name="text_context_proj")
-
-        # Rotary Positional Embedding
-        # Max length needs to be estimated or set large enough.
-        # For images, seq len = (H/P) * (W/P). Example: 256/16 * 256/16 = 16*16 = 256
-        # Add 1 if a class token is used, or more for text tokens if concatenated.
-        # Let's assume max seq len accommodates patches + time + text tokens if needed, or just patches.
-        # If only patches use RoPE, max_len = max_image_tokens
-        # If time/text are concatenated *before* blocks, max_len needs to include them.
-        # DiT typically applies PE only to patch tokens. Let's follow that.
-        # max_len should be max number of patches.
-        # Example: max image size 512x512, patch 16 -> (512/16)^2 = 32^2 = 1024 patches
+    def setup(self):
+        self.embed = PatchSequenceEmbed(
+            patch_size=self.patch_size,
+            emb_features=self.emb_features,
+            scan_order=self.scan_order,
+            dtype=self.dtype,
+            precision=self.precision,
+        )
+        self.conditioning = ConditioningEmbed(
+            emb_features=self.emb_features,
+            mlp_ratio=self.mlp_ratio,
+            dtype=self.dtype,
+            precision=self.precision,
+        )
         self.rope = RotaryEmbedding(
-            dim=self.emb_features // self.num_heads, max_seq_len=4096, dtype=self.dtype)  # Dim per head
-
-        # Transformer Blocks
+            dim=self.emb_features // self.num_heads, max_seq_len=4096, dtype=self.dtype)
         self.blocks = [
-            DiTBlock(
+            ModulatedBlock(
                 features=self.emb_features,
                 num_heads=self.num_heads,
+                rope_emb=self.rope,
+                mixer='attention',
                 mlp_ratio=self.mlp_ratio,
                 dropout_rate=self.dropout_rate,
                 dtype=self.dtype,
                 precision=self.precision,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
                 norm_epsilon=self.norm_epsilon,
-                rope_emb=self.rope,  # Pass RoPE instance
+                qk_norm=self.qk_norm,
                 name=f"dit_block_{i}"
             ) for i in range(self.num_layers)
         ]
-
-        # Final Layer (Normalization + Linear Projection)
-        self.final_norm = nn.LayerNorm(
-            epsilon=self.norm_epsilon, dtype=self.dtype, name="final_norm")
-        # self.final_norm = nn.RMSNorm(epsilon=self.norm_epsilon, dtype=self.dtype, name="final_norm")
-
-        # Predict patch pixels + potentially sigma
-        output_dim = self.patch_size * self.patch_size * self.output_channels
-        if self.learn_sigma:
-            output_dim *= 2  # Predict both mean and variance (or log_variance)
-
-        self.final_proj = nn.Dense(
-            features=output_dim,
-            dtype=jnp.float32,  # fp32 output head - the loss is computed in fp32
+        self.output = PatchSequenceOutput(
+            patch_size=self.patch_size,
+            output_channels=self.output_channels,
+            learn_sigma=self.learn_sigma,
+            norm_epsilon=self.norm_epsilon,
+            dtype=self.dtype,
             precision=self.precision,
-            kernel_init=nn.initializers.zeros,  # Initialize final layer to zero
-            name="final_proj"
         )
 
     @nn.compact
     def __call__(self, x, temb, textcontext=None, train: bool = False):
         B, H, W, C = x.shape
-        assert H % self.patch_size == 0 and W % self.patch_size == 0, "Image dimensions must be divisible by patch size"
+        x_seq, inv_idx = self.embed(x)
+        cond_emb = self.conditioning(temb, textcontext)
+        freqs_cis = neutralized_rope_freqs(self.rope, x_seq.shape[1], self.scan_order)
 
-        # Compute dimensions in terms of patches
-        H_P = H // self.patch_size
-        W_P = W // self.patch_size
-
-        # 1. Patch Embedding (raster, hilbert or zigzag order)
-        scan_inv_idx = None
-        if self.use_hilbert:
-            patches_raw, scan_inv_idx = hilbert_patchify(x, self.patch_size)
-            patches = self.hilbert_proj(patches_raw)
-        elif self.use_zigzag:
-            patches_raw, scan_inv_idx = zigzag_patchify(x, self.patch_size)
-            patches = self.hilbert_proj(patches_raw)
-        else:
-            patches = self.patch_embed(x)
-
-        # keep the old variable name for downstream code
-        hilbert_inv_idx = scan_inv_idx
-
-        num_patches = patches.shape[1]
-
-        # Add a fixed 2D sincos position embedding (order-invariant spatial signal).
-        # For hilbert/zigzag, reorder the row-major embedding to match the scan so
-        # each token gets the sincos for its real 2D position.
-        pos_embed_rm = build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
-        pos_embed_rm = jnp.asarray(pos_embed_rm, dtype=patches.dtype)
-        if self.use_hilbert:
-            scan_idx = hilbert_indices(H_P, W_P)
-            pos_embed = pos_embed_rm[scan_idx]
-        elif self.use_zigzag:
-            scan_idx = zigzag_indices(H_P, W_P)
-            pos_embed = pos_embed_rm[scan_idx]
-        else:
-            pos_embed = pos_embed_rm
-        patches = patches + pos_embed[None, :, :]
-
-        x_seq = patches
-
-        # 2. Prepare Conditioning Signal (Time + Text Context)
-        t_emb = self.time_embed(temb)  # Shape: [B, emb_features]
-
-        cond_emb = t_emb
-        if textcontext is not None:
-            # Shape: [B, num_text_tokens, emb_features]
-            text_emb = self.text_proj(textcontext)
-            # Pool or select text embedding (e.g., mean pool or use CLS token)
-            # Assuming mean pooling for simplicity
-            # Shape: [B, emb_features]
-            text_emb_pooled = jnp.mean(text_emb, axis=1)
-            cond_emb = cond_emb + text_emb_pooled  # Combine time and text embeddings
-
-        # 3. Apply RoPE
-        # Get RoPE frequencies for the sequence length (number of patches)
-        # Shape [num_patches, D_head/2]
-        freqs_cos, freqs_sin = self.rope(seq_len=num_patches)
-        # With hilbert/zigzag the sequence index is not a 2D position and RoPE
-        # distances would be wrong, so override RoPE with identity freqs (cos=1,
-        # sin=0) - the 2D sincos above already carries position.
-        if self.use_hilbert or self.use_zigzag:
-            freqs_cos = jnp.ones_like(freqs_cos)
-            freqs_sin = jnp.zeros_like(freqs_sin)
-
-        # 4. Apply Transformer Blocks with adaLN-Zero conditioning
         for block in self.blocks:
-            x_seq = block(x_seq, conditioning=cond_emb, freqs_cis=(freqs_cos, freqs_sin), train=train)
+            x_seq = block(x_seq, conditioning=cond_emb, freqs_cis=freqs_cis, train=train)
 
-        # 5. Final Layer
-        x_out = self.final_norm(x_seq)
-        # Shape: [B, num_patches, patch_pixels (*2 if learn_sigma)]
-        x_out = self.final_proj(x_out)
-
-        # 6. Unpatchify (hilbert_unpatchify works for any inv_idx, so zigzag too)
-        if self.use_hilbert or self.use_zigzag:
-            if self.learn_sigma:
-                x_mean, _x_logvar = jnp.split(x_out, 2, axis=-1)
-                return hilbert_unpatchify(x_mean, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
-            return hilbert_unpatchify(x_out, hilbert_inv_idx, self.patch_size, H, W, self.output_channels)
-        if self.learn_sigma:
-            x_mean, _x_logvar = jnp.split(x_out, 2, axis=-1)
-            return unpatchify(x_mean, channels=self.output_channels)
-        return unpatchify(x_out, channels=self.output_channels)
+        return self.output(x_seq, inv_idx, H, W)
