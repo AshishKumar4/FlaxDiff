@@ -23,3 +23,5 @@ gcsfuse.yml
 artifacts
 *.parquet
 datasets/datasets
+# local working docs
+PLAN.md

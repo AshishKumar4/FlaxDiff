@@ -8,9 +8,8 @@
 
 name: Upload Python Package
 
+# Publish only on releases - pushes to main must not ship untested code to PyPI
 on:
-  push:
-    branches: [ "main" ]
   release:
     types: [published]
 
