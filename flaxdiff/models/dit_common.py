@@ -190,6 +190,7 @@ class ModulatedBlock(nn.Module):
     norm_epsilon: float = 1e-5
     use_gating: bool = True
     qk_norm: bool = False
+    attention_impl: Optional[str] = None  # None (reference) | 'xla' | 'cudnn' | 'tpu'
     # ssm mixer options
     ssm_state_dim: int = 64
     bidirectional_ssm: bool = True
@@ -218,6 +219,7 @@ class ModulatedBlock(nn.Module):
                 precision=self.precision,
                 use_bias=True,
                 qk_norm=self.qk_norm,
+                attention_impl=self.attention_impl,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
                 rope_emb=self.rope_emb,
             )

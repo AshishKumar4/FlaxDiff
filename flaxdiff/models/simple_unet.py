@@ -20,6 +20,7 @@ class Unet(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     named_norms: bool = False # This is for backward compatibility reasons; older checkpoints have named norms
+    attention_impl: Optional[str] = None
 
     def setup(self):
         if self.norm_groups > 0:
@@ -72,7 +73,7 @@ class Unet(nn.Module):
                     named_norms=self.named_norms
                 )(x, temb)
                 if attention_config is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
-                    x = TransformerBlock(heads=attention_config['heads'], dtype=attention_config.get('dtype', jnp.float32),
+                    x = TransformerBlock(heads=attention_config['heads'], dtype=attention_config.get('dtype', jnp.float32), attention_impl=self.attention_impl,
                                         dim_head=dim_in // attention_config['heads'],
                                         use_projection=attention_config.get("use_projection", False),
                                         use_self_and_cross=attention_config.get("use_self_and_cross", True),
@@ -112,7 +113,7 @@ class Unet(nn.Module):
                 named_norms=self.named_norms
             )(x, temb)
             if middle_attention is not None and j == self.num_middle_res_blocks - 1:   # Apply attention only on the last block
-                x = TransformerBlock(heads=middle_attention['heads'], dtype=middle_attention.get('dtype', jnp.float32), 
+                x = TransformerBlock(heads=middle_attention['heads'], dtype=middle_attention.get('dtype', jnp.float32), attention_impl=self.attention_impl,
                                     dim_head=middle_dim_out // middle_attention['heads'],
                                     use_linear_attention=False,
                                     use_projection=middle_attention.get("use_projection", False),
@@ -157,7 +158,7 @@ class Unet(nn.Module):
                     named_norms=self.named_norms
                 )(x, temb)
                 if attention_config is not None and j == self.num_res_blocks - 1:   # Apply attention only on the last block
-                    x = TransformerBlock(heads=attention_config['heads'], dtype=attention_config.get('dtype', jnp.float32), 
+                    x = TransformerBlock(heads=attention_config['heads'], dtype=attention_config.get('dtype', jnp.float32), attention_impl=self.attention_impl, 
                                         dim_head=dim_out // attention_config['heads'],
                                         use_projection=attention_config.get("use_projection", False),
                                         use_self_and_cross=attention_config.get("use_self_and_cross", True),

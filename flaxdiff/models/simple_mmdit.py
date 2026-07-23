@@ -20,6 +20,7 @@ from .dit_common import (
     PatchSequenceEmbed, ConditioningEmbed, PatchSequenceOutput,
     neutralized_rope_freqs,
 )
+from .attention import scaled_dot_product_attention
 from .vit_common import RotaryEmbedding, AdaLNParams, apply_rotary_embedding
 
 
@@ -39,6 +40,7 @@ class MMDiTBlock(nn.Module):
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
     qk_norm: bool = False
+    attention_impl: Optional[str] = None
 
     def setup(self):
         hidden_features = int(self.features * self.mlp_ratio)
@@ -112,10 +114,10 @@ class MMDiTBlock(nn.Module):
         k = jnp.concatenate([k_t, k_i], axis=1)
         v = jnp.concatenate([v_t, v_i], axis=1)
 
-        attn = nn.dot_product_attention(
-            q, k, v, dtype=self.dtype, broadcast_dropout=False, dropout_rng=None,
-            precision=self.precision, force_fp32_for_softmax=self.force_fp32_for_softmax,
-            deterministic=True)
+        attn = scaled_dot_product_attention(
+            q, k, v, dtype=self.dtype, precision=self.precision,
+            force_fp32_for_softmax=self.force_fp32_for_softmax,
+            implementation=self.attention_impl)
         txt_attn, img_attn = attn[:, :S_txt], attn[:, S_txt:]
 
         img_attn = self.dropout(self.img_out(img_attn), deterministic=not train)
@@ -147,6 +149,7 @@ class SimpleMMDiT(nn.Module):
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False
     qk_norm: bool = False
+    attention_impl: Optional[str] = None
     use_hilbert: bool = False
     use_zigzag: bool = False
 
@@ -187,6 +190,7 @@ class SimpleMMDiT(nn.Module):
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
                 norm_epsilon=self.norm_epsilon,
                 qk_norm=self.qk_norm,
+                attention_impl=self.attention_impl,
                 name=f"mmdit_block_{i}"
             ) for i in range(self.num_layers)
         ]
@@ -332,6 +336,7 @@ class HierarchicalMMDiT(nn.Module):
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False
     qk_norm: bool = False
+    attention_impl: Optional[str] = None
 
     def setup(self):
         assert len(self.emb_features) == len(self.num_layers) == len(self.num_heads), \
@@ -382,6 +387,7 @@ class HierarchicalMMDiT(nn.Module):
                     force_fp32_for_softmax=self.force_fp32_for_softmax,
                     norm_epsilon=self.norm_epsilon,
                     qk_norm=self.qk_norm,
+                    attention_impl=self.attention_impl,
                     name=f"{prefix}_block_stage{stage}_{i}"
                 ) for i in range(self.num_layers[stage])
             ]

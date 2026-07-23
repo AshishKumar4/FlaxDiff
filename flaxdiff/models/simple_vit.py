@@ -25,6 +25,7 @@ class UViT(nn.Module):
     # Passed to TransformerBlock (likely False for UViT)
     use_self_and_cross: bool = False
     force_fp32_for_softmax: bool = True  # Passed to TransformerBlock
+    attention_impl: Optional[str] = None
     # Used in final convs if add_residualblock_output
     activation: Callable = jax.nn.swish
     norm_groups: int = 8
@@ -88,6 +89,7 @@ class UViT(nn.Module):
                 dtype=self.dtype, precision=self.precision, use_projection=self.use_projection,
                 use_self_and_cross=self.use_self_and_cross,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
+                attention_impl=self.attention_impl,
                 only_pure_attention=False, norm_inputs=self.norm_inputs,
                 explicitly_add_residual=self.explicitly_add_residual,
                 norm_epsilon=self.norm_epsilon,
@@ -101,6 +103,7 @@ class UViT(nn.Module):
             dtype=self.dtype, precision=self.precision, use_projection=self.use_projection,
             use_self_and_cross=self.use_self_and_cross,
             force_fp32_for_softmax=self.force_fp32_for_softmax,
+                attention_impl=self.attention_impl,
             only_pure_attention=False, norm_inputs=self.norm_inputs,
             explicitly_add_residual=self.explicitly_add_residual,
             norm_epsilon=self.norm_epsilon,
@@ -122,6 +125,7 @@ class UViT(nn.Module):
                 dtype=self.dtype, precision=self.precision, use_projection=self.use_projection,
                 use_self_and_cross=self.use_self_and_cross,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
+                attention_impl=self.attention_impl,
                 only_pure_attention=False, norm_inputs=self.norm_inputs,
                 explicitly_add_residual=self.explicitly_add_residual,
                 norm_epsilon=self.norm_epsilon,
@@ -257,6 +261,7 @@ class SimpleUDiT(nn.Module):
     dtype: Optional[Dtype] = None # e.g., jnp.float32 or jnp.bfloat16
     precision: PrecisionLike = None
     force_fp32_for_softmax: bool = True # Passed to DiTBlock -> RoPEAttention
+    attention_impl: Optional[str] = None
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False
     use_hilbert: bool = False
@@ -312,6 +317,7 @@ class SimpleUDiT(nn.Module):
                 dtype=self.dtype,
                 precision=self.precision,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
+                attention_impl=self.attention_impl,
                 norm_epsilon=self.norm_epsilon,
                 rope_emb=self.rope,
                 name=f"down_block_{i}"
@@ -326,6 +332,7 @@ class SimpleUDiT(nn.Module):
             dtype=self.dtype,
             precision=self.precision,
             force_fp32_for_softmax=self.force_fp32_for_softmax,
+                attention_impl=self.attention_impl,
             norm_epsilon=self.norm_epsilon,
             rope_emb=self.rope,
             name="mid_block"
@@ -348,6 +355,7 @@ class SimpleUDiT(nn.Module):
                 dtype=self.dtype,
                 precision=self.precision,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
+                attention_impl=self.attention_impl,
                 norm_epsilon=self.norm_epsilon,
                 rope_emb=self.rope,
                 name=f"up_block_{i}"
