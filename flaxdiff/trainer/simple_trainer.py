@@ -23,11 +23,10 @@ from orbax.checkpoint.utils import fully_replicated_host_local_array_to_global_a
 from termcolor import colored
 from typing import Dict, Callable, Sequence, Any, Union, Tuple
 from flax.training.dynamic_scale import DynamicScale
-from flaxdiff.utils import RandomMarkovState
+from flaxdiff.utils import RandomMarkovState, convert_to_global_tree
 from flax.training import dynamic_scale as dynamic_scale_lib
 from dataclasses import dataclass
 import shutil
-import gc
 
 PROCESS_COLOR_MAP = {
     0: "green",
@@ -39,30 +38,6 @@ PROCESS_COLOR_MAP = {
     6: "light_red",
     7: "light_cyan"
 }
-
-def _build_global_shape_and_sharding(
-    local_shape: tuple[int, ...], global_mesh: Mesh
-) -> tuple[tuple[int, ...], jax.sharding.NamedSharding]:
-  sharding = jax.sharding.NamedSharding(global_mesh, P(global_mesh.axis_names))
-  global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
-  return global_shape, sharding
-
-
-def form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
-  """Put local sharded array into local devices"""
-  global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
-  try:
-    local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
-  except ValueError as array_split_error:
-    raise ValueError(
-        f"Unable to put to devices shape {array.shape} with "
-        f"local device count {len(global_mesh.local_devices)} "
-    ) from array_split_error
-  local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
-  return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
-
-def convert_to_global_tree(global_mesh, pytree):
-    return jax.tree_util.tree_map_with_path(partial(form_global_array, global_mesh=global_mesh), pytree)
 
 @struct.dataclass
 class Metrics(metrics.Collection):
@@ -310,13 +285,6 @@ class SimpleTrainer:
             os.makedirs(path)
         return path
 
-    def tensorboard_path(self):
-        experiment_name = self.name
-        path = os.path.join(os.path.abspath('./tensorboard'), experiment_name)
-        if not os.path.exists(path):
-            os.makedirs(path)
-        return path
-
     def load(self, checkpoint_path, checkpoint_step=None, load_directly_from_dir=False):
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         options = orbax.checkpoint.CheckpointManagerOptions(
@@ -441,17 +409,6 @@ class SimpleTrainer:
             "input_shapes": self.input_shapes
         }
 
-    def init_tensorboard(self, batch_size, steps_per_epoch, epochs):
-        from flax.metrics import tensorboard
-        summary_writer = tensorboard.SummaryWriter(self.tensorboard_path())
-        summary_writer.hparams({
-            **self.config(),
-            "steps_per_epoch": steps_per_epoch,
-            "epochs": epochs,
-            "batch_size": batch_size
-        })
-        return summary_writer
-    
     def validation_loop(
         self,
         val_state: SimpleTrainState,
@@ -510,7 +467,6 @@ class SimpleTrainer:
         epoch_loss = 0
         bad_loss_steps = 0
         current_epoch = current_step // train_steps_per_epoch
-        last_save_time = time.time()
         
         if process_index == 0:
             pbar = tqdm.tqdm(total=train_steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step')
@@ -563,8 +519,7 @@ class SimpleTrainer:
                     print(f"Devices: {len(jax.devices())}") # To sync the devices
                     self.save(current_epoch, current_step, train_state, rng_state)
                     print(f"Saving done by process index {process_index}")
-                    last_save_time = time.time()
-        print(colored(f"Epoch done on index {process_index} => {current_epoch} Loss: {epoch_loss/train_steps_per_epoch}", 'green'))
+                    print(colored(f"Epoch done on index {process_index} => {current_epoch} Loss: {epoch_loss/train_steps_per_epoch}", 'green'))
         if pbar is not None:
             pbar.close()
         return epoch_loss, current_step, train_state, rng_state

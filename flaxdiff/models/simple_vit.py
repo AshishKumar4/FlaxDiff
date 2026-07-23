@@ -11,7 +11,7 @@ import einops
 from flax.typing import Dtype, PrecisionLike
 from functools import partial
 from .hilbert import hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify
-from .vit_common import _rotate_half, unpatchify, PatchEmbedding, apply_rotary_embedding, RotaryEmbedding, RoPEAttention, AdaLNZero, AdaLNParams
+from .vit_common import unpatchify, PatchEmbedding, RotaryEmbedding, RoPEAttention, AdaLNParams
 from .simple_dit import DiTBlock
 
 
@@ -35,20 +35,14 @@ class UViT(nn.Module):
     explicitly_add_residual: bool = True  # Passed to TransformerBlock
     norm_epsilon: float = 1e-5  # Adjusted default
     use_hilbert: bool = False  # Toggle Hilbert patch reorder
-    use_remat: bool = False  # Add flag to use remat
 
     def setup(self):
         assert self.num_layers % 2 == 0, "num_layers must be even for U-Net structure"
         half_layers = self.num_layers // 2
 
         # --- Norm Layer ---
-        if self.norm_groups > 0:
-            print(f"Warning: norm_groups > 0 not fully supported with standard LayerNorm fallback in UViT setup. Using LayerNorm.")
-            self.norm_factory = partial(
-                nn.LayerNorm, epsilon=self.norm_epsilon, dtype=self.dtype)
-        else:
-            self.norm_factory = partial(
-                nn.LayerNorm, epsilon=self.norm_epsilon, dtype=self.dtype)
+        self.norm_factory = partial(
+            nn.LayerNorm, epsilon=self.norm_epsilon, dtype=self.dtype)
 
         # --- Input Path ---
         self.patch_embed = PatchEmbedding(
