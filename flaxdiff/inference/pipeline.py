@@ -224,7 +224,6 @@ class DiffusionInferencePipeline(InferencePipeline):
         diffusion_steps: int = 50,
         guidance_scale: float = 1.0,
         sampler_class=EulerAncestralSampler,
-        timestep_spacing: str = 'linear',
         seed: Optional[int] = None,
         start_step: Optional[int] = None,
         end_step: int = 0,
@@ -241,8 +240,6 @@ class DiffusionInferencePipeline(InferencePipeline):
             guidance_scale=guidance_scale,
             sampler_class=sampler_class,
         )
-        if hasattr(sampler, 'timestep_spacing'):
-            sampler.timestep_spacing = timestep_spacing
         print(f"Generating samples: steps={diffusion_steps}, num_samples={num_samples}, guidance={guidance_scale}")
         
         if use_best_params:

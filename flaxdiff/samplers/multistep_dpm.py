@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 from .common import DiffusionSampler
+from ..schedulers import get_coeff_shapes_tuple
 from ..utils import RandomMarkovState
 
 class MultiStepDPM(DiffusionSampler):
@@ -8,11 +9,17 @@ class MultiStepDPM(DiffusionSampler):
         super().__init__(*args, **kwargs)
         self.history = []
 
+    def generate_samples(self, *args, **kwargs):
+        # The multistep history is only valid within a single trajectory
+        self.history = []
+        return super().generate_samples(*args, **kwargs)
+
     def take_next_step(self, current_samples, reconstructed_samples, model_conditioning_inputs,
                  pred_noise, current_step, state:RandomMarkovState, sample_model_fn, next_step=1) -> tuple[jnp.ndarray, RandomMarkovState]:
         # Get the noise and signal rates for the current and next steps
-        current_alpha, current_sigma = self.noise_schedule.get_rates(current_step)
-        next_alpha, next_sigma = self.noise_schedule.get_rates(next_step)
+        shape = get_coeff_shapes_tuple(current_samples)
+        current_alpha, current_sigma = self.noise_schedule.get_rates(current_step, shape)
+        next_alpha, next_sigma = self.noise_schedule.get_rates(next_step, shape)
 
         dt = next_sigma - current_sigma
 

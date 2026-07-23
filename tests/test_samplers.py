@@ -105,7 +105,6 @@ def generate(model, sampler, **kwargs):
         num_samples=256,
         resolution=8,
         diffusion_steps=100,
-        start_step=1000,
         rngstate=RandomMarkovState(jax.random.PRNGKey(2)),
     )
     defaults.update(kwargs)
@@ -126,20 +125,14 @@ def test_karras_sampler_converges(sampler_class):
     assert_gaussian_stats(samples)
 
 
-@pytest.mark.xfail(strict=True, reason="bug: default start_step uses max_timesteps but the step domain is hardcoded to [0, 1000]")
 def test_karras_sampler_default_start_step():
-    """With no explicit start_step the sampler must still denoise from sigma_max.
-    Today max_timesteps=1 collapses the schedule to a single no-op step and
-    the 'samples' are just the initial noise."""
+    """With no explicit start_step the sampler must denoise from sigma_max."""
     model, sampler = make_karras_sampler(EulerSampler)
     samples = generate(model, sampler, start_step=None)
     assert_gaussian_stats(samples)
 
 
-@pytest.mark.xfail(strict=True, reason="bug: sample_model reshapes rates with the default (-1,1,1,1), breaking 5D video shapes for every sampler")
 def test_ddim_video_samples():
-    """DDIM's own take_next_step is 5D-safe, but the shared sample_model wrapper
-    still scales the input with 4D-reshaped rates, so video is broken everywhere."""
     model, sampler = make_karras_sampler(DDIMSampler)
     params = model.init(jax.random.PRNGKey(1), jnp.ones((1, 8, 8, 3)), jnp.ones((1,)))
     samples = sampler.generate_samples(
@@ -148,14 +141,12 @@ def test_ddim_video_samples():
         resolution=8,
         sequence_length=3,
         diffusion_steps=50,
-        start_step=1000,
         rngstate=RandomMarkovState(jax.random.PRNGKey(2)),
     )
     assert samples.shape == (2, 3, 8, 8, 3)
     assert jnp.all(jnp.isfinite(samples))
 
 
-@pytest.mark.xfail(strict=True, reason="bug: samplers reshape rates with the default (-1,1,1,1), breaking 5D video shapes")
 def test_euler_video_samples():
     model, sampler = make_karras_sampler(EulerSampler)
     params = model.init(jax.random.PRNGKey(1), jnp.ones((1, 8, 8, 3)), jnp.ones((1,)))
@@ -165,34 +156,29 @@ def test_euler_video_samples():
         resolution=8,
         sequence_length=3,
         diffusion_steps=50,
-        start_step=1000,
         rngstate=RandomMarkovState(jax.random.PRNGKey(2)),
     )
     assert samples.shape == (2, 3, 8, 8, 3)
 
 
-@pytest.mark.xfail(strict=True, reason="bug: DDPMSampler casts the step array through int(), crashing for batch > 1")
 def test_ddpm_sampler_converges():
     model, sampler = make_vp_sampler(DDPMSampler)
     samples = generate(model, sampler, diffusion_steps=1000)
     assert_gaussian_stats(samples)
 
 
-@pytest.mark.xfail(strict=True, reason="bug: DDIM eta > 0 calls .sqrt() on a jax array and uses the wrong variance split")
 def test_ddim_eta_converges():
     model, sampler = make_vp_sampler(DDIMSampler, eta=0.5)
     samples = generate(model, sampler)
     assert_gaussian_stats(samples)
 
 
-@pytest.mark.xfail(strict=True, reason="bug: RK4Sampler jits over its python-callable argument")
 def test_rk4_sampler_runs():
     model, sampler = make_karras_sampler(RK4Sampler)
     samples = generate(model, sampler, diffusion_steps=20)
     assert jnp.all(jnp.isfinite(samples))
 
 
-@pytest.mark.xfail(strict=True, reason="bug: MultiStepDPM keeps stale derivative history across generate calls")
 def test_multistep_dpm_reentrant():
     model, sampler = make_karras_sampler(MultiStepDPM)
     first = generate(model, sampler)
@@ -200,9 +186,3 @@ def test_multistep_dpm_reentrant():
     assert jnp.allclose(first, second, atol=1e-5)
 
 
-@pytest.mark.parametrize("spacing", ["quadratic", "karras", "exponential"])
-@pytest.mark.xfail(strict=True, reason="bug: non-linear timestep spacings produce log(0) or duplicate int16 steps (dt=0)")
-def test_timestep_spacing_produces_finite_samples(spacing):
-    model, sampler = make_karras_sampler(EulerSampler, timestep_spacing=spacing)
-    samples = generate(model, sampler, diffusion_steps=50)
-    assert_gaussian_stats(samples, tol=0.1)

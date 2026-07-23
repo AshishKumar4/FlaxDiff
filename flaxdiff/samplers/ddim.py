@@ -32,18 +32,18 @@ class DDIMSampler(DiffusionSampler):
         
         # Extract random noise if needed for stochastic sampling
         if self.eta > 0:
-            # For DDIM, we need to compute the variance coefficient
-            # This is based on the original DDIM paper's formula
-            # When eta=0, it's deterministic DDIM, when eta=1.0 it approaches DDPM
-            sigma_tilde = self.eta * sigma_next * (1 - alpha_t**2 / alpha_next**2).sqrt() / (1 - alpha_t**2).sqrt()
+            # DDIM paper eq. 16: eta=0 is deterministic DDIM, eta=1.0 approaches DDPM.
+            # The direction term must shrink to keep the marginal variance right.
+            sigma_tilde = self.eta * (sigma_next / sigma_t) * jnp.sqrt(
+                jnp.maximum(1 - alpha_t**2 / alpha_next**2, 0.0))
             state, noise_key = state.get_random_key()
             noise = jax.random.normal(noise_key, current_samples.shape)
-            # Add the stochastic component
-            stochastic_term = sigma_tilde * noise
+            direction_coeff = jnp.sqrt(jnp.maximum(sigma_next**2 - sigma_tilde**2, 0.0))
+            new_samples = (alpha_next * reconstructed_samples
+                           + direction_coeff * pred_noise
+                           + sigma_tilde * noise)
         else:
-            stochastic_term = 0
-            
-        # Direct DDIM update formula
-        new_samples = alpha_next * reconstructed_samples + sigma_next * pred_noise + stochastic_term
+            # Direct DDIM update formula
+            new_samples = alpha_next * reconstructed_samples + sigma_next * pred_noise
         
         return new_samples, state
