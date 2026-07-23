@@ -12,7 +12,7 @@ from flax.typing import Dtype, PrecisionLike
 from functools import partial
 from .hilbert import hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify
 from .vit_common import unpatchify, PatchEmbedding, RotaryEmbedding, RoPEAttention, AdaLNParams
-from .simple_dit import DiTBlock
+from .dit_common import ModulatedBlock
 
 
 class UViT(nn.Module):
@@ -304,7 +304,7 @@ class SimpleUDiT(nn.Module):
         )
 
         self.down_blocks = [
-            DiTBlock(
+            ModulatedBlock(
                 features=self.emb_features,
                 num_heads=self.num_heads,
                 mlp_ratio=self.mlp_ratio,
@@ -318,7 +318,7 @@ class SimpleUDiT(nn.Module):
             ) for i in range(half_layers)
         ]
 
-        self.mid_block = DiTBlock(
+        self.mid_block = ModulatedBlock(
             features=self.emb_features,
             num_heads=self.num_heads,
             mlp_ratio=self.mlp_ratio,
@@ -340,7 +340,7 @@ class SimpleUDiT(nn.Module):
              ) for i in range(half_layers)
         ]
         self.up_blocks = [
-            DiTBlock(
+            ModulatedBlock(
                 features=self.emb_features,
                 num_heads=self.num_heads,
                 mlp_ratio=self.mlp_ratio,
