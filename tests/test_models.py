@@ -175,3 +175,32 @@ def test_attention_impl_parity(rng):
     out_ref = ref.apply(params, x, temb, textcontext)
     out_xla = xla.apply(params, x, temb, textcontext)
     assert jnp.max(jnp.abs(out_ref - out_xla)) < 1e-4
+
+
+def test_video_dit_forward(rng):
+    """Factorized ST video model over (B, T, H, W, C), the replacement for
+    the never-wired diffusers-derived UNet3D."""
+    from flaxdiff.models.video_dit import VideoDiT
+    model = VideoDiT(patch_size=4, emb_features=64, num_layers=2, num_heads=2, mlp_ratio=2)
+    x = jax.random.normal(rng, (2, 3, 16, 16, 3))
+    temb = jnp.ones((2,))
+    textcontext = jnp.ones((2, 77, 768), dtype=jnp.float32)
+    out = run_forward(model, rng, x, temb, textcontext)
+    assert out.shape == x.shape
+    assert jnp.all(jnp.isfinite(out))
+
+
+def test_video_dit_temporal_mixing(rng):
+    """Temporal blocks must actually mix across frames: perturbing frame 0
+    must change the prediction for frame 2."""
+    from flaxdiff.models.video_dit import VideoDiT
+    model = VideoDiT(patch_size=4, emb_features=64, num_layers=2, num_heads=2, mlp_ratio=2)
+    x = jax.random.normal(rng, (1, 3, 16, 16, 3))
+    temb = jnp.ones((1,))
+    params = model.init(rng, x, temb, None)
+    params = jax.tree.map(lambda p: p + 0.02, params)
+
+    out_a = model.apply(params, x, temb, None)
+    x_perturbed = x.at[:, 0].add(1.0)
+    out_b = model.apply(params, x_perturbed, temb, None)
+    assert not jnp.allclose(out_a[:, 2], out_b[:, 2]), "no information flow across frames"
