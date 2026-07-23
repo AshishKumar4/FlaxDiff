@@ -161,7 +161,6 @@ class SimpleTrainer:
                  name: str = "Simple",
                  load_from_checkpoint: str = None,
                  loss_fn=optax.l2_loss,
-                 param_transforms: Callable = None,
                  wandb_config: Dict[str, Any] = None,
                  distributed_training: bool = None,
                  checkpoint_base_path: str = "./checkpoints",
@@ -186,6 +185,7 @@ class SimpleTrainer:
         
         load_directly_from_dir = False
         
+        self.wandb = None
         if wandb_config is not None and jax.process_index() == 0:
             import wandb
             run = wandb.init(resume='allow', **wandb_config)
@@ -234,33 +234,26 @@ class SimpleTrainer:
         self.checkpointer = orbax.checkpoint.CheckpointManager(
             self.checkpoint_path(), async_checkpointer, options)
 
-        if load_from_checkpoint is not None:
-            latest_step, old_state, old_best_state, rngstate = self.load(load_from_checkpoint, checkpoint_step, load_directly_from_dir)
-        else:
-            latest_step, old_state, old_best_state, rngstate = 0, None, None, None
-
-        self.latest_step = latest_step
-        
-        if train_start_step_override is not None:
-            self.latest_step = train_start_step_override
-            print(f"Overriding start step to {self.latest_step}")
-        
-        if rngstate:
-            self.rngstate = RandomMarkovState(**rngstate)
-        else:
-            self.rngstate = RandomMarkovState(rngs)
-            
+        self.rngstate = RandomMarkovState(rngs)
         self.rngstate, subkey = self.rngstate.get_random_key()
 
         if train_state == None:
             state, best_state = self.generate_states(
-                optimizer, subkey, old_state, old_best_state, model, param_transforms, use_dynamic_scale
+                optimizer, subkey, model, use_dynamic_scale
             )
             self.init_state(state, best_state)
         else:
             self.state = train_state
             self.best_state = train_state
             self.best_loss = 1e9
+
+        self.latest_step = 0
+        if load_from_checkpoint is not None:
+            self.latest_step = self.load(load_from_checkpoint, checkpoint_step, load_directly_from_dir)
+
+        if train_start_step_override is not None:
+            self.latest_step = train_start_step_override
+            print(f"Overriding start step to {self.latest_step}")
 
     def get_input_ones(self):
         return {k: jnp.ones((1, *v)) for k, v in self.input_shapes.items()}
@@ -269,20 +262,14 @@ class SimpleTrainer:
         self,
         optimizer: optax.GradientTransformation,
         rngs: jax.random.PRNGKey,
-        existing_state: dict = None,
-        existing_best_state: dict = None,
         model: nn.Module = None,
-        param_transforms: Callable = None,
         use_dynamic_scale: bool = False
     ) -> Tuple[SimpleTrainState, SimpleTrainState]:
         print("Generating states for SimpleTrainer")
         rngs, subkey = jax.random.split(rngs)
 
-        if existing_state == None:
-            input_vars = self.get_input_ones()
-            params = model.init(subkey, **input_vars)
-        else:
-            params = existing_state['params']
+        input_vars = self.get_input_ones()
+        params = model.init(subkey, **input_vars)
 
         state = SimpleTrainState.create(
             apply_fn=model.apply,
@@ -291,13 +278,7 @@ class SimpleTrainer:
             metrics=Metrics.empty(),
             dynamic_scale = dynamic_scale_lib.DynamicScale() if use_dynamic_scale else None
         )
-        if existing_best_state is not None:
-            best_state = state.replace(
-                params=existing_best_state['params'])
-        else:
-            best_state = state
-            
-        return state, best_state
+        return state, state
 
     def init_state(
         self,
@@ -353,18 +334,29 @@ class SimpleTrainer:
             checkpoint_path if checkpoint_path else self.checkpoint_path(),
             f"{step}")
         self.loaded_checkpoint_path = loaded_checkpoint_path
-        ckpt = checkpointer.restore(step) if not load_directly_from_dir else checkpointer.restore(checkpoint_path)
+
+        # Restore against the freshly-initialized states as a template so orbax
+        # rebuilds the exact pytree types - optimizer state and step included.
+        # Restoring untyped used to silently discard opt_state and reset the
+        # step counter (and with it the lr schedule) on every resume.
+        template = {
+            'rngs': self.get_rngstate(),
+            'state': self.get_state(),
+            'best_state': self.get_best_state(),
+            'best_loss': np.array(self.best_loss),
+            'epoch': 0,
+        }
+        ckpt = checkpointer.restore(step, items=template) if not load_directly_from_dir else checkpointer.restore(checkpoint_path, items=template)
         
-        state = ckpt['state']
-        best_state = ckpt['best_state']
-        rngstate = ckpt['rngs']
-        # Convert the state to a TrainState
-        self.best_loss = ckpt['best_loss']
+        self.state = ckpt['state']
+        self.best_state = ckpt['best_state']
+        self.rngstate = ckpt['rngs']
+        self.best_loss = float(ckpt['best_loss'])
         if self.best_loss == 0:
             # It cant be zero as that must have been some problem
             self.best_loss = 1e9
-        print(f"Loaded model from checkpoint at step {step}", ckpt['best_loss'])
-        return step, state, best_state, rngstate
+        print(f"Loaded model from checkpoint at step {step}", self.best_loss)
+        return step
 
     def save(self, epoch=0, step=0, state=None, rngstate=None):
         print(f"Saving model at epoch {epoch} step {step}")
@@ -516,11 +508,14 @@ class SimpleTrainer:
             global_device_indexes = 0
             
         epoch_loss = 0
+        bad_loss_steps = 0
         current_epoch = current_step // train_steps_per_epoch
         last_save_time = time.time()
         
         if process_index == 0:
             pbar = tqdm.tqdm(total=train_steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step')
+        else:
+            pbar = None
             
         for i in range(train_steps_per_epoch):
             batch = next(train_ds)
@@ -539,41 +534,18 @@ class SimpleTrainer:
                 # loss = jax.experimental.multihost_utils.process_allgather(loss)
                 loss = jnp.mean(loss) # Just to make sure its a scaler value
                     
-            if loss <= 1e-8 or jnp.isnan(loss) or jnp.isinf(loss):
-                # If the loss is too low or NaN/Inf, log the issue and attempt recovery
-                print(colored(f"Abnormal loss at step {current_step}: {loss}", 'red'))
-                
-                # Check model parameters for NaN/Inf values
-                params = train_state.params
-                has_nan_or_inf = False
-                
-                if isinstance(params, dict):
-                    for key, value in params.items():
-                        if isinstance(value, jnp.ndarray):
-                            if jnp.isnan(value).any() or jnp.isinf(value).any():
-                                print(colored(f"NaN/inf values found in params[{key}] at step {current_step}", 'red'))
-                                has_nan_or_inf = True
-                                break
-                    
-                    if not has_nan_or_inf:
-                        print(colored(f"Model parameters seem valid despite abnormal loss", 'yellow'))
-                
-                # Try to recover - clear JAX caches and collect garbage
-                gc.collect()
-                if hasattr(jax, "clear_caches"):
-                    jax.clear_caches()
-                
-                # If we have a best state and the loss is truly invalid, consider restoring
-                if (loss <= 1e-8 or jnp.isnan(loss) or jnp.isinf(loss)) and self.best_state is not None:
-                    print(colored(f"Attempting recovery by resetting model to last best state", 'yellow'))
-                    train_state = self.best_state
-                    loss = self.best_loss
-                else:
-                    # If we can't recover, skip this step but continue training
-                    print(colored(f"Unable to recover - continuing with current state", 'yellow'))
-                    if loss <= 1e-8:
-                        loss = 1.0  # Set to a reasonable default to continue training
-                            
+            if not jnp.isfinite(loss):
+                # No silent recovery: a diverged run must fail loudly, not be
+                # papered over with a stale best_state and a cosmetic loss value
+                print(colored(f"Non-finite loss at step {current_step}: {loss}", 'red'))
+                bad_loss_steps += 1
+                if bad_loss_steps >= 5:
+                    raise RuntimeError(
+                        f"Loss has been non-finite for {bad_loss_steps} consecutive steps, stopping"
+                    )
+            else:
+                bad_loss_steps = 0
+
             epoch_loss += loss
             current_step += 1
             if i % 100 == 0:

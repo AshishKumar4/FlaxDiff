@@ -39,11 +39,17 @@ def batch_iterator():
         yield {"image": jnp.ones((8, 4)), "label": jnp.zeros((8, 2))}
 
 
-@pytest.mark.xfail(strict=True, reason="bug: self.wandb is only assigned when wandb_config is set, training without wandb crashes")
 def test_fit_without_wandb(tmp_path):
     trainer = make_trainer(tmp_path)
     data = {"train": batch_iterator, "train_len": 32}
-    trainer.fit(data, train_steps_per_epoch=4, epochs=1, val_steps_per_epoch=0)
+    state = trainer.fit(data, train_steps_per_epoch=4, epochs=2, val_steps_per_epoch=0)
+    # the tiny regression must actually learn something
+    final_loss = float(jnp.mean(optax.l2_loss(
+        state.apply_fn(state.params, jnp.ones((8, 4))), jnp.zeros((8, 2)))))
+    initial = make_trainer(tmp_path, name="fresh")
+    initial_loss = float(jnp.mean(optax.l2_loss(
+        initial.state.apply_fn(initial.state.params, jnp.ones((8, 4))), jnp.zeros((8, 2)))))
+    assert final_loss < initial_loss
 
 
 def test_save_writes_checkpoint(tmp_path):
@@ -53,7 +59,6 @@ def test_save_writes_checkpoint(tmp_path):
     assert trainer.checkpointer.latest_step() == 1
 
 
-@pytest.mark.xfail(strict=True, reason="bug: restore rebuilds the TrainState with tx.init, discarding opt_state and the step counter")
 def test_restore_preserves_optimizer_state(tmp_path):
     trainer = make_trainer(tmp_path)
 
