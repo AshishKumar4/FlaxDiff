@@ -37,22 +37,6 @@ class PatchEmbedding(nn.Module):
         return x
 
 
-class PositionalEncoding(nn.Module):
-    max_len: int
-    embedding_dim: int
-
-    @nn.compact
-    def __call__(self, x):
-        pe = self.param('pos_encoding',
-                        jax.nn.initializers.zeros,
-                        (1, self.max_len, self.embedding_dim))
-        return x + pe[:, :x.shape[1], :]
-
-
-# --- Rotary Positional Embedding (RoPE) ---
-# Adapted from https://github.com/google-deepmind/ring_attention/blob/main/ring_attention/layers/rotary.py
-
-
 def _rotate_half(x: jax.Array) -> jax.Array:
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
@@ -185,57 +169,6 @@ class RoPEAttention(NormalAttention):
 
 # --- adaLN-Zero ---
 
-
-class AdaLNZero(nn.Module):
-    features: int
-    dtype: Optional[Dtype] = None
-    precision: PrecisionLike = None
-    norm_epsilon: float = 1e-5  # Standard LayerNorm epsilon
-
-    @nn.compact
-    def __call__(self, x, conditioning):
-        # Project conditioning signal to get scale and shift parameters
-        # Conditioning shape: [B, D_cond] -> [B, 1, ..., 1, 6 * features] for broadcasting
-        # Or [B, 1, 6*features] if x is [B, S, F]
-
-        # Ensure conditioning has seq dim if x does
-        # x=[B,S,F], cond=[B,D_cond]
-        if x.ndim == 3 and conditioning.ndim == 2:
-            conditioning = jnp.expand_dims(
-                conditioning, axis=1)  # cond=[B,1,D_cond]
-
-        # Project conditioning to get 6 params per feature (scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn)
-        # Using nn.DenseGeneral for flexibility if needed, but nn.Dense is fine if cond is [B, D_cond] or [B, 1, D_cond]
-        ada_params = nn.Dense(
-            features=6 * self.features,
-            dtype=self.dtype,
-            precision=self.precision,
-            # Initialize projection to zero (Zero init)
-            kernel_init=nn.initializers.zeros,
-            name="ada_proj"
-        )(conditioning)
-
-        # Split into scale, shift, gate for MLP and Attention
-        scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
-            ada_params, 6, axis=-1)
-
-        scale_mlp = jnp.clip(scale_mlp, -10.0, 10.0)
-        shift_mlp = jnp.clip(shift_mlp, -10.0, 10.0)
-        # Apply Layer Normalization
-        norm = nn.LayerNorm(epsilon=self.norm_epsilon,
-                            use_scale=False, use_bias=False, dtype=self.dtype)
-        # norm = nn.RMSNorm(epsilon=self.norm_epsilon, dtype=self.dtype) # Alternative: RMSNorm
-
-        norm_x = norm(x)
-
-        # Modulate for Attention path
-        x_attn = norm_x * (1 + scale_attn) + shift_attn
-
-        # Modulate for MLP path
-        x_mlp = norm_x * (1 + scale_mlp) + shift_mlp
-
-        # Return modulated outputs and gates
-        return x_attn, gate_attn, x_mlp, gate_mlp
 
 class AdaLNParams(nn.Module): # Renamed for clarity
     features: int

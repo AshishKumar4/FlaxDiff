@@ -66,35 +66,6 @@ class WeightStandardizedConv(nn.Module):
 
         return(conv.apply({'params': {'kernel': standardized_kernel, 'bias': bias}},x))
 
-class PixelShuffle(nn.Module):
-    scale: int
-
-    @nn.compact
-    def __call__(self, x):
-        up = einops.rearrange(
-            x,
-            pattern="b h w (h2 w2 c) -> b (h h2) (w w2) c",
-            h2=self.scale,
-            w2=self.scale,
-        )
-        return up
-
-class TimeEmbedding(nn.Module):
-    features:int
-    nax_positions:int=10000
-
-    def setup(self):
-        half_dim = self.features // 2
-        emb = jnp.log(self.nax_positions) / (half_dim - 1)
-        emb = jnp.exp(-emb * jnp.arange(half_dim, dtype=jnp.float32))
-        self.embeddings = emb
-
-    def __call__(self, x):
-        x = jax.lax.convert_element_type(x, jnp.float32)
-        emb = x[:, None] * self.embeddings[None, :]
-        emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
-        return emb
-
 class FourierEmbedding(nn.Module):
     features:int
     scale:int = 16

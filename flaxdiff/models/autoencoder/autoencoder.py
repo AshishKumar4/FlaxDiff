@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from typing import Dict, Callable, Sequence, Any, Union, Optional
 import einops
-from ..common import kernel_init, ConvLayer, Upsample, Downsample, PixelShuffle
+from ..common import kernel_init, ConvLayer, Upsample, Downsample
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 

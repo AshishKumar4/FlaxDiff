@@ -64,45 +64,6 @@ def generate_modelname(
     
     # model_name += f"-{'.'.join([cond.encoder.key for cond in input_config.conditions])}"
     
-    # # Create a sorted representation of model config for consistent hashing
-    # def sort_dict_recursively(d):
-    #     if isinstance(d, dict):
-    #         return {k: sort_dict_recursively(d[k]) for k in sorted(d.keys())}
-    #     elif isinstance(d, list):
-    #         return [sort_dict_recursively(v) for v in d]
-    #     else:
-    #         return d
-    
-    # # Extract model config and sort it
-    # model_config = serialize_model(model)
-    # sorted_model_config = sort_dict_recursively(model_config)
-    
-    # # Convert to JSON string with sorted keys for consistent hash
-    # try:
-    #     config_json = json.dumps(sorted_model_config)
-    # except TypeError:
-    #     # Handle non-serializable objects
-    #     def make_serializable(obj):
-    #         if isinstance(obj, dict):
-    #             return {k: make_serializable(v) for k, v in obj.items()}
-    #         elif isinstance(obj, list):
-    #             return [make_serializable(v) for v in obj]
-    #         else:
-    #             try:
-    #                 # Test if object is JSON serializable
-    #                 json.dumps(obj)
-    #                 return obj
-    #             except TypeError:
-    #                 return str(obj)
-        
-    #     serializable_config = make_serializable(sorted_model_config)
-    #     config_json = json.dumps(serializable_config)
-    
-    # # Generate a hash of the configuration
-    # config_hash = hashlib.md5(config_json.encode('utf-8')).hexdigest()[:8]
-    
-    # # Construct the model name
-    # model_name = f"{model_name}-{config_hash}"
     return model_name
 
 class GeneralDiffusionTrainer(DiffusionTrainer):

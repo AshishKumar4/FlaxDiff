@@ -10,53 +10,6 @@ from jax.sharding import Mesh, PartitionSpec as P
 from flaxdiff.inputs import TextEncoder, CLIPTextEncoder
 
 # Setup mappings for dtype, precision, and activation
-DTYPE_MAP = {
-    'bfloat16': jnp.bfloat16,
-    'float32': jnp.float32,
-    'jax.numpy.float32': jnp.float32,
-    'jax.numpy.bfloat16': jnp.bfloat16,
-    'None': None,
-    None: None,
-}
-
-PRECISION_MAP = {
-    'high': jax.lax.Precision.HIGH,
-    'HIGH': jax.lax.Precision.HIGH,
-    'default': jax.lax.Precision.DEFAULT,
-    'DEFAULT': jax.lax.Precision.DEFAULT,
-    'highest': jax.lax.Precision.HIGHEST,
-    'HIGHEST': jax.lax.Precision.HIGHEST,
-    'None': None,
-    None: None,
-}
-
-ACTIVATION_MAP = {
-    'swish': jax.nn.swish,
-    'silu': jax.nn.silu,
-    'jax._src.nn.functions.silu': jax.nn.silu,
-    'mish': jax.nn.mish,
-}
-
-def map_nested_config(config):
-    new_config = {}
-    for key, value in config.items():
-        if isinstance(value, dict):
-            new_config[key] = map_nested_config(value)
-        elif isinstance(value, str):
-            if value in DTYPE_MAP:
-                new_config[key] = DTYPE_MAP[value]
-            elif value in PRECISION_MAP:
-                new_config[key] = PRECISION_MAP[value]
-            elif value in ACTIVATION_MAP:
-                new_config[key] = ACTIVATION_MAP[value]
-            elif value == 'None':
-                new_config[key] = None
-            elif '.' in value:
-                # Ignore any other string that contains a dot
-                print(
-                    f"Ignoring key {key} with value {value} as it contains a dot.")
-    return new_config
-
 def serialize_model(model: nn.Module):
     """
     Serializes the model to a dictionary format.
@@ -164,77 +117,6 @@ def form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
 
 def convert_to_global_tree(global_mesh, pytree):
     return jax.tree_util.tree_map_with_path(partial(form_global_array, global_mesh=global_mesh), pytree)
-
-class RMSNorm(nn.Module):
-    """
-    From "Root Mean Square Layer Normalization" by https://arxiv.org/abs/1910.07467
-
-    Adapted from flax.linen.LayerNorm
-    """
-
-    epsilon: float = 1e-6
-    dtype: Any = jnp.float32
-    param_dtype: Any = jnp.float32
-    use_scale: bool = True
-    scale_init: Any = jax.nn.initializers.ones
-
-    @nn.compact
-    def __call__(self, x):
-        reduction_axes = (-1,)
-        feature_axes = (-1,)
-
-        rms_sq = self._compute_rms_sq(x, reduction_axes)
-
-        return self._normalize(
-            self,
-            x,
-            rms_sq,
-            reduction_axes,
-            feature_axes,
-            self.dtype,
-            self.param_dtype,
-            self.epsilon,
-            self.use_scale,
-            self.scale_init,
-        )
-
-    def _compute_rms_sq(self, x, axes):
-        x = jnp.asarray(x, jnp.promote_types(jnp.float32, jnp.result_type(x)))
-        rms_sq = jnp.mean(jax.lax.square(x), axes)
-        return rms_sq
-
-    def _normalize(
-        self,
-        mdl,
-        x,
-        rms_sq,
-        reduction_axes,
-        feature_axes,
-        dtype,
-        param_dtype,
-        epsilon,
-        use_scale,
-        scale_init,
-    ):
-        reduction_axes = nn.normalization._canonicalize_axes(x.ndim, reduction_axes)
-        feature_axes = nn.normalization._canonicalize_axes(x.ndim, feature_axes)
-        stats_shape = list(x.shape)
-        for axis in reduction_axes:
-            stats_shape[axis] = 1
-        rms_sq = rms_sq.reshape(stats_shape)
-        feature_shape = [1] * x.ndim
-        reduced_feature_shape = []
-        for ax in feature_axes:
-            feature_shape[ax] = x.shape[ax]
-            reduced_feature_shape.append(x.shape[ax])
-        mul = jax.lax.rsqrt(rms_sq + epsilon)
-        if use_scale:
-            scale = mdl.param(
-                "scale", scale_init, reduced_feature_shape, param_dtype
-            ).reshape(feature_shape)
-            mul *= scale
-        y = mul * x
-        return jnp.asarray(y, dtype)
 
 class AutoTextTokenizer:
     def __init__(self, tensor_type="pt", modelname="openai/clip-vit-large-patch14"):
