@@ -6,7 +6,7 @@ class BCHWModelWrapper(nn.Module):
     model: nn.Module
 
     @nn.compact
-    def __call__(self, x, temb, textcontext):
+    def __call__(self, x, temb, textcontext, train: bool = False):
         # Reshape the input to BCHW format from BHWC
         x = jnp.transpose(x, (0, 3, 1, 2))
         # Pass the input through the UNet model

@@ -21,9 +21,7 @@ class UViT(nn.Module):
     emb_features: int = 768
     num_layers: int = 12  # Should be even for U-Net structure
     num_heads: int = 12
-    dropout_rate: float = 0.1  # Dropout is often 0 in diffusion models
     use_projection: bool = False  # In TransformerBlock MLP
-    use_flash_attention: bool = False  # Passed to TransformerBlock
     # Passed to TransformerBlock (likely False for UViT)
     use_self_and_cross: bool = False
     force_fp32_for_softmax: bool = True  # Passed to TransformerBlock
@@ -94,7 +92,7 @@ class UViT(nn.Module):
                 heads=self.num_heads,
                 dim_head=self.emb_features // self.num_heads,
                 dtype=self.dtype, precision=self.precision, use_projection=self.use_projection,
-                use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross,
+                use_self_and_cross=self.use_self_and_cross,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
                 only_pure_attention=False, norm_inputs=self.norm_inputs,
                 explicitly_add_residual=self.explicitly_add_residual,
@@ -107,7 +105,7 @@ class UViT(nn.Module):
             heads=self.num_heads,
             dim_head=self.emb_features // self.num_heads,
             dtype=self.dtype, precision=self.precision, use_projection=self.use_projection,
-            use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross,
+            use_self_and_cross=self.use_self_and_cross,
             force_fp32_for_softmax=self.force_fp32_for_softmax,
             only_pure_attention=False, norm_inputs=self.norm_inputs,
             explicitly_add_residual=self.explicitly_add_residual,
@@ -128,7 +126,7 @@ class UViT(nn.Module):
                 heads=self.num_heads,
                 dim_head=self.emb_features // self.num_heads,
                 dtype=self.dtype, precision=self.precision, use_projection=self.use_projection,
-                use_flash_attention=self.use_flash_attention, use_self_and_cross=self.use_self_and_cross,
+                use_self_and_cross=self.use_self_and_cross,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
                 only_pure_attention=False, norm_inputs=self.norm_inputs,
                 explicitly_add_residual=self.explicitly_add_residual,
@@ -172,7 +170,7 @@ class UViT(nn.Module):
             )
 
     @nn.compact
-    def __call__(self, x, temb, textcontext=None):
+    def __call__(self, x, temb, textcontext=None, train: bool = False):
         original_img = x
         B, H, W, C = original_img.shape
         H_P = H // self.patch_size
@@ -264,7 +262,6 @@ class SimpleUDiT(nn.Module):
     dropout_rate: float = 0.0  # Typically 0 for diffusion
     dtype: Optional[Dtype] = None # e.g., jnp.float32 or jnp.bfloat16
     precision: PrecisionLike = None
-    use_flash_attention: bool = False # Passed to DiTBlock -> RoPEAttention
     force_fp32_for_softmax: bool = True # Passed to DiTBlock -> RoPEAttention
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False
@@ -320,7 +317,6 @@ class SimpleUDiT(nn.Module):
                 dropout_rate=self.dropout_rate,
                 dtype=self.dtype,
                 precision=self.precision,
-                use_flash_attention=self.use_flash_attention,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
                 norm_epsilon=self.norm_epsilon,
                 rope_emb=self.rope,
@@ -335,7 +331,6 @@ class SimpleUDiT(nn.Module):
             dropout_rate=self.dropout_rate,
             dtype=self.dtype,
             precision=self.precision,
-            use_flash_attention=self.use_flash_attention,
             force_fp32_for_softmax=self.force_fp32_for_softmax,
             norm_epsilon=self.norm_epsilon,
             rope_emb=self.rope,
@@ -358,7 +353,6 @@ class SimpleUDiT(nn.Module):
                 dropout_rate=self.dropout_rate,
                 dtype=self.dtype,
                 precision=self.precision,
-                use_flash_attention=self.use_flash_attention,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
                 norm_epsilon=self.norm_epsilon,
                 rope_emb=self.rope,
@@ -382,7 +376,7 @@ class SimpleUDiT(nn.Module):
         )
 
     @nn.compact
-    def __call__(self, x, temb, textcontext=None):
+    def __call__(self, x, temb, textcontext=None, train: bool = False):
         B, H, W, C = x.shape
         H_P = H // self.patch_size
         W_P = W // self.patch_size
@@ -410,16 +404,16 @@ class SimpleUDiT(nn.Module):
 
         skips = []
         for i in range(self.num_layers // 2):
-            x_seq = self.down_blocks[i](x_seq, conditioning=cond_emb, freqs_cis=None)
+            x_seq = self.down_blocks[i](x_seq, conditioning=cond_emb, freqs_cis=None, train=train)
             skips.append(x_seq)
 
-        x_seq = self.mid_block(x_seq, conditioning=cond_emb, freqs_cis=None)
+        x_seq = self.mid_block(x_seq, conditioning=cond_emb, freqs_cis=None, train=train)
 
         for i in range(self.num_layers // 2):
             skip_conn = skips.pop()
             x_seq = jnp.concatenate([x_seq, skip_conn], axis=-1)
             x_seq = self.up_dense[i](x_seq)
-            x_seq = self.up_blocks[i](x_seq, conditioning=cond_emb, freqs_cis=None)
+            x_seq = self.up_blocks[i](x_seq, conditioning=cond_emb, freqs_cis=None, train=train)
 
         x_out = self.final_norm(x_seq)
         x_out = self.final_proj(x_out)

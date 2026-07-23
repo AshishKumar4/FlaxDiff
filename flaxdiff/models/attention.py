@@ -11,108 +11,6 @@ import einops
 import functools
 import math
 from .common import kernel_init
-try:
-    import jax.experimental.pallas.ops.tpu.flash_attention
-except (ImportError, ModuleNotFoundError):
-    pass
-
-class EfficientAttention(nn.Module):
-    """
-    Based on the pallas attention implementation.
-    """
-    query_dim: int
-    heads: int = 4
-    dim_head: int = 64
-    dtype: Optional[Dtype] = None
-    precision: PrecisionLike = None
-    use_bias: bool = True
-    # kernel_init: Callable = kernel_init(1.0)
-    force_fp32_for_softmax: bool = True
-
-    def setup(self):
-        inner_dim = self.dim_head * self.heads
-        # Weights were exported with old names {to_q, to_k, to_v, to_out}
-        dense = functools.partial(
-            nn.Dense,
-            self.heads * self.dim_head,
-            precision=self.precision, 
-            use_bias=self.use_bias, 
-            # kernel_init=self.kernel_init, 
-            dtype=self.dtype
-        )
-        self.query = dense(name="to_q")
-        self.key = dense(name="to_k")
-        self.value = dense(name="to_v")
-        
-        self.proj_attn = nn.DenseGeneral(
-            self.query_dim, 
-            use_bias=False, 
-            precision=self.precision, 
-            # kernel_init=self.kernel_init,
-            dtype=self.dtype,
-            name="to_out_0"
-        )
-        # self.attnfn = make_fast_generalized_attention(qkv_dim=inner_dim, lax_scan_unroll=16)
-    
-    def _reshape_tensor_to_head_dim(self, tensor):
-        batch_size, _, seq_len, dim = tensor.shape
-        head_size = self.heads
-        tensor = tensor.reshape(batch_size, seq_len, head_size, dim // head_size)
-        tensor = jnp.transpose(tensor, (0, 2, 1, 3))
-        return tensor
-    
-    def _reshape_tensor_from_head_dim(self, tensor):
-        batch_size, _, seq_len, dim = tensor.shape
-        head_size = self.heads
-        tensor = jnp.transpose(tensor, (0, 2, 1, 3))
-        tensor = tensor.reshape(batch_size, 1, seq_len, dim * head_size)
-        return tensor
-
-    @nn.compact
-    def __call__(self, x:jax.Array, context=None):
-        # print(x.shape)
-        # x has shape [B, H * W, C]
-        context = x if context is None else context
-        
-        orig_x_shape = x.shape
-        if len(x.shape) == 4:
-            B, H, W, C = x.shape
-            x = x.reshape((B, 1, H * W, C))
-        else:
-            B, SEQ, C = x.shape
-            x = x.reshape((B, 1, SEQ, C))
-        
-        if len(context.shape) == 4:
-            B, _H, _W, _C = context.shape
-            context = context.reshape((B, 1, _H * _W, _C))
-        else:
-            B, SEQ, _C = context.shape
-            context = context.reshape((B, 1, SEQ, _C))
-        
-        query = self.query(x)
-        key = self.key(context)
-        value = self.value(context)
-        
-        query = self._reshape_tensor_to_head_dim(query)
-        key = self._reshape_tensor_to_head_dim(key)
-        value = self._reshape_tensor_to_head_dim(value)
-        
-        hidden_states = jax.experimental.pallas.ops.tpu.flash_attention.flash_attention(
-            query, key, value, None
-        )
-        
-        hidden_states = self._reshape_tensor_from_head_dim(hidden_states)
-        
-        
-        # hidden_states = nn.dot_product_attention(
-        #     query, key, value, dtype=self.dtype, broadcast_dropout=False, dropout_rng=None, precision=self.precision
-        # )
-        
-        proj = self.proj_attn(hidden_states)
-        
-        proj = proj.reshape(orig_x_shape)
-        
-        return proj
 
 class NormalAttention(nn.Module):
     """
@@ -246,17 +144,13 @@ class BasicTransformerBlock(nn.Module):
     precision: PrecisionLike = None
     use_bias: bool = True
     # kernel_init: Callable = kernel_init(1.0)
-    use_flash_attention:bool = False
     use_cross_only:bool = False
     only_pure_attention:bool = False
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-4
     
     def setup(self):
-        if self.use_flash_attention:
-            attenBlock = EfficientAttention
-        else:
-            attenBlock = NormalAttention
+        attenBlock = NormalAttention
             
         self.attention1 = attenBlock(
          query_dim=self.query_dim,
@@ -281,7 +175,7 @@ class BasicTransformerBlock(nn.Module):
             force_fp32_for_softmax=self.force_fp32_for_softmax
         )
         
-        self.ff = FlaxFeedForward(dim=self.query_dim)
+        self.ff = FlaxFeedForward(dim=self.query_dim, dtype=self.dtype, precision=self.precision)
         self.norm1 = nn.RMSNorm(epsilon=self.norm_epsilon, dtype=self.dtype)
         self.norm2 = nn.RMSNorm(epsilon=self.norm_epsilon, dtype=self.dtype)
         self.norm3 = nn.RMSNorm(epsilon=self.norm_epsilon, dtype=self.dtype)
@@ -309,7 +203,6 @@ class TransformerBlock(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     use_projection: bool = False
-    use_flash_attention:bool = False
     use_self_and_cross:bool = True
     only_pure_attention:bool = False
     force_fp32_for_softmax: bool = True
@@ -351,7 +244,6 @@ class TransformerBlock(nn.Module):
             precision=self.precision,
             use_bias=False,
             dtype=self.dtype,
-            use_flash_attention=self.use_flash_attention,
             use_cross_only=(not self.use_self_and_cross),
             only_pure_attention=self.only_pure_attention,
             force_fp32_for_softmax=self.force_fp32_for_softmax,

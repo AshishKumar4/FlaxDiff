@@ -9,8 +9,6 @@ from typing import List, Tuple, Dict, Any, Optional
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
 from ..schedulers import NoiseScheduler, get_coeff_shapes_tuple
 from ..utils import RandomMarkovState, MarkovState, clip_images
-from jax.experimental.shard_map import shard_map
-from jax.sharding import Mesh, PartitionSpec as P
 from flaxdiff.models.autoencoder import AutoEncoder
 from flaxdiff.inputs import DiffusionInputConfig
 

@@ -28,7 +28,6 @@ class DiTBlock(nn.Module):
     dropout_rate: float = 0.0
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
-    use_flash_attention: bool = False # Keep placeholder
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
     use_gating: bool = True # Add flag to easily disable gating
@@ -60,8 +59,10 @@ class DiTBlock(nn.Module):
             nn.Dense(features=self.features, dtype=self.dtype, precision=self.precision)
         ])
 
+        self.dropout = nn.Dropout(rate=self.dropout_rate)
+
     @nn.compact
-    def __call__(self, x, conditioning, freqs_cis):
+    def __call__(self, x, conditioning, freqs_cis, train: bool = False):
         # Get scale/shift/gate parameters
         # Shape: [B, 1, 6*F] -> split into 6 of [B, 1, F]
         scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
@@ -74,6 +75,7 @@ class DiTBlock(nn.Module):
         # Modulate after norm
         x_attn_modulated = norm_x_attn * (1 + scale_attn) + shift_attn
         attn_output = self.attention(x_attn_modulated, context=None, freqs_cis=freqs_cis)
+        attn_output = self.dropout(attn_output, deterministic=not train)
 
         if self.use_gating:
              x = residual + gate_attn * attn_output
@@ -86,6 +88,7 @@ class DiTBlock(nn.Module):
         # Modulate after norm
         x_mlp_modulated = norm_x_mlp * (1 + scale_mlp) + shift_mlp
         mlp_output = self.mlp(x_mlp_modulated)
+        mlp_output = self.dropout(mlp_output, deterministic=not train)
 
         if self.use_gating:
              x = residual + gate_mlp * mlp_output
@@ -111,14 +114,11 @@ class SimpleDiT(nn.Module):
     dtype: Optional[Dtype] = None
     precision: PrecisionLike = None
     # Passed down, but RoPEAttention uses NormalAttention
-    use_flash_attention: bool = False
     force_fp32_for_softmax: bool = True
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False  # Option to predict sigma like in DiT paper
     use_hilbert: bool = False  # Toggle Hilbert patch reorder
     use_zigzag: bool = False  # Toggle zigzag (serpentine) patch reorder
-    norm_groups: int = 0
-    activation: Callable = jax.nn.swish
 
     def setup(self):
         self.patch_embed = PatchEmbedding(
@@ -178,7 +178,6 @@ class SimpleDiT(nn.Module):
                 dropout_rate=self.dropout_rate,
                 dtype=self.dtype,
                 precision=self.precision,
-                use_flash_attention=self.use_flash_attention,
                 force_fp32_for_softmax=self.force_fp32_for_softmax,
                 norm_epsilon=self.norm_epsilon,
                 rope_emb=self.rope,  # Pass RoPE instance
@@ -198,14 +197,14 @@ class SimpleDiT(nn.Module):
 
         self.final_proj = nn.Dense(
             features=output_dim,
-            dtype=self.dtype,
+            dtype=jnp.float32,  # fp32 output head - the loss is computed in fp32
             precision=self.precision,
             kernel_init=nn.initializers.zeros,  # Initialize final layer to zero
             name="final_proj"
         )
 
     @nn.compact
-    def __call__(self, x, temb, textcontext=None):
+    def __call__(self, x, temb, textcontext=None, train: bool = False):
         B, H, W, C = x.shape
         assert H % self.patch_size == 0 and W % self.patch_size == 0, "Image dimensions must be divisible by patch size"
 
@@ -272,7 +271,7 @@ class SimpleDiT(nn.Module):
 
         # 4. Apply Transformer Blocks with adaLN-Zero conditioning
         for block in self.blocks:
-            x_seq = block(x_seq, conditioning=cond_emb, freqs_cis=(freqs_cos, freqs_sin))
+            x_seq = block(x_seq, conditioning=cond_emb, freqs_cis=(freqs_cos, freqs_sin), train=train)
 
         # 5. Final Layer
         x_out = self.final_norm(x_seq)

@@ -18,9 +18,7 @@ def make_config(model_overrides=None, arguments_overrides=None):
         "emb_features": 64,
         "dtype": "bfloat16",
         "precision": "high",
-        "activation": "swish",
         "output_channels": 3,
-        "norm_groups": 4,
         "patch_size": 4,
         "num_layers": 2,
         "num_heads": 2,
@@ -56,7 +54,14 @@ def test_parse_config_rebuilds_model():
     assert model.num_layers == 2
     assert model.dtype == jnp.bfloat16
     assert model.precision == jax.lax.Precision.HIGH
-    assert model.activation is jax.nn.swish
+
+
+def test_parse_config_drops_removed_fields():
+    """Configs from older runs carry since-removed flags; reconstruction must
+    drop them instead of crashing."""
+    result = parse_config(make_config(model_overrides={
+        "use_flash_attention": False, "norm_groups": 8, "activation": "swish"}))
+    assert type(result["model"]).__name__ == "SimpleDiT"
 
 
 def test_parse_config_noise_schedule_selection():
@@ -67,14 +72,19 @@ def test_parse_config_noise_schedule_selection():
     assert type(cosine["noise_schedule"]).__name__ == "CosineNoiseScheduler"
 
 
-@pytest.mark.xfail(strict=True, reason="bug: parse_config silently drops any string value containing a dot")
-def test_parse_config_preserves_dotted_values():
-    """String config values with a dot in them (module paths, filenames, version
-    strings) must survive the round trip, not vanish into class defaults."""
-    result = parse_config(make_config(model_overrides={"activation": "jax.nn.mish"}))
-    model = result["model"]
-    # a dropped key falls back to the class default (swish) instead of erroring
-    assert model.activation is jax.nn.mish, "activation was silently dropped"
+def test_parse_config_resolves_dotted_values():
+    """Function paths like 'jax.nn.mish' (and the 'jax._src.nn.functions.silu'
+    that old configs contain from the aliasing bug) must resolve to the actual
+    function, not silently vanish into class defaults."""
+    config = make_config(arguments_overrides={"architecture": "uvit"})
+    config["model"]["activation"] = "jax.nn.mish"
+    result = parse_config(config)
+    assert result["model"].activation is jax.nn.mish
+
+    config = make_config(arguments_overrides={"architecture": "uvit"})
+    config["model"]["activation"] = "jax._src.nn.functions.silu"
+    result = parse_config(config)
+    assert result["model"].activation is jax.nn.silu
 
 
 def test_training_and_inference_share_schedule_presets():
