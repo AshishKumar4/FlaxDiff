@@ -2,70 +2,67 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from .autoencoder import AutoEncoder
+from .vae import FlaxEncoder, FlaxDecoder, load_pretrained_vae
 
 """
-This module contains an Autoencoder implementation which uses the Stable Diffusion VAE model from the HuggingFace Diffusers library.
-The actual model was not trained by me, but was taken from the HuggingFace model hub.
-I have only implemented the wrapper around the diffusers pipeline to make it compatible with our library
-All credits for the model go to the developers of Stable Diffusion VAE and all credits for the pipeline go to the developers of the Diffusers library.
+This module contains an Autoencoder implementation which uses the Stable Diffusion VAE model from the HuggingFace model hub.
+The actual model was not trained by me. I have only implemented the wrapper (and vendored the diffusers Flax modules
+in vae.py, as diffusers dropped Flax support upstream) to make it compatible with our library.
+All credits for the model go to the developers of Stable Diffusion VAE and for the modules to the Diffusers library.
 """
 
 class StableDiffusionVAE(AutoEncoder):
     def __init__(self, modelname = "CompVis/stable-diffusion-v1-4", revision="bf16", dtype=jnp.bfloat16):
-        
-        from diffusers.models.vae_flax import FlaxEncoder, FlaxDecoder
-        from diffusers import FlaxStableDiffusionPipeline, FlaxAutoencoderKL
-        
-        vae, params = FlaxAutoencoderKL.from_pretrained(
-            modelname,
-            # revision=revision,
-            dtype=dtype,
-        )
-        
+
+        pretrained = load_pretrained_vae(modelname)
+        config = pretrained["config"]
+        params = pretrained["params"]
+
         self.modelname = modelname
         self.revision = revision
         self.dtype = dtype
-        
+
         enc = FlaxEncoder(
-            in_channels=vae.config.in_channels,
-            out_channels=vae.config.latent_channels,
-            down_block_types=vae.config.down_block_types,
-            block_out_channels=vae.config.block_out_channels,
-            layers_per_block=vae.config.layers_per_block,
-            act_fn=vae.config.act_fn,
-            norm_num_groups=vae.config.norm_num_groups,
+            in_channels=config["in_channels"],
+            out_channels=config["latent_channels"],
+            down_block_types=config["down_block_types"],
+            block_out_channels=config["block_out_channels"],
+            layers_per_block=config["layers_per_block"],
+            act_fn=config["act_fn"],
+            norm_num_groups=config["norm_num_groups"],
             double_z=True,
-            dtype=vae.dtype,
+            dtype=dtype,
         )
-        
+
         dec = FlaxDecoder(
-            in_channels=vae.config.latent_channels,
-            out_channels=vae.config.out_channels,
-            up_block_types=vae.config.up_block_types,
-            block_out_channels=vae.config.block_out_channels,
-            layers_per_block=vae.config.layers_per_block,
-            norm_num_groups=vae.config.norm_num_groups,
-            act_fn=vae.config.act_fn,
-            dtype=vae.dtype,
+            in_channels=config["latent_channels"],
+            out_channels=config["out_channels"],
+            up_block_types=config["up_block_types"],
+            block_out_channels=config["block_out_channels"],
+            layers_per_block=config["layers_per_block"],
+            norm_num_groups=config["norm_num_groups"],
+            act_fn=config["act_fn"],
+            dtype=dtype,
         )
-        
+
         quant_conv = nn.Conv(
-            2 * vae.config.latent_channels,
+            2 * config["latent_channels"],
             kernel_size=(1, 1),
             strides=(1, 1),
             padding="VALID",
-            dtype=vae.dtype,
+            dtype=dtype,
         )
 
         post_quant_conv = nn.Conv(
-            vae.config.latent_channels,
+            config["latent_channels"],
             kernel_size=(1, 1),
             strides=(1, 1),
             padding="VALID",
-            dtype=vae.dtype,
+            dtype=dtype,
         )
-        
-        scaling_factor = vae.scaling_factor
+
+        # Older VAE configs predate the scaling_factor key; 0.18215 is the SD default
+        scaling_factor = config.get("scaling_factor", 0.18215)
         print(f"Scaling factor: {scaling_factor}")
         
         def encode_single_frame(images, rngkey: jax.random.PRNGKey = None):

@@ -25,8 +25,23 @@ dependencies = [
     "albumentations",
     "rich",
     "python-dotenv",
+    "transformers",
+    "huggingface_hub",
+    "wandb",
+    # diffusers removed all Flax support upstream (huggingface/diffusers#14169);
+    # only needed for the diffusers_unet_simple architecture, the VAE is vendored
+    "diffusers>=0.29,<0.35",
 ]
 license = "MIT"
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "network: tests that download pretrained weights from the HuggingFace Hub",
+]
 
 [tool.setuptools.packages.find]
 include = ["flaxdiff*"]
