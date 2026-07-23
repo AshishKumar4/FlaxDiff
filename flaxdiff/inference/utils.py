@@ -1,31 +1,17 @@
 import jax
 import jax.numpy as jnp
 import json
-from flaxdiff.predictors import get_diffusion_preset
-from flaxdiff.models.common import kernel_init
-from flaxdiff.models.simple_unet import Unet
-from flaxdiff.models.simple_vit import UViT
-from flaxdiff.models.general import BCHWModelWrapper
-from flaxdiff.models.autoencoder.diffusers import StableDiffusionVAE
-from flaxdiff.inputs import DiffusionInputConfig, ConditionalInputConfig
-from flaxdiff.utils import defaultTextEncodeModel
-from diffusers import FlaxUNet2DConditionModel
-import wandb
-from flaxdiff.models.simple_unet import Unet
-from flaxdiff.models.simple_vit import UViT
-from flaxdiff.models.general import BCHWModelWrapper
-from flaxdiff.models.autoencoder.diffusers import StableDiffusionVAE
-from flaxdiff.inputs import DiffusionInputConfig, ConditionalInputConfig
-from flaxdiff.utils import defaultTextEncodeModel
-
-from flaxdiff.models.simple_vit import UViT, SimpleUDiT
-from flaxdiff.models.simple_dit import SimpleDiT
-from flaxdiff.models.simple_mmdit import SimpleMMDiT, HierarchicalMMDiT
-from flaxdiff.models.ssm_dit import HybridSSMAttentionDiT
-from orbax.checkpoint import CheckpointManager, CheckpointManagerOptions, PyTreeCheckpointer
 import os
-
 import warnings
+
+import wandb
+from orbax.checkpoint import CheckpointManager, CheckpointManagerOptions, PyTreeCheckpointer
+
+from flaxdiff.predictors import get_diffusion_preset
+from flaxdiff.models.registry import build_model, canonicalize_architecture, map_config_strings
+from flaxdiff.models.autoencoder.diffusers import StableDiffusionVAE
+from flaxdiff.inputs import DiffusionInputConfig, ConditionalInputConfig
+from flaxdiff.utils import defaultTextEncodeModel
 
 def get_wandb_run(wandb_run: str, project, entity):
     """
@@ -82,97 +68,12 @@ def parse_config(config, overrides=None):
     conf = merged_config
     
     # Setup mappings for dtype, precision, and activation
-    DTYPE_MAP = {
-        'bfloat16': jnp.bfloat16,
-        'float32': jnp.float32,
-        'jax.numpy.float32': jnp.float32,
-        'jax.numpy.bfloat16': jnp.bfloat16,
-        'None': None,
-        None: None,
-    }
-    
-    PRECISION_MAP = {
-        'high': jax.lax.Precision.HIGH,
-        'HIGH': jax.lax.Precision.HIGH,
-        'default': jax.lax.Precision.DEFAULT,
-        'DEFAULT': jax.lax.Precision.DEFAULT,
-        'highest': jax.lax.Precision.HIGHEST,
-        'HIGHEST': jax.lax.Precision.HIGHEST,
-        'None': None,
-        None: None,
-    }
-    
-    ACTIVATION_MAP = {
-        'swish': jax.nn.swish,
-        'silu': jax.nn.silu,
-        'jax._src.nn.functions.silu': jax.nn.silu,
-        'mish': jax.nn.mish,
-    }
-    
-    # Get model class based on architecture
-    MODEL_CLASSES = {
-        'unet': Unet,
-        'uvit': UViT,
-        'diffusers_unet_simple': FlaxUNet2DConditionModel,
-        'simple_dit': SimpleDiT,
-        'simple_mmdit': SimpleMMDiT,
-        'simple_udit': SimpleUDiT,
-        'hierarchical_mmdit': HierarchicalMMDiT,
-        # +2d/+hilbert/+zigzag suffixes are stripped before this lookup;
-        # the corresponding flags come in via model_config kwargs
-        'hybrid_dit': HybridSSMAttentionDiT,
-    }
-    
-    # Map all the leaves of the model config, converting strings to appropriate types
-    def map_nested_config(config):
-        new_config = {}
-        for key, value in config.items():
-            if isinstance(value, dict):
-                new_config[key] = map_nested_config(value)
-            elif isinstance(value, list):
-                new_config[key] = [map_nested_config(item) if isinstance(item, dict) else item for item in value]
-            elif isinstance(value, str):
-                if value in DTYPE_MAP:
-                    new_config[key] = DTYPE_MAP[value]
-                elif value in PRECISION_MAP:
-                    new_config[key] = PRECISION_MAP[value]
-                elif value in ACTIVATION_MAP:
-                    new_config[key] = ACTIVATION_MAP[value]
-                elif value == 'None':
-                    new_config[key] = None
-                elif value.startswith('jax.') or value.startswith('jax._src.'):
-                    # Resolve function paths like 'jax.nn.mish' by attribute walk;
-                    # jax._src paths leak from old configs that stored the live
-                    # function object instead of its name
-                    attr_path = value.replace('jax._src.nn.functions', 'jax.nn')
-                    obj = jax
-                    for part in attr_path.split('.')[1:]:
-                        obj = getattr(obj, part)
-                    new_config[key] = obj
-                else:
-                    new_config[key] = value
-            else:
-                new_config[key] = value
-        return new_config
-
     # Parse architecture and model config
     model_config = conf['model']
 
     # Get architecture type
     architecture = conf.get('architecture', conf.get('arguments', {}).get('architecture', 'unet'))
-
-    # Strip +2d/+hilbert/+zigzag suffixes for the MODEL_CLASSES lookup - the
-    # matching flags (use_2d_fusion, use_hilbert, use_zigzag) are already in
-    # model_config so the model still gets them as kwargs.
-    if isinstance(architecture, str):
-        canonical = architecture
-        for suffix in ('+2d', '+hilbert', '+zigzag'):
-            canonical = canonical.replace(suffix, '')
-        if canonical != architecture:
-            print(f"Canonicalized architecture: '{architecture}' -> '{canonical}' "
-                  f"(suffix flags read from model_config)")
-            architecture = canonical
-        
+    
     # Handle autoencoder
     autoencoder_name = conf.get('autoencoder', conf.get('arguments', {}).get('autoencoder'))
     autoencoder_opts_str = conf.get('autoencoder_opts', conf.get('arguments', {}).get('autoencoder_opts', '{}'))
@@ -188,7 +89,7 @@ def parse_config(config, overrides=None):
             
         if autoencoder_name == 'stable_diffusion':
             print("Using Stable Diffusion Autoencoder for Latent Diffusion Modeling")
-            autoencoder_opts = map_nested_config(autoencoder_opts)
+            autoencoder_opts = map_config_strings(autoencoder_opts)
             autoencoder = StableDiffusionVAE(**autoencoder_opts)
             
     input_config = conf.get('input_config', None)
@@ -220,29 +121,8 @@ def parse_config(config, overrides=None):
         # Deserialize the input config if it's a string
         input_config = DiffusionInputConfig.deserialize(input_config)
     
-    model_kwargs = map_nested_config(model_config)
-    
-    print(f"Model kwargs after mapping: {model_kwargs}")
-    
-    model_class = MODEL_CLASSES.get(architecture)
-    if not model_class:
-        raise ValueError(f"Unknown architecture: {architecture}. Supported architectures: {', '.join(MODEL_CLASSES.keys())}")
-    
-    # Drop config keys the model no longer has fields for (older runs logged
-    # since-removed flags like use_flash_attention)
-    import dataclasses
-    valid_fields = {f.name for f in dataclasses.fields(model_class)}
-    dropped = sorted(set(model_kwargs) - valid_fields)
-    if dropped:
-        print(f"Dropping config keys not accepted by {model_class.__name__}: {dropped}")
-    model_kwargs = {k: v for k, v in model_kwargs.items() if k in valid_fields}
-    
-    # Instantiate the model
-    model = model_class(**model_kwargs)
-    
-    # If using diffusers UNet, wrap it for consistent interface
-    if 'diffusers' in architecture:
-        model = BCHWModelWrapper(model)
+    model = build_model(architecture, model_config)
+    model_kwargs = map_config_strings(model_config)
     
     # Same preset as training, so the sampling convention always matches
     noise_schedule_type = conf.get('noise_schedule', conf.get('arguments', {}).get('noise_schedule', 'edm'))
