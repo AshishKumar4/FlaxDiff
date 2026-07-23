@@ -93,42 +93,25 @@ class DiffusionTrainer(SimpleTrainer):
         self,
         optimizer: optax.GradientTransformation,
         rngs: jax.random.PRNGKey,
-        existing_state: dict = None,
-        existing_best_state: dict = None,
         model: nn.Module = None,
-        param_transforms: Callable = None,
         use_dynamic_scale: bool = False
     ) -> Tuple[TrainState, TrainState]:
         print("Generating states for DiffusionTrainer")
         rngs, subkey = jax.random.split(rngs)
 
-        if existing_state == None:
-            input_vars = self.get_input_ones()
-            params = model.init(subkey, **input_vars)
-            new_state = {"params": params, "ema_params": params}
-        else:
-            new_state = existing_state
-
-        if param_transforms is not None:
-            params = param_transforms(params)
+        input_vars = self.get_input_ones()
+        params = model.init(subkey, **input_vars)
 
         state = TrainState.create(
             apply_fn=model.apply,
-            params=new_state['params'],
-            ema_params=new_state['ema_params'],
+            params=params,
+            ema_params=params,
             tx=optimizer,
             rngs=rngs,
             metrics=Metrics.empty(),
             dynamic_scale = dynamic_scale_lib.DynamicScale() if use_dynamic_scale else None
         )
-            
-        if existing_best_state is not None:
-            best_state = state.replace(
-                params=existing_best_state['params'], ema_params=existing_best_state['ema_params'])
-        else:
-            best_state = state
-
-        return state, best_state
+        return state, state
 
     def _define_train_step(self, batch_size):
         noise_schedule: NoiseScheduler = self.noise_schedule
@@ -332,7 +315,7 @@ class DiffusionTrainer(SimpleTrainer):
             )
             
             # Put each sample on wandb
-            if getattr(self, 'wandb', None) is not None and self.wandb:
+            if self.wandb is not None and self.wandb:
                 import numpy as np
                 from wandb import Image as wandbImage
                 wandb_images = []

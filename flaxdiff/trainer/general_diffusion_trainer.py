@@ -466,7 +466,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                 if i == 0:
                     print(f"Evaluation started for process index {process_index}")
                     # Log samples to wandb
-                    if getattr(self, 'wandb', None) is not None and self.wandb:
+                    if self.wandb is not None and self.wandb:
                         import numpy as np
                         
                         # Process samples differently based on dimensionality
@@ -488,7 +488,7 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                         prev = self.best_val_metrics[final_key]
                         self.best_val_metrics[final_key] = max(prev, value) if higher_is_better else min(prev, value)
                 # Log the best validation metrics
-                if getattr(self, 'wandb', None) is not None and self.wandb:
+                if self.wandb is not None and self.wandb:
                     # Log the metrics
                     for key, value in metrics.items():
                         if isinstance(value, jnp.ndarray):
@@ -711,12 +711,12 @@ class GeneralDiffusionTrainer(DiffusionTrainer):
                         aliases.append("best")
                     self.push_to_registry(aliases=aliases)
                     print("Model pushed to registry successfully with aliases:", aliases)
+                    # Only delete after a successful registry push - the local
+                    # checkpoint is the only copy otherwise
+                    shutil.rmtree(checkpoint, ignore_errors=True)
+                    print(f"Checkpoint deleted at {checkpoint}")
                 else:
-                    print("Current run is not one of the best runs. Not saving model.")
-                
-                # Only delete after successful registry push
-                shutil.rmtree(checkpoint, ignore_errors=True)
-                print(f"Checkpoint deleted at {checkpoint}")
+                    print("Current run is not one of the best runs. Keeping local checkpoint.")
             except Exception as e:
                 print(f"Error during registry operations: {e}")
                 print(f"Checkpoint preserved at {checkpoint}")
