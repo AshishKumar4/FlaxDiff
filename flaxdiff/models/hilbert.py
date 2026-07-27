@@ -3,8 +3,6 @@ import jax.numpy as jnp
 import numpy as np
 import math
 import einops
-import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
 from typing import Tuple
 
 # --- 2D Positional Encoding (shared by simple_dit and ssm_dit) ---
@@ -366,6 +364,9 @@ def visualize_hilbert_curve(H: int, W: int, patch_size: int, figsize=(12, 5)):
     Returns:
         The matplotlib Figure object.
     """
+    # Imported here so plotting stays off the model import path
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
     H_P = H // patch_size
     W_P = W // patch_size
     if H_P * W_P == 0:
@@ -538,6 +539,9 @@ def demo_hilbert_patching(image_np: np.ndarray, patch_size: int = 8, figsize=(15
     Returns:
         Tuple of (fig_main, fig_reconstruction) matplotlib Figure objects.
     """
+    # Imported here so plotting stays off the model import path
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
     # Handle grayscale images
     if image_np.ndim == 2:
         image_np = np.expand_dims(image_np, axis=-1) # Add channel dim
