@@ -177,11 +177,16 @@ class ModulatedBlock(nn.Module):
     mixer='ssm' replaces attention with a bidirectional S5 scan, optionally
     followed by Spatial-Mamba style 2D state fusion. freqs_cis is unused by
     the SSM mixer but kept in the interface so blocks are interchangeable.
+
+    modulated=False drops the adaLN-Zero conditioning path entirely, leaving a
+    plain pre-norm residual block with learned affine norms - the ViT block a
+    JEPA encoder needs, where there is no timestep to condition on.
     """
     features: int
     num_heads: int
     rope_emb: RotaryEmbedding = None
     mixer: str = 'attention'
+    modulated: bool = True
     mlp_ratio: int = 4
     dropout_rate: float = 0.0
     dtype: Optional[Dtype] = None
@@ -201,13 +206,17 @@ class ModulatedBlock(nn.Module):
         assert self.mixer in ('attention', 'ssm'), f"Unknown mixer {self.mixer}"
         hidden_features = int(self.features * self.mlp_ratio)
 
-        self.ada_params_module = AdaLNParams(
-            self.features, dtype=self.dtype, precision=self.precision)
+        if self.modulated:
+            self.ada_params_module = AdaLNParams(
+                self.features, dtype=self.dtype, precision=self.precision)
+        # Without modulation the norms carry their own affine, since there is
+        # no conditioning vector left to supply the shift and scale
+        affine = not self.modulated
         self.norm1 = nn.LayerNorm(
-            epsilon=self.norm_epsilon, use_scale=False, use_bias=False,
+            epsilon=self.norm_epsilon, use_scale=affine, use_bias=affine,
             dtype=self.dtype, name="norm1")
         self.norm2 = nn.LayerNorm(
-            epsilon=self.norm_epsilon, use_scale=False, use_bias=False,
+            epsilon=self.norm_epsilon, use_scale=affine, use_bias=affine,
             dtype=self.dtype, name="norm2")
 
         if self.mixer == 'attention':
@@ -281,9 +290,16 @@ class ModulatedBlock(nn.Module):
 
     @nn.compact
     def __call__(self, x, conditioning, freqs_cis, train: bool = False):
-        scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
-            self.ada_params_module(conditioning), 6, axis=-1
-        )
+        if self.modulated:
+            scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
+                self.ada_params_module(conditioning), 6, axis=-1
+            )
+        else:
+            assert conditioning is None, "an unmodulated block takes no conditioning"
+            # Identity modulation - the block body below collapses to a plain
+            # pre-norm residual block without branching on the mode
+            scale_mlp = shift_mlp = scale_attn = shift_attn = 0.0
+            gate_mlp = gate_attn = 1.0
 
         # --- Mixer path (attention or SSM) ---
         residual = x
@@ -314,12 +330,17 @@ class ModulatedBlock(nn.Module):
         return x
 
 
+def identity_rope_freqs(seq_len: int, dim: int, dtype: Dtype = jnp.float32):
+    """RoPE frequencies that rotate by nothing, for sequences whose 1D index is
+    not a position (scan orders other than raster, masked token subsets)."""
+    shape = (seq_len, dim // 2)
+    return jnp.ones(shape, dtype=dtype), jnp.zeros(shape, dtype=dtype)
+
+
 def neutralized_rope_freqs(rope: RotaryEmbedding, seq_len: int, scan_order: str):
     """RoPE frequencies for the sequence, neutralized to identity for
     hilbert/zigzag scans where the 1D index is not a 2D position (the 2D
     sincos embedding already carries position there)."""
-    freqs_cos, freqs_sin = rope(seq_len=seq_len)
     if scan_order != 'raster':
-        freqs_cos = jnp.ones_like(freqs_cos)
-        freqs_sin = jnp.zeros_like(freqs_sin)
-    return freqs_cos, freqs_sin
+        return identity_rope_freqs(seq_len, rope.dim)
+    return rope(seq_len=seq_len)

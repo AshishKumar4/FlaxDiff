@@ -439,7 +439,7 @@ class SimpleTrainer:
             if self.distributed_training and global_device_count > 1:
             #     # Convert the local device batches to a unified global jax.Array 
                 batch = convert_to_global_tree(self.mesh, batch)
-            train_state, loss, rng_state = train_step_fn(train_state, rng_state, batch, global_device_indexes)
+            train_state, loss, aux, rng_state = train_step_fn(train_state, rng_state, batch, global_device_indexes)
 
             if i == 0:
                 print(f"Training started for process index {process_index} at step {current_step}")
@@ -470,6 +470,7 @@ class SimpleTrainer:
                         self.wandb.log({
                             "train/step" : current_step,
                             "train/loss": loss,
+                            **{f"train/{k}": v for k, v in aux.items()},
                         }, step=current_step)
                 # Save the model every few steps
                 if save_every and i % save_every == 0 and i > 0:
