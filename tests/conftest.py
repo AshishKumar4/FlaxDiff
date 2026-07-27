@@ -2,6 +2,11 @@ import os
 
 # Tests must run identically on any machine, CPU is enough
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
+# Enough simulated devices to exercise a 4x2 data/fsdp mesh. Must be set before
+# jax initialises its backend.
+os.environ["XLA_FLAGS"] = (
+    os.environ.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=8"
+).strip()
 
 import jax
 import jax.numpy as jnp

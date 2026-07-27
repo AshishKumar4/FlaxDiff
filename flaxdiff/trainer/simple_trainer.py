@@ -1,29 +1,23 @@
-import orbax.checkpoint
 import tqdm
 from flax import linen as nn
 import jax
-from typing import Callable
-from dataclasses import field
 import jax.numpy as jnp
 import numpy as np
-from functools import partial
 from clu import metrics
 from flax.training import train_state  # Useful dataclass to keep train state
 import optax
 from flax import struct                # Flax dataclasses
-import flax
 import time
 import os
-import orbax
-from flax.training import orbax_utils
-from jax.sharding import Mesh, PartitionSpec as P
-from jax.experimental import mesh_utils
-from jax.experimental.shard_map import shard_map
-from orbax.checkpoint.utils import fully_replicated_host_local_array_to_global_array
+import orbax.checkpoint as ocp
+from jax.sharding import NamedSharding, PartitionSpec as P
 from termcolor import colored
-from typing import Dict, Callable, Sequence, Any, Union, Tuple
-from flax.training.dynamic_scale import DynamicScale
-from flaxdiff.utils import RandomMarkovState, convert_to_global_tree
+from typing import Dict, Callable, Any, Tuple
+from flaxdiff.utils import (
+    DEFAULT_MIN_SHARD_SIZE, DevicePrefetchIterator, RandomMarkovState, batch_sharding,
+    build_mesh, enable_compilation_cache, model_flops_utilization, shard_batch,
+    state_sharding_tree, step_flops,
+)
 from flax.training import dynamic_scale as dynamic_scale_lib
 from dataclasses import dataclass
 import shutil
@@ -49,80 +43,10 @@ class SimpleTrainState(train_state.TrainState):
     metrics: Metrics
     dynamic_scale: dynamic_scale_lib.DynamicScale
 
-def move_contents_to_subdir(target_dir, new_subdir_name):
-    # --- 1. Validate Target Directory ---
-    if not os.path.isdir(target_dir):
-        print(f"Error: Target directory '{target_dir}' not found or is not a directory.")
-        return
-    # --- 2. Define Paths ---
-    # Construct the full path for the new subdirectory
-    new_subdir_path = os.path.join(target_dir, new_subdir_name)
-    # --- 3. Create New Subdirectory ---
-    try:
-        # Create the subdirectory.
-        # exist_ok=True prevents an error if the directory already exists.
-        os.makedirs(new_subdir_path, exist_ok=True)
-        print(f"Subdirectory '{new_subdir_path}' created or already exists.")
-    except OSError as e:
-        print(f"Error creating subdirectory '{new_subdir_path}': {e}")
-        return # Stop execution if subdirectory creation fails
-    # --- 4. List Contents of Target Directory ---
-    try:
-        items_to_move = os.listdir(target_dir)
-    except OSError as e:
-        print(f"Error listing contents of '{target_dir}': {e}")
-        return # Stop if we can't list directory contents
-    # --- 5. Move Items ---
-    print(f"Moving items from '{target_dir}' to '{new_subdir_path}'...")
-    moved_count = 0
-    error_count = 0
-    for item_name in items_to_move:
-        # Construct the full path of the item in the target directory
-        source_path = os.path.join(target_dir, item_name)
-        # IMPORTANT: Skip the newly created subdirectory itself!
-        if source_path == new_subdir_path:
-            continue
-        # Construct the destination path inside the new subdirectory
-        destination_path = os.path.join(new_subdir_path, item_name)
-        # Move the item
-        try:
-            shutil.move(source_path, destination_path)
-            # print(f"  Moved: '{item_name}'") # Uncomment for verbose output
-            moved_count += 1
-        except Exception as e:
-            print(f"  Error moving '{item_name}': {e}")
-            error_count += 1
-    print(f"\nOperation complete.")
-    print(f"  Successfully moved: {moved_count} item(s).")
-    if error_count > 0:
-        print(f"  Errors encountered: {error_count} item(s).")
-
-def load_from_checkpoint(
-    checkpoint_dir: str,
-):
-    try:
-        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-        options = orbax.checkpoint.CheckpointManagerOptions(create=False)
-        # Convert checkpoint_dir to absolute path
-        checkpoint_dir = os.path.abspath(checkpoint_dir)
-        manager = orbax.checkpoint.CheckpointManager(checkpoint_dir, checkpointer, options)
-        ckpt = manager.restore(checkpoint_dir)
-        # Extract as above
-        state, best_state = None, None
-        if 'state' in ckpt:
-            state = ckpt['state']
-        if 'best_state' in ckpt:
-            best_state = ckpt['best_state']
-        print(f"Loaded checkpoint from local dir {checkpoint_dir}")
-        return state, best_state
-    except Exception as e:
-        print(f"Warning: Failed to load checkpoint from local dir: {e}")
-        return None, None
-    
 @dataclass
 class SimpleTrainer:
     state: SimpleTrainState
-    best_state: SimpleTrainState
+    best_state: Any
     best_loss: float
     model: nn.Module
     ema_decay: float = 0.999
@@ -143,21 +67,40 @@ class SimpleTrainer:
                  use_dynamic_scale: bool = False,
                  max_checkpoints_to_keep: int = 2,
                  train_start_step_override: int = None,
+                 fsdp_size: int = 1,
+                 fsdp_min_param_size: int = DEFAULT_MIN_SHARD_SIZE,
+                 compilation_cache_dir: str = None,
+                 profile_steps: int = 0,
+                 log_every: int = 100,
+                 max_bad_loss_steps: int = 5,
                  ):
-        if distributed_training is None or distributed_training is True:
-            # Auto-detect if we are running on multiple devices
-            distributed_training = jax.device_count() > 1
-            self.mesh = jax.sharding.Mesh(jax.devices(), 'data')
-        else:
-            self.mesh = None
+        if compilation_cache_dir:
+            enable_compilation_cache(compilation_cache_dir)
 
+        # One code path for every topology: the mesh spans all devices unless
+        # the caller explicitly opts out, and a 1x1 mesh behaves exactly like
+        # the old single-device path.
+        if distributed_training is None:
+            distributed_training = jax.device_count() > 1
         self.distributed_training = distributed_training
+        devices = jax.devices() if distributed_training else jax.devices()[:1]
+        self.mesh = build_mesh(fsdp_size, devices=devices)
+        self.batch_sharding = batch_sharding(self.mesh)
+        self.replicated = NamedSharding(self.mesh, P())
+        self.fsdp_min_param_size = fsdp_min_param_size
+
         self.model = model
         self.name = name
         self.loss_fn = loss_fn
         self.input_shapes = input_shapes
         self.checkpoint_base_path = checkpoint_base_path
-        
+        self.profile_steps = profile_steps
+        self.log_every = log_every
+        self.max_bad_loss_steps = max_bad_loss_steps
+        # Measured from the compiled step the first time it runs.
+        self.flops_per_step = None
+        self.global_batch_size = 0
+
         load_directly_from_dir = False
         
         self.wandb = None
@@ -202,25 +145,26 @@ class SimpleTrainer:
                 print(f"Running sweep {self.wandb_sweep.id} with id {self.wandb.sweep_id}")
             
         # checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-        async_checkpointer = orbax.checkpoint.AsyncCheckpointer(orbax.checkpoint.PyTreeCheckpointHandler(), timeout_secs=60)
-
-        options = orbax.checkpoint.CheckpointManagerOptions(
-            max_to_keep=max_checkpoints_to_keep, create=True)
-        self.checkpointer = orbax.checkpoint.CheckpointManager(
-            self.checkpoint_path(), async_checkpointer, options)
+        options = ocp.CheckpointManagerOptions(
+            max_to_keep=max_checkpoints_to_keep, create=True,
+            enable_async_checkpointing=True)
+        self.checkpointer = ocp.CheckpointManager(self.checkpoint_path(), options=options)
 
         self.rngstate = RandomMarkovState(rngs)
         self.rngstate, subkey = self.rngstate.get_random_key()
 
-        if train_state == None:
-            state, best_state = self.generate_states(
-                optimizer, subkey, model, use_dynamic_scale
-            )
-            self.init_state(state, best_state)
+        self.best_loss = 1e9
+        if train_state is None:
+            self.state = self.generate_states(optimizer, subkey, model, use_dynamic_scale)
         else:
             self.state = train_state
-            self.best_state = train_state
-            self.best_loss = 1e9
+            self.state_sharding = jax.tree.map(lambda x: x.sharding, train_state)
+        # Host-side copy: aliasing a live train state here would pin its buffers
+        # and block donating them to the training step.
+        self.best_state = self.get_np_tree(self.state)
+        # Position of the data iterator, carried through checkpoints so a resume
+        # continues mid-epoch instead of replaying from the top.
+        self.dataset_state = None
 
         self.latest_step = 0
         if load_from_checkpoint is not None:
@@ -233,47 +177,47 @@ class SimpleTrainer:
     def get_input_ones(self):
         return {k: jnp.ones((1, *v)) for k, v in self.input_shapes.items()}
 
+    def _build_state(self, init_fn) -> SimpleTrainState:
+        """Materialise a train state directly into its sharded layout.
+
+        The sharding is derived from the abstract state, so optimizer moments
+        and EMA copies inherit their params' layout through tx.init without any
+        model or optimizer having to declare partitioning.
+        """
+        self.state_sharding = state_sharding_tree(
+            self.mesh, jax.eval_shape(init_fn), self.fsdp_min_param_size)
+        return jax.jit(init_fn, out_shardings=self.state_sharding)()
+
     def generate_states(
         self,
         optimizer: optax.GradientTransformation,
         rngs: jax.random.PRNGKey,
         model: nn.Module = None,
         use_dynamic_scale: bool = False
-    ) -> Tuple[SimpleTrainState, SimpleTrainState]:
+    ) -> SimpleTrainState:
         print("Generating states for SimpleTrainer")
-        rngs, subkey = jax.random.split(rngs)
 
-        input_vars = self.get_input_ones()
-        params = model.init(subkey, **input_vars)
+        def init_fn():
+            _, subkey = jax.random.split(rngs)
+            return SimpleTrainState.create(
+                apply_fn=model.apply,
+                params=model.init(subkey, **self.get_input_ones()),
+                tx=optimizer,
+                metrics=Metrics.empty(),
+                dynamic_scale=dynamic_scale_lib.DynamicScale() if use_dynamic_scale else None,
+            )
 
-        state = SimpleTrainState.create(
-            apply_fn=model.apply,
-            params=params,
-            tx=optimizer,
-            metrics=Metrics.empty(),
-            dynamic_scale = dynamic_scale_lib.DynamicScale() if use_dynamic_scale else None
-        )
-        return state, state
-
-    def init_state(
-        self,
-        state: SimpleTrainState,
-        best_state: SimpleTrainState,
-    ):
-        self.best_loss = 1e9
-
-        self.state = state
-        self.best_state = best_state
+        return self._build_state(init_fn)
 
     def get_state(self):
         return self.get_np_tree(self.state)
 
     def get_best_state(self):
-        return self.get_np_tree(self.best_state)
-        
+        return self.best_state
+
     def get_rngstate(self):
         return self.get_np_tree(self.rngstate)
-    
+
     def get_np_tree(self, pytree):
         return jax.tree_util.tree_map(lambda x : np.array(x), pytree)
 
@@ -285,40 +229,51 @@ class SimpleTrainer:
             os.makedirs(path)
         return path
 
-    def load(self, checkpoint_path, checkpoint_step=None, load_directly_from_dir=False):
-        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-        options = orbax.checkpoint.CheckpointManagerOptions(
-            max_to_keep=4, create=False)
-        checkpointer = orbax.checkpoint.CheckpointManager(
-            checkpoint_path, checkpointer, options)    
-        
-        if checkpoint_step is None:
-            step = checkpointer.latest_step()
-        else:
-            step = checkpoint_step
-        
-        print("Loading model from checkpoint at step ", step)
-        loaded_checkpoint_path = os.path.join(
-            checkpoint_path if checkpoint_path else self.checkpoint_path(),
-            f"{step}")
-        self.loaded_checkpoint_path = loaded_checkpoint_path
+    def _checkpoint_template(self):
+        """Restore template plus the per-leaf args that place arrays on the mesh.
 
-        # Restore against the freshly-initialized states as a template so orbax
-        # rebuilds the exact pytree types - optimizer state and step included.
-        # Restoring untyped used to silently discard opt_state and reset the
-        # step counter (and with it the lr schedule) on every resume.
+        Shapes and types come from the freshly built state, so a checkpoint
+        written on one mesh restores onto whatever mesh this run is using.
+        Restoring untyped used to silently discard opt_state and reset the step
+        counter (and with it the lr schedule) on every resume.
+        """
+        abstract_state = jax.eval_shape(lambda: self.state)
         template = {
             'rngs': self.get_rngstate(),
-            'state': self.get_state(),
-            'best_state': self.get_best_state(),
+            'state': abstract_state,
+            'best_state': self.best_state,
             'best_loss': np.array(self.best_loss),
             'epoch': 0,
         }
-        ckpt = checkpointer.restore(step, items=template) if not load_directly_from_dir else checkpointer.restore(checkpoint_path, items=template)
-        
+        if self.dataset_state is not None:
+            template['dataset_state'] = self.dataset_state
+        restore_args = jax.tree.map(lambda _: ocp.RestoreArgs(), template)
+        # Only the train state is placed onto the mesh; everything else is
+        # bookkeeping that belongs on the host.
+        restore_args['state'] = jax.tree.map(
+            lambda s: ocp.ArrayRestoreArgs(sharding=s), self.state_sharding)
+        return template, restore_args
+
+    def load(self, checkpoint_path, checkpoint_step=None, load_directly_from_dir=False):
+        manager = ocp.CheckpointManager(
+            checkpoint_path, options=ocp.CheckpointManagerOptions(max_to_keep=4, create=False))
+
+        step = manager.latest_step() if checkpoint_step is None else checkpoint_step
+        print("Loading model from checkpoint at step ", step)
+        self.loaded_checkpoint_path = os.path.join(
+            checkpoint_path if checkpoint_path else self.checkpoint_path(), f"{step}")
+
+        template, restore_args = self._checkpoint_template()
+        # A checkpoint written before iterator state was tracked simply has no
+        # such key, so ask for it only when the run can already produce one.
+        target = checkpoint_path if load_directly_from_dir else step
+        ckpt = manager.restore(
+            target, args=ocp.args.PyTreeRestore(item=template, restore_args=restore_args))
+
         self.state = ckpt['state']
         self.best_state = ckpt['best_state']
         self.rngstate = ckpt['rngs']
+        self.dataset_state = ckpt.get('dataset_state')
         self.best_loss = float(ckpt['best_loss'])
         if self.best_loss == 0:
             # It cant be zero as that must have been some problem
@@ -328,25 +283,22 @@ class SimpleTrainer:
 
     def save(self, epoch=0, step=0, state=None, rngstate=None):
         print(f"Saving model at epoch {epoch} step {step}")
+        # Sharded arrays go straight to orbax: gathering them onto the host
+        # first would serialise the whole state through one process and undo
+        # the point of an async checkpointer.
+        ckpt = {
+            'rngs': self.get_rngstate() if rngstate is None else self.get_np_tree(rngstate),
+            'state': self.state if state is None else state,
+            'best_state': self.best_state,
+            'best_loss': np.array(self.best_loss),
+            'epoch': epoch,
+        }
+        if self.dataset_state is not None:
+            ckpt['dataset_state'] = self.dataset_state
         try:
-            ckpt = {
-                # 'model': self.model,
-                'rngs': self.get_rngstate() if rngstate is None else self.get_np_tree(rngstate),
-                'state': self.get_state() if state is None else self.get_np_tree(state),
-                'best_state': self.get_best_state(),
-                'best_loss': np.array(self.best_loss),
-                'epoch': epoch,
-            }
-            try:
-                save_args = orbax_utils.save_args_from_target(ckpt)
-                self.checkpointer.save(step, ckpt, save_kwargs={
-                                    'save_args': save_args}, force=True)
-                self.checkpointer.wait_until_finished()
-                pass
-            except Exception as e:
-                print("Error saving checkpoint", e)
+            self.checkpointer.save(step, args=ocp.args.PyTreeSave(ckpt), force=True)
         except Exception as e:
-            print("Error saving checkpoint outer", e)
+            print("Error saving checkpoint", e)
 
     def _define_train_step(self, **kwargs):
         raise NotImplementedError("Subclasses must define their train step")
@@ -386,9 +338,7 @@ class SimpleTrainer:
                 if val_ds is None:
                     batch = None
                 else:
-                    batch = next(val_ds)
-                    if self.distributed_training and global_device_count > 1:
-                        batch = convert_to_global_tree(self.mesh, batch)
+                    batch = shard_batch(self.batch_sharding, next(val_ds))
                 if i == 0:
                     print(f"Evaluation started for process index {process_index}")
                 metrics = val_step_fn(val_state, batch)
@@ -415,83 +365,128 @@ class SimpleTrainer:
         save_every:int=None,
         val_every=None,
     ):
-        global_device_count = jax.device_count()
         process_index = jax.process_index()
-        if self.distributed_training:
-            global_device_indexes = jnp.arange(global_device_count)
-        else:
-            global_device_indexes = 0
-            
+        log_every = self.log_every
+
         epoch_loss = 0
-        bad_loss_steps = 0
         current_epoch = current_step // train_steps_per_epoch
-        
+
+        # Both counters live on device so the loop never blocks on a result.
+        # `worst_bad_run` remembers the longest streak of non-finite losses seen
+        # since the last host check, which is what decides whether to stop.
+        bad_run = jnp.zeros((), jnp.int32)
+        worst_bad_run = jnp.zeros((), jnp.int32)
+
         if process_index == 0:
             pbar = tqdm.tqdm(total=train_steps_per_epoch, desc=f'\t\tEpoch {current_epoch}', ncols=100, unit='step')
         else:
             pbar = None
-            
+
+        last_log_time = time.time()
+        steps_since_log = 0
+
         for i in range(train_steps_per_epoch):
             batch = next(train_ds)
-            # if i == 0:
-            #     print(f"First batch loaded at step {current_step}")
-                
-            if self.distributed_training and global_device_count > 1:
-            #     # Convert the local device batches to a unified global jax.Array 
-                batch = convert_to_global_tree(self.mesh, batch)
-            train_state, loss, rng_state = train_step_fn(train_state, rng_state, batch, global_device_indexes)
+            if i == 0 and self.profile_steps:
+                jax.profiler.start_trace(self.profile_path())
+
+            train_state, loss, rng_state, is_finite = train_step_fn(train_state, rng_state, batch)
+            # No stale alias may outlive the step: its buffers were donated.
+            self.state, self.rngstate = train_state, rng_state
+            self.dataset_state = getattr(train_ds, 'source_state', None)
+
+            bad_run = jnp.where(is_finite, 0, bad_run + 1)
+            worst_bad_run = jnp.maximum(worst_bad_run, bad_run)
 
             if i == 0:
                 print(f"Training started for process index {process_index} at step {current_step}")
-                
-            if self.distributed_training:
-                # loss = jax.experimental.multihost_utils.process_allgather(loss)
-                loss = jnp.mean(loss) # Just to make sure its a scaler value
-                    
-            if not jnp.isfinite(loss):
-                # No silent recovery: a diverged run must fail loudly, not be
-                # papered over with a stale best_state and a cosmetic loss value
-                print(colored(f"Non-finite loss at step {current_step}: {loss}", 'red'))
-                bad_loss_steps += 1
-                if bad_loss_steps >= 5:
-                    raise RuntimeError(
-                        f"Loss has been non-finite for {bad_loss_steps} consecutive steps, stopping"
-                    )
-            else:
-                bad_loss_steps = 0
+                if self.flops_per_step is None:
+                    self.flops_per_step = step_flops(
+                        train_step_fn, train_state, rng_state, batch)
 
             epoch_loss += loss
             current_step += 1
-            if i % 100 == 0:
+            steps_since_log += 1
+
+            if self.profile_steps and i + 1 == self.profile_steps:
+                loss.block_until_ready()
+                jax.profiler.stop_trace()
+                print(f"Wrote profile for {self.profile_steps} steps to {self.profile_path()}")
+
+            if i % log_every == 0:
+                self._check_finite(worst_bad_run, current_step)
+                worst_bad_run = jnp.zeros((), jnp.int32)
                 if pbar is not None:
+                    # The one place per interval where waiting on the device is
+                    # justified: the numbers below are meaningless without it.
+                    loss.block_until_ready()
+                    now = time.time()
+                    elapsed = now - last_log_time
                     pbar.set_postfix(loss=f'{loss:.4f}')
-                    pbar.update(100)
+                    pbar.update(log_every)
                     if self.wandb is not None:
                         self.wandb.log({
-                            "train/step" : current_step,
+                            "train/step": current_step,
                             "train/loss": loss,
+                            **self._throughput_metrics(elapsed, steps_since_log),
                         }, step=current_step)
+                    last_log_time, steps_since_log = now, 0
                 # Save the model every few steps
                 if save_every and i % save_every == 0 and i > 0:
                     print(f"Saving model after {save_every} step {current_step}")
-                    print(f"Devices: {len(jax.devices())}") # To sync the devices
                     self.save(current_epoch, current_step, train_state, rng_state)
                     print(f"Saving done by process index {process_index}")
                     print(colored(f"Epoch done on index {process_index} => {current_epoch} Loss: {epoch_loss/train_steps_per_epoch}", 'green'))
+        self._check_finite(worst_bad_run, current_step)
         if pbar is not None:
             pbar.close()
         return epoch_loss, current_step, train_state, rng_state
 
+    def profile_path(self):
+        return os.path.join(self.checkpoint_path(), 'profile')
+
+    def _check_finite(self, worst_bad_run, current_step):
+        """Fail a diverged run loudly rather than papering over it.
+
+        Deferred to the logging cadence so the step loop never synchronises;
+        detection is late by at most that many steps, never missed.
+        """
+        streak = int(worst_bad_run)
+        if streak >= self.max_bad_loss_steps:
+            raise RuntimeError(
+                f"Loss has been non-finite for {streak} consecutive steps "
+                f"ending near step {current_step}, stopping")
+        if streak:
+            print(colored(f"Non-finite loss for {streak} step(s) before {current_step}", 'red'))
+
+    def _throughput_metrics(self, elapsed: float, steps: int) -> Dict[str, float]:
+        if elapsed <= 0 or steps <= 0:
+            return {}
+        step_time = elapsed / steps
+        metrics = {
+            "train/step_time_ms": step_time * 1000,
+            "train/samples_per_sec": self.global_batch_size / step_time,
+        }
+        mfu = model_flops_utilization(self.flops_per_step, step_time,
+                                      self.mesh.devices.size)
+        if mfu is not None:
+            metrics["train/mfu"] = mfu
+        return metrics
+
 
     def fit(self, data, train_steps_per_epoch, epochs, train_step_args={}, val_steps_per_epoch=5, validation_step_args={}):
-        train_ds = iter(data['train']())
+        local_batch_size = data.get('local_batch_size', 0)
+        self.global_batch_size = data.get(
+            'global_batch_size', local_batch_size * jax.process_count())
+        train_ds = DevicePrefetchIterator(
+            data['train'](), self.batch_sharding, source_state=self.dataset_state)
         val_ds = data.get('val', data.get('test', None))
         train_step = self._define_train_step(**train_step_args)
         val_step = self._define_validation_step(**validation_step_args)
         train_state = self.state
         rng_state = self.rngstate
         process_index = jax.process_index()
-        
+
         if val_steps_per_epoch > 0:
             # We should first run a validation step to make sure the model is working
             print(f"Validation run for sanity check for process index {process_index}")
@@ -543,7 +538,7 @@ class SimpleTrainer:
             avg_loss = epoch_loss / train_steps_per_epoch
             if avg_loss < self.best_loss:
                 self.best_loss = avg_loss
-                self.best_state = train_state
+                self.best_state = self.get_np_tree(train_state)
                 self.save(current_epoch, current_step)
                 
             if process_index == 0:
@@ -558,5 +553,14 @@ class SimpleTrainer:
                 print(colored(f"\n\tEpoch {current_epoch} completed. Avg Loss: {avg_loss}, Time: {total_time:.2f}s, Best Loss: {self.best_loss}", 'green'))
                     
                 
-        self.save(epochs)#
+        self.save(epochs)
+        self.wait_for_checkpoints()
         return self.state
+
+    def wait_for_checkpoints(self):
+        """Block until pending async checkpoint writes have landed on disk.
+
+        Saving is async so it stays off the training loop's critical path;
+        anything that reads the checkpoint back has to call this first.
+        """
+        self.checkpointer.wait_until_finished()
