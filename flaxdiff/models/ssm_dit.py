@@ -11,7 +11,7 @@ from flax.typing import Dtype, PrecisionLike
 
 from .dit_common import (
     PatchSequenceEmbed, ConditioningEmbed, PatchSequenceOutput,
-    ModulatedBlock, remat_block, neutralized_rope_freqs,
+    ModulatedBlock, remat_block, neutralized_rope_freqs, build_block_pattern,
 )
 from .vit_common import RotaryEmbedding
 
@@ -49,21 +49,6 @@ class HybridSSMAttentionDiT(nn.Module):
             "use_hilbert and use_zigzag are mutually exclusive"
         return 'hilbert' if self.use_hilbert else 'zigzag' if self.use_zigzag else 'raster'
 
-    def _build_block_pattern(self):
-        """Generate block pattern from ratio string."""
-        if self.block_pattern is not None:
-            pattern = list(self.block_pattern)
-        elif self.ssm_attention_ratio == "all-ssm":
-            pattern = ['ssm'] * self.num_layers
-        elif self.ssm_attention_ratio == "all-attn":
-            pattern = ['attn'] * self.num_layers
-        else:
-            parts = self.ssm_attention_ratio.split(':')
-            n_ssm, n_attn = int(parts[0]), int(parts[1])
-            unit = ['ssm'] * n_ssm + ['attn'] * n_attn
-            pattern = (unit * (self.num_layers // len(unit) + 1))[:self.num_layers]
-        return pattern
-
     def setup(self):
         self.embed = PatchSequenceEmbed(
             patch_size=self.patch_size,
@@ -82,7 +67,8 @@ class HybridSSMAttentionDiT(nn.Module):
             dim=self.emb_features // self.num_heads,
             max_seq_len=4096, dtype=self.dtype)
 
-        pattern = self._build_block_pattern()
+        pattern = build_block_pattern(
+            self.num_layers, self.ssm_attention_ratio, self.block_pattern)
         blocks = []
         for i, block_type in enumerate(pattern):
             if block_type == 'ssm':

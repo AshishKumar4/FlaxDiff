@@ -399,7 +399,8 @@ class SimpleTrainer:
             if i == 0 and self.profile_steps:
                 jax.profiler.start_trace(self.profile_path())
 
-            train_state, loss, rng_state, is_finite = train_step_fn(train_state, rng_state, batch)
+            train_state, loss, aux, rng_state, is_finite = train_step_fn(
+                train_state, rng_state, batch)
             # No stale alias may outlive the step: its buffers were donated.
             self.state, self.rngstate = train_state, rng_state
             self.dataset_state = getattr(train_ds, 'source_state', None)
@@ -437,6 +438,7 @@ class SimpleTrainer:
                         self.wandb.log({
                             "train/step": current_step,
                             "train/loss": loss,
+                            **{f"train/{k}": v for k, v in aux.items()},
                             **self._throughput_metrics(elapsed, steps_since_log),
                         }, step=current_step)
                     last_log_time, steps_since_log = now, 0
