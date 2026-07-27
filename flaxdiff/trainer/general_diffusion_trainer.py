@@ -246,7 +246,6 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         model = self.model
         model_output_transform = self.model_output_transform
         loss_fn = self.loss_fn
-        distributed_training = self.distributed_training
         autoencoder = self.autoencoder
         unconditional_prob = self.unconditional_prob
         
@@ -438,8 +437,6 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         """
         Run validation and log samples for both image and video diffusion.
         """
-        global_device_count = jax.device_count()
-        local_device_count = jax.local_device_count()
         process_index = jax.process_index()
         generate_samples = val_step_fn
         
