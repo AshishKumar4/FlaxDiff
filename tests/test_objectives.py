@@ -63,9 +63,12 @@ def test_diffusion_objective_reproduces_the_inlined_train_step(tmp_path):
     data = {"train": batch_iterator, "train_len": 32, "local_batch_size": 8}
     state = trainer.fit(data, training_steps_per_epoch=5, epochs=1, val_steps_per_epoch=0)
 
-    assert tree_fingerprint(state.params) == pytest.approx(8.209761425852776, abs=1e-9)
-    assert tree_fingerprint(state.ema_params) == pytest.approx(8.22020611886387, abs=1e-9)
-    assert tree_fingerprint(state.opt_state) == pytest.approx(-1.3229545587499768e-05, abs=1e-12)
+    # Relative tolerance, not absolute: XLA reassociates differently across
+    # CPUs, so the fingerprint moves ~1e-7 between machines. Any real change in
+    # what the objective computes would move it by orders of magnitude more.
+    assert tree_fingerprint(state.params) == pytest.approx(8.209761425852776, rel=1e-6)
+    assert tree_fingerprint(state.ema_params) == pytest.approx(8.22020611886387, rel=1e-6)
+    assert tree_fingerprint(state.opt_state) == pytest.approx(-1.3229545587499768e-05, rel=1e-4)
 
 
 def test_train_step_returns_auxiliary_metrics(tmp_path):

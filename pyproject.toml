@@ -39,6 +39,9 @@ test = ["pytest"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Root-level entrypoints (training.py, training_jepa.py) are importable whether
+# pytest is invoked as `pytest` or `python -m pytest`
+pythonpath = ["."]
 markers = [
     "network: tests that download pretrained weights from the HuggingFace Hub",
 ]

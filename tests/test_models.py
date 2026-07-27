@@ -131,11 +131,14 @@ def test_dropout_is_active_in_train_mode(rng):
 
     d0 = model.apply(params, x, temb, textcontext, train=True, rngs={"dropout": jax.random.PRNGKey(1)})
     d1 = model.apply(params, x, temb, textcontext, train=True, rngs={"dropout": jax.random.PRNGKey(2)})
-    assert not jnp.allclose(d0, d1), "different dropout rngs must give different outputs"
+    # Exact inequality: dropout zeroes different units, so the outputs must
+    # differ bitwise. A tolerance-based check is too weak here because the
+    # zero-init output head keeps the magnitudes small.
+    assert not jnp.array_equal(d0, d1), "different dropout rngs must give different outputs"
 
     e0 = model.apply(params, x, temb, textcontext)
     e1 = model.apply(params, x, temb, textcontext)
-    assert jnp.allclose(e0, e1), "eval mode must be deterministic"
+    assert jnp.array_equal(e0, e1), "eval mode must be deterministic"
 
 
 def test_hierarchical_mmdit_forward(rng):
