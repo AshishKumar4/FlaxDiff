@@ -27,11 +27,12 @@ BATCH = 8
 TINY = 256
 
 
-def make_trainer(tmp_path, name, distributed_training, fsdp_size=1, **kwargs):
+def make_trainer(tmp_path, name, distributed_training, fsdp_size=1,
+                 optimizer=None, **kwargs):
     train_schedule, _, transform = get_diffusion_preset("edm")
     return GeneralDiffusionTrainer(
         model=SimpleDiT(patch_size=4, emb_features=32, num_layers=1, num_heads=2, mlp_ratio=1),
-        optimizer=optax.adam(1e-3),
+        optimizer=optax.adam(1e-3) if optimizer is None else optimizer,
         noise_schedule=train_schedule,
         model_output_transform=transform,
         input_config=DiffusionInputConfig(
@@ -234,6 +235,34 @@ def test_sharded_checkpoint_roundtrips(tmp_path):
                              jax.tree.leaves(restored.state.params)):
         assert before.sharding.spec == after.sharding.spec
         np.testing.assert_allclose(np.asarray(before), np.asarray(after))
+
+
+def test_gradient_accumulation_updates_only_on_the_boundary(tmp_path):
+    """MultiSteps must hold the params still until k micro-batches have run.
+
+    Also covers the accumulator surviving the sharding heuristic: its buffers
+    are param-shaped, so they pick up the param specs.
+    """
+    accum = 3
+    trainer = make_trainer(tmp_path, "accum", distributed_training=True, fsdp_size=2,
+                           fsdp_min_param_size=TINY,
+                           optimizer=optax.MultiSteps(optax.sgd(0.5), every_k_schedule=accum))
+
+    train_step = trainer._define_train_step(batch_size=BATCH)
+    source = DevicePrefetchIterator(batches(), trainer.batch_sharding)
+    state, rng = trainer.state, trainer.rngstate
+
+    def snapshot(s):
+        return [np.asarray(x).copy() for x in jax.tree.leaves(s.params)]
+
+    reference = snapshot(state)
+    for micro in range(1, accum * 2 + 1):
+        state, _, rng, _ = train_step(state, rng, next(source))
+        moved = any(not np.array_equal(a, b) for a, b in zip(reference, snapshot(state)))
+        at_boundary = micro % accum == 0
+        assert moved == at_boundary, f"micro-step {micro}: moved={moved}"
+        if at_boundary:
+            reference = snapshot(state)
 
 
 def grain_image_loader(num_records=256):
