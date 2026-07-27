@@ -12,7 +12,8 @@ All credits for the model go to the developers of Stable Diffusion VAE and for t
 """
 
 class StableDiffusionVAE(AutoEncoder):
-    def __init__(self, modelname = "CompVis/stable-diffusion-v1-4", revision="bf16", dtype=jnp.bfloat16):
+    def __init__(self, modelname = "CompVis/stable-diffusion-v1-4", revision="bf16", dtype=jnp.bfloat16,
+                 latent_shift=None, latent_scale=None):
 
         pretrained = load_pretrained_vae(modelname)
         config = pretrained["config"]
@@ -61,10 +62,14 @@ class StableDiffusionVAE(AutoEncoder):
             dtype=dtype,
         )
 
-        # Older VAE configs predate the scaling_factor key; 0.18215 is the SD default
-        scaling_factor = config.get("scaling_factor", 0.18215)
-        print(f"Scaling factor: {scaling_factor}")
-        
+        # The VAE's own latent normalization rides on the AutoEncoder seam, so a
+        # caller can override it with per-dataset statistics without a second
+        # scaling path. Older configs predate these keys; 0.0 and 0.18215 are
+        # the SD defaults.
+        self.latent_shift = config.get("shift_factor", 0.0) if latent_shift is None else latent_shift
+        self.latent_scale = config.get("scaling_factor", 0.18215) if latent_scale is None else latent_scale
+        print(f"Latent shift: {self.latent_shift}, latent scale: {self.latent_scale}")
+
         def encode_single_frame(images, rngkey: jax.random.PRNGKey = None):
             latents = enc.apply({"params": params['encoder']}, images, deterministic=True)
             latents = quant_conv.apply({"params": params['quant_conv']}, latents)
@@ -75,11 +80,9 @@ class StableDiffusionVAE(AutoEncoder):
                 latents = mean + std * jax.random.normal(rngkey, mean.shape, dtype=mean.dtype)
             else:
                 latents, _ = jnp.split(latents, 2, axis=-1)
-            latents *= scaling_factor
             return latents
-        
+
         def decode_single_frame(latents):
-            latents = (1.0 / scaling_factor) * latents
             latents = post_quant_conv.apply({"params": params['post_quant_conv']}, latents)
             return dec.apply({"params": params['decoder']}, latents)
         
