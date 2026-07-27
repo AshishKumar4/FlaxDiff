@@ -662,6 +662,7 @@ def demo_hilbert_patching(image_np: np.ndarray, patch_size: int = 8, figsize=(15
 
 # --- Example Usage ---
 if __name__ == '__main__':
+    import matplotlib.pyplot as plt
     # Create a sample image (e.g., gradient)
     H, W, C = 64, 80, 3 # Rectangular image
     # H, W, C = 64, 64, 1 # Square grayscale image
