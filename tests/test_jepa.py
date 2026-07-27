@@ -13,6 +13,7 @@ from flaxdiff.jepa import (
 )
 from flaxdiff.jepa.models import JepaPredictor
 from flaxdiff.trainer import GeneralDiffusionTrainer
+from flaxdiff.utils import DevicePrefetchIterator
 
 RES = 32
 PATCH = 4
@@ -326,7 +327,7 @@ def test_momentum_schedule_endpoints(mask):
     assert objective.ema.path == ("params", "context_encoder")
 
 
-def make_jepa_trainer(tmp_path, mask, learning_rate=1e-3, **kwargs):
+def make_jepa_trainer(tmp_path, mask, learning_rate=1e-3, fsdp_size=1, **kwargs):
     encoder = make_encoder()
     return GeneralDiffusionTrainer(
         model=encoder,
@@ -336,7 +337,12 @@ def make_jepa_trainer(tmp_path, mask, learning_rate=1e-3, **kwargs):
         rngs=jax.random.PRNGKey(0),
         objective=JepaObjective(encoder, make_predictor(), mask, "image",
                                 (RES, RES, 3), **kwargs),
-        name="jepa-smoke", wandb_config=None, distributed_training=False,
+        name="jepa-smoke", wandb_config=None,
+        distributed_training=fsdp_size > 1,
+        fsdp_size=fsdp_size,
+        # This encoder's parameters are far below the production shard
+        # threshold, so lower it or "FSDP on" would mean "all replicated"
+        fsdp_min_param_size=256,
         checkpoint_base_path=str(tmp_path),
     )
 
@@ -369,6 +375,43 @@ def test_target_encoder_tracks_the_context_encoder(tmp_path, mask):
     ema = jax.tree.leaves(state.ema_params["params"]["context_encoder"])
     live = jax.tree.leaves(state.params["params"]["context_encoder"])
     assert any(not np.allclose(a, b) for a, b in zip(ema, live)), "EMA is not lagging"
+
+
+def test_jepa_trains_under_fsdp(tmp_path, mask):
+    """Where the two halves of the trainer meet: an objective that owns a
+    multi-encoder parameter tree, run through the sharded, donating train step.
+
+    Compiling is not the claim - the parameters have to be genuinely split
+    across the fsdp axis, the EMA target encoder has to follow their layout,
+    and the loss has to come back finite with its collapse telemetry intact.
+    """
+    trainer = make_jepa_trainer(tmp_path, mask, fsdp_size=2)
+    specs = [p.sharding.spec for p in jax.tree.leaves(trainer.state.params)]
+
+    sharded = [p for p in jax.tree.leaves(trainer.state.params)
+               if 'fsdp' in str(p.sharding.spec)]
+    assert sharded, "no JEPA parameter was sharded over the fsdp axis"
+    for param in sharded:
+        assert param.addressable_shards[0].data.size == param.size // 2
+
+    # The target encoder is a second copy of the same tree, so it must land on
+    # the mesh the same way rather than being gathered onto every device
+    assert specs == [p.sharding.spec for p in jax.tree.leaves(trainer.state.ema_params)]
+
+    def batches():
+        while True:
+            yield {"image": np.asarray(images(batch=jax.device_count()))}
+
+    train_step = trainer._define_train_step(batch_size=jax.device_count())
+    source = DevicePrefetchIterator(batches(), trainer.batch_sharding)
+    state, rng = trainer.state, trainer.rngstate
+    for _ in range(2):
+        state, loss, aux, rng, is_finite = train_step(state, rng, next(source))
+        assert bool(is_finite)
+        assert float(aux["repr_std"]) > 0, "collapse telemetry was lost in the step"
+
+    assert int(state.step) == 2
+    assert specs == [p.sharding.spec for p in jax.tree.leaves(state.params)]
 
 
 def test_validation_step_returns_pooled_embeddings(tmp_path, mask):
