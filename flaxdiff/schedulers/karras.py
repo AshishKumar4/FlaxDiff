@@ -17,7 +17,7 @@ class KarrasVENoiseScheduler(GeneralizedNoiseScheduler):
         sigmas = (self.max_inv_rho + ramp * (self.min_inv_rho - self.max_inv_rho)) ** self.rho
         return sigmas
         
-    def get_weights(self, steps, shape=(-1, 1, 1, 1)) -> jnp.ndarray:
+    def get_schedule_weights(self, steps, shape=(-1, 1, 1, 1)) -> jnp.ndarray:
         sigma = self.get_sigmas(steps)
         # EDM lambda(sigma) = (sigma^2 + sd^2) / (sigma * sd)^2, written in a
         # form that needs no epsilon guard (the old guard halved the weight at
@@ -64,13 +64,21 @@ class SimpleExpNoiseScheduler(KarrasVENoiseScheduler):
         return self.sigmas[steps]
 
 class EDMNoiseScheduler(KarrasVENoiseScheduler):
-    def __init__(self, timesteps, sigma_min=0.002, sigma_max=80, rho=7., sigma_data=0.5, *args, **kwargs):
-        super().__init__(timesteps=timesteps, sigma_min=sigma_min, sigma_max=sigma_max, sigma_data=sigma_data, *args, **kwargs)
+    """Training sigmas drawn from exp(N(P_mean, P_std^2)).
 
-    def get_sigmas(self, steps, std=1.2, mean=-1.2) -> jnp.ndarray:
+    Defaults are EDM2's (Karras et al. 2024); EDM1's -1.2/1.2 concentrated too
+    much mass on low noise levels for larger models. Pass them explicitly to
+    reproduce an EDM1 run.
+    """
+    def __init__(self, timesteps, sigma_min=0.002, sigma_max=80, rho=7., sigma_data=0.5,
+                 P_mean=-0.4, P_std=1.0, *args, **kwargs):
+        super().__init__(timesteps=timesteps, sigma_min=sigma_min, sigma_max=sigma_max, sigma_data=sigma_data, *args, **kwargs)
+        self.P_mean = P_mean
+        self.P_std = P_std
+
+    def get_sigmas(self, steps) -> jnp.ndarray:
         space = steps / self.max_timesteps
-        # space = jax.scipy.special.erfinv(self.erf_sigma_min + steps * (self.erf_sigma_max - self.erf_sigma_min))
-        return jnp.exp(space * std + mean)
+        return jnp.exp(space * self.P_std + self.P_mean)
     
     def generate_timesteps(self, batch_size, state:RandomMarkovState) -> tuple[jnp.ndarray, RandomMarkovState]:
         state, rng = state.get_random_key()
