@@ -10,11 +10,19 @@ from abc import ABC, abstractmethod
 @dataclass
 class AutoEncoder(ABC):
     """Base class for autoencoder models with video support.
-    
+
     This class defines the interface for autoencoders and provides
     video handling functionality, allowing child classes to focus
     on implementing the core encoding/decoding for individual frames.
+
+    Latents are normalized as (z - latent_shift) * latent_scale on the way out
+    and inverted on the way in, the SD3 convention. The defaults are the
+    identity; set them to the dataset's own latent mean and 1/std so the
+    diffusion model sees roughly unit-variance, zero-mean inputs.
     """
+    latent_shift: float = 0.0
+    latent_scale: float = 1.0
+
     @abstractmethod
     def __encode__(self, x: jnp.ndarray, **kwargs) -> jnp.ndarray:
         """Abstract method for encoding a batch of images.
@@ -72,13 +80,15 @@ class AutoEncoder(ABC):
             
             # Encode all frames
             latent = self.__encode__(x_reshaped, key=key, **kwargs)
-            
+
             # Reshape back to include temporal dimension [B, T, h, w, c]
             latent_shape = latent.shape
-            return latent.reshape(batch_size, seq_len, *latent_shape[1:])
+            latent = latent.reshape(batch_size, seq_len, *latent_shape[1:])
         else:
             # Standard image processing
-            return self.__encode__(x, key=key, **kwargs)
+            latent = self.__encode__(x, key=key, **kwargs)
+
+        return (latent - self.latent_shift) * self.latent_scale
     
     def decode(self, z: jnp.ndarray, key: Optional[jax.random.PRNGKey] = None, **kwargs) -> jnp.ndarray:
         """Decode latent representations, with special handling for video data.
@@ -95,9 +105,11 @@ class AutoEncoder(ABC):
         Returns:
             Decoded output with the same batch and temporal dimensions as input
         """
+        z = z / self.latent_scale + self.latent_shift
+
         # Check for video data (5D tensor)
         is_video = len(z.shape) == 5
-        
+
         if is_video:
             # Extract dimensions for reshaping
             batch_size, seq_len, height, width, channels = z.shape
