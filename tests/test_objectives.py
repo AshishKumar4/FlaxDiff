@@ -144,3 +144,19 @@ def test_trainer_drives_an_arbitrary_objective(tmp_path):
     assert int(state.step) == 3
     # sum of squares under gradient descent must shrink
     assert tree_fingerprint(state.params) < tree_fingerprint(objective.init_params(None))
+
+
+def test_mixed_precision_carries_the_objective_aux(tmp_path):
+    """The dynamic-scale branch differentiates the same has_aux loss, so an
+    objective's telemetry has to survive mixed precision as well."""
+    objective = ConstantObjective(EMASpec(decay=optax.constant_schedule(0.9)))
+    trainer = make_trainer(tmp_path, objective=objective, use_dynamic_scale=True)
+    train_step = trainer._define_train_step(batch_size=8)
+
+    state, loss, aux, _, is_finite = train_step(
+        trainer.state, trainer.rngstate, next(batch_iterator()))
+    # a live dynamic scale is exactly what selects that branch of the step
+    assert state.dynamic_scale is not None
+    assert bool(is_finite)
+    assert float(aux["probe"]) == 1.0
+    assert int(state.step) == 1
