@@ -18,7 +18,7 @@ from flax.typing import Dtype, PrecisionLike
 
 from .dit_common import (
     PatchSequenceEmbed, ConditioningEmbed, PatchSequenceOutput,
-    neutralized_rope_freqs,
+    neutralized_rope_freqs, remat_block,
 )
 from .attention import scaled_dot_product_attention
 from .vit_common import RotaryEmbedding, AdaLNParams, apply_rotary_embedding
@@ -150,6 +150,7 @@ class SimpleMMDiT(nn.Module):
     learn_sigma: bool = False
     qk_norm: bool = False
     attention_impl: Optional[str] = None
+    remat: bool = False
     use_hilbert: bool = False
     use_zigzag: bool = False
 
@@ -180,7 +181,7 @@ class SimpleMMDiT(nn.Module):
         self.rope = RotaryEmbedding(
             dim=self.emb_features // self.num_heads, max_seq_len=4096, dtype=self.dtype)
         self.blocks = [
-            MMDiTBlock(
+            remat_block(MMDiTBlock, self.remat)(
                 features=self.emb_features,
                 num_heads=self.num_heads,
                 mlp_ratio=self.mlp_ratio,
@@ -215,7 +216,7 @@ class SimpleMMDiT(nn.Module):
         freqs_cis = neutralized_rope_freqs(self.rope, img.shape[1], self.scan_order)
 
         for block in self.blocks:
-            img, txt = block(img, txt, conditioning=cond_emb, freqs_cis=freqs_cis, train=train)
+            img, txt = block(img, txt, cond_emb, freqs_cis, train)
 
         return self.output(img, inv_idx, H, W, conditioning=cond_emb)
 
@@ -337,6 +338,7 @@ class HierarchicalMMDiT(nn.Module):
     learn_sigma: bool = False
     qk_norm: bool = False
     attention_impl: Optional[str] = None
+    remat: bool = False
 
     def setup(self):
         assert len(self.emb_features) == len(self.num_layers) == len(self.num_heads), \
@@ -377,7 +379,7 @@ class HierarchicalMMDiT(nn.Module):
 
         def stage_blocks(stage, prefix):
             return [
-                MMDiTBlock(
+                remat_block(MMDiTBlock, self.remat)(
                     features=self.emb_features[stage],
                     num_heads=self.num_heads[stage],
                     mlp_ratio=self.mlp_ratio,
@@ -455,7 +457,7 @@ class HierarchicalMMDiT(nn.Module):
             freqs_cis = self.ropes[stage](seq_len=img.shape[1])
             txt = txts[stage]
             for block in self.encoder_blocks[stage]:
-                img, txt = block(img, txt, conditioning=conds[stage], freqs_cis=freqs_cis, train=train)
+                img, txt = block(img, txt, conds[stage], freqs_cis, train)
             skips[stage] = img
             if stage < num_stages - 1:
                 img, H_P, W_P = self.patch_mergers[stage](img, H_P, W_P)
@@ -467,6 +469,6 @@ class HierarchicalMMDiT(nn.Module):
             freqs_cis = self.ropes[stage](seq_len=img.shape[1])
             txt = txts[stage]
             for block in self.decoder_blocks[i]:
-                img, txt = block(img, txt, conditioning=conds[stage], freqs_cis=freqs_cis, train=train)
+                img, txt = block(img, txt, conds[stage], freqs_cis, train)
 
         return self.output(img, None, H, W, conditioning=conds[0])

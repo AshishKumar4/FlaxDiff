@@ -1,85 +1,13 @@
-import jax.numpy as jnp
 import grain.python as pygrain
 from typing import Dict, Any, Optional, Union, List, Callable
 import numpy as np
 import jax
 import cv2  # Added missing import
-from flaxdiff.utils import convert_to_global_tree, AutoTextTokenizer
+from flaxdiff.utils import AutoTextTokenizer
 from .dataset_map import datasetMap, onlineDatasetMap, mediaDatasetMap
 import traceback
 from .online_loader import OnlineStreamingDataLoader
-import queue
-from jax.sharding import Mesh
-import threading
 from functools import partial
-
-
-def batch_mesh_map(mesh):
-    """Create an augmenter that maps batches to a mesh."""
-    class augmenters(pygrain.MapTransform):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-
-        def map(self, batch) -> Dict[str, jnp.array]:
-            return convert_to_global_tree(mesh, batch)
-    return augmenters
-
-
-class DataLoaderWithMesh:
-    """A wrapper for data loaders that distributes data to a JAX mesh.
-    
-    This class wraps any iterable dataset and maps the data to a JAX mesh.
-    It runs a background thread that fetches data from the loader and
-    distributes it to the mesh.
-    """
-    
-    def __init__(self, dataloader, mesh, buffer_size=20):
-        """Initialize a DataLoaderWithMesh.
-        
-        Args:
-            dataloader: The data loader to wrap.
-            mesh: The JAX mesh to distribute data to.
-            buffer_size: Size of the prefetch buffer.
-        """
-        self.dataloader = dataloader
-        self.mesh = mesh
-        self.buffer_size = buffer_size
-        self.tmp_queue = queue.Queue(buffer_size)
-        self.loader_thread = None
-        self._start_loader_thread()
-    
-    def _start_loader_thread(self):
-        """Start the background thread for data loading."""
-        def batch_loader():
-            try:
-                for batch in self.dataloader:
-                    try:
-                        self.tmp_queue.put(convert_to_global_tree(self.mesh, batch))
-                    except Exception as e:
-                        print("Error processing batch", e)
-                        traceback.print_exc()
-            except Exception as e:
-                print("Error in batch loader thread", e)
-                traceback.print_exc()
-                
-        self.loader_thread = threading.Thread(target=batch_loader, daemon=True)
-        self.loader_thread.start()
-    
-    def __iter__(self):
-        return self
-    
-    def __next__(self):
-        try:
-            return self.tmp_queue.get(timeout=60)  # Add timeout to prevent hanging
-        except queue.Empty:
-            if not self.loader_thread.is_alive():
-                raise StopIteration("Loader thread died")
-            raise queue.Empty("Timed out waiting for batch")
-    
-    def __del__(self):
-        # Clean up resources
-        if hasattr(self, 'loader_thread') and self.loader_thread is not None:
-            self.loader_thread.join(timeout=1)
 
 
 def generate_collate_fn(media_type="image"):
@@ -407,9 +335,7 @@ def get_dataset_online(
             default_split="train",
         )
     
-    def get_trainset(mesh: Mesh = None):
-        if mesh is not None:
-            return DataLoaderWithMesh(dataloader, mesh, buffer_size=worker_buffer_size)
+    def get_trainset():
         return dataloader
     
     return {
@@ -439,7 +365,6 @@ def get_media_dataset_grain(
     seed: int = 0,
     dataset_source: str = None,
     media_type: Optional[str] = None,  # Will be auto-detected if None
-    mesh: Optional[Mesh] = None,
     additional_transform_kwargs: Dict[str, Any] = None,
 ):
     """Get a grain dataset loader for any media type (image or video).
@@ -459,7 +384,6 @@ def get_media_dataset_grain(
         seed: Random seed.
         dataset_source: Source path for the dataset.
         media_type: Type of media ("image" or "video"). Auto-detected if None.
-        mesh: Optional JAX mesh for distributed training.
         additional_transform_kwargs: Additional arguments for the transform.
         
     Returns:
@@ -506,25 +430,12 @@ def get_media_dataset_grain(
         shard_options=pygrain.ShardByJaxProcess(),
     )
 
-    def get_trainset(mesh_override: Optional[Mesh] = None):
-        """Get a training dataset iterator.
-        
-        Args:
-            mesh_override: Optional mesh to override the default.
-            
-        Returns:
-            A dataset iterator.
-        """
-        current_mesh = mesh_override or mesh
-        
+    def get_trainset():
+        """Get a training dataset iterator."""
         transformations = [
             augmenter(),
             pygrain.Batch(local_batch_size, drop_remainder=True),
         ]
-        
-        # # Add mesh mapping if needed
-        # if current_mesh is not None:
-        #     transformations.append(batch_mesh_map(current_mesh)())
 
         loader = pygrain.DataLoader(
             data_source=data_source,
@@ -556,7 +467,6 @@ def get_media_dataset_online(
     worker_buffer_size: int = 20,
     dataset_sources: List[str] = None,
     media_type: str = "image",  # Default to image for online datasets
-    mesh: Optional[Mesh] = None,
     timeout: int = 15,
     retries: int = 3,
     min_media_scale: int = 128,
@@ -572,7 +482,6 @@ def get_media_dataset_online(
         worker_buffer_size: Size of the worker buffer.
         dataset_sources: Custom dataset sources if data_name is "custom".
         media_type: Type of media ("image" or "video"). 
-        mesh: Optional JAX mesh for distributed training.
         timeout: Timeout for dataset operations.
         retries: Number of retries for dataset operations.
         min_media_scale: Minimum scale for media items.
@@ -616,20 +525,8 @@ def get_media_dataset_online(
     
     dataloader = OnlineStreamingDataLoader(sources, **dataloader_kwargs)
     
-    def get_trainset(mesh_override: Optional[Mesh] = None):
-        """Get a training dataset iterator.
-        
-        Args:
-            mesh_override: Optional mesh to override the default.
-            
-        Returns:
-            A dataset iterator.
-        """
-        current_mesh = mesh_override or mesh
-        
-        if current_mesh is not None:
-            return DataLoaderWithMesh(dataloader, current_mesh, buffer_size=worker_buffer_size)
-            
+    def get_trainset():
+        """Get a training dataset iterator."""
         return dataloader
     
     return {

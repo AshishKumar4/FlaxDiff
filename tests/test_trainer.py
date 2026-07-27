@@ -59,6 +59,8 @@ def test_save_writes_checkpoint(tmp_path):
     """save() swallows exceptions, so assert the checkpoint actually landed."""
     trainer = make_trainer(tmp_path)
     trainer.save(epoch=0, step=1)
+    # Saving is async to keep it off the training loop; this is the barrier
+    trainer.wait_for_checkpoints()
     assert trainer.checkpointer.latest_step() == 1
 
 
@@ -69,6 +71,7 @@ def test_restore_preserves_optimizer_state(tmp_path):
     grads = jax.tree.map(jnp.ones_like, trainer.state.params)
     trainer.state = trainer.state.apply_gradients(grads=grads).apply_ema(0.99)
     trainer.save(epoch=0, step=1)
+    trainer.wait_for_checkpoints()
 
     restored = make_trainer(tmp_path, load_from_checkpoint=trainer.checkpoint_path())
     assert int(restored.state.step) == 1, "optimizer step counter was reset"

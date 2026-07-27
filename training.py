@@ -29,7 +29,7 @@ from flaxdiff.data.dataloaders import get_dataset_grain, get_dataset_online
 
 import warnings
 import traceback
-from flaxdiff.utils import defaultTextEncodeModel
+from flaxdiff.utils import DEFAULT_MIN_SHARD_SIZE, defaultTextEncodeModel
 from flaxdiff.inputs import DiffusionInputConfig, ConditionalInputConfig
 
 warnings.filterwarnings("ignore")
@@ -141,6 +141,13 @@ parser.add_argument('--dtype', type=str, default=None, help='dtype to use')
 parser.add_argument('--precision', type=str, default='default', help='precision to use', choices=['high', 'default', 'highest', 'None', None])
 
 parser.add_argument('--distributed_training', type=boolean_string, default=True, help='Should use distributed training or not')
+parser.add_argument('--fsdp_size', type=int, default=1, help='Shard parameters over this many devices (FSDP). 1 replicates them (pure data parallelism)')
+parser.add_argument('--fsdp_min_param_size', type=int, default=DEFAULT_MIN_SHARD_SIZE, help='Only shard parameters with at least this many elements')
+parser.add_argument('--grad_accum_steps', type=int, default=1, help='Accumulate gradients over this many micro-batches before updating')
+parser.add_argument('--remat', type=boolean_string, default=False, help='Rematerialize transformer blocks to trade compute for activation memory')
+parser.add_argument('--profile_steps', type=int, default=0, help='Write a jax profiler trace covering this many steps of the first epoch')
+parser.add_argument('--compilation_cache_dir', type=str, default=None, help='Directory for the persistent XLA compilation cache')
+parser.add_argument('--log_every', type=int, default=100, help='Steps between throughput/loss logs')
 parser.add_argument('--experiment_name', type=str, default=None, help='Experiment name, would be generated if not provided')
 parser.add_argument('--load_from_checkpoint', type=str,
                     default=None, help='Load from the best previously stored checkpoint. The checkpoint path should be provided')
@@ -317,6 +324,7 @@ def main(args):
             "precision": PRECISION,
             "output_channels": INPUT_CHANNELS,
             "attention_impl": args.attention_impl,
+            "remat": args.remat,
         }
     
     
@@ -545,12 +553,17 @@ def main(args):
             decay_steps=batches * args.learning_rate_decay_epochs, end_value=args.learning_rate_end,
         )
     solver = optimizer(learning_rate, **optimizer_opts)
-    
+
     if args.clip_grads > 0:
         solver = optax.chain(
             optax.clip_by_global_norm(args.clip_grads),
             solver,
         )
+
+    if args.grad_accum_steps > 1:
+        # Accumulate gradients over several micro-batches so the effective batch
+        # can exceed what fits in device memory at once.
+        solver = optax.MultiSteps(solver, every_k_schedule=args.grad_accum_steps)
 
     wandb_config = {
         "project": args.wandb_project,
@@ -582,6 +595,11 @@ def main(args):
         eval_metrics=eval_metrics,
         best_tracker_metric=args.best_tracker_metric,
         ema_decay=args.ema_decay,
+        fsdp_size=args.fsdp_size,
+        fsdp_min_param_size=args.fsdp_min_param_size,
+        compilation_cache_dir=args.compilation_cache_dir,
+        profile_steps=args.profile_steps,
+        log_every=args.log_every,
     )
     
     if trainer.distributed_training:

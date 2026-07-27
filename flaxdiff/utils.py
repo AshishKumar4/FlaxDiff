@@ -2,11 +2,12 @@ import jax
 import jax.numpy as jnp
 import flax.struct as struct
 import flax.linen as nn
-from typing import Any
-from functools import partial
+from typing import Iterator, Optional
 import numpy as np
 import os
-from jax.sharding import Mesh, PartitionSpec as P
+import queue
+import threading
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec as P
 from flaxdiff.inputs import TextEncoder, CLIPTextEncoder
 
 # Setup mappings for dtype, precision, and activation
@@ -94,29 +95,188 @@ def denormalize_images(images, target_type=jnp.uint8, source_range=(-1, 1), targ
     
     return images
 
-def _build_global_shape_and_sharding(
-    local_shape: tuple[int, ...], global_mesh: Mesh
-) -> tuple[tuple[int, ...], jax.sharding.NamedSharding]:
-  sharding = jax.sharding.NamedSharding(global_mesh, P(global_mesh.axis_names))
-  global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
-  return global_shape, sharding
+# ---------------------------------------------------------------------------
+# Sharding
+# ---------------------------------------------------------------------------
+
+DATA_AXIS = 'data'
+FSDP_AXIS = 'fsdp'
+
+# Batches are split across every device, whichever axis it sits on; only
+# parameters distinguish the two axes.
+BATCH_SPEC = P((DATA_AXIS, FSDP_AXIS))
+
+# Below this many elements a parameter costs more in collectives than it saves
+# in memory, so it stays replicated.
+DEFAULT_MIN_SHARD_SIZE = 2 ** 16
 
 
-def form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
-  """Put local sharded array into local devices"""
-  global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
-  try:
-    local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
-  except ValueError as array_split_error:
-    raise ValueError(
-        f"Unable to put to devices shape {array.shape} with "
-        f"local device count {len(global_mesh.local_devices)} "
-    ) from array_split_error
-  local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
-  return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
+def build_mesh(fsdp_size: int = 1, devices: Optional[list] = None) -> Mesh:
+    """Two-axis device mesh: parameters shard over 'fsdp', replicate over 'data'.
 
-def convert_to_global_tree(global_mesh, pytree):
-    return jax.tree_util.tree_map_with_path(partial(form_global_array, global_mesh=global_mesh), pytree)
+    fsdp_size=1 degenerates to plain data parallelism, so the same code path
+    serves both without a flag. Axes are Auto so GSPMD infers the collectives
+    rather than us writing them by hand.
+    """
+    devices = list(devices) if devices is not None else jax.devices()
+    if fsdp_size < 1 or len(devices) % fsdp_size:
+        raise ValueError(
+            f"fsdp_size {fsdp_size} must be a positive divisor of device count {len(devices)}")
+    return jax.make_mesh(
+        (len(devices) // fsdp_size, fsdp_size),
+        (DATA_AXIS, FSDP_AXIS),
+        devices=devices,
+        axis_types=(AxisType.Auto, AxisType.Auto),
+    )
+
+
+def parameter_spec(shape: tuple, fsdp_size: int, min_shard_size: int) -> P:
+    """Shard the largest evenly-divisible axis over 'fsdp', else replicate.
+
+    Applied to every leaf of the train state, not just params: optimizer moments
+    and EMA copies have the same shapes as the params they track, so they pick
+    up the same spec without anyone having to describe the optimizer's layout.
+    """
+    if fsdp_size == 1 or int(np.prod(shape, dtype=np.int64)) < min_shard_size:
+        return P()
+    for axis in sorted(range(len(shape)), key=lambda i: -shape[i]):
+        if shape[axis] % fsdp_size == 0:
+            return P(*([None] * axis), FSDP_AXIS)
+    return P()
+
+
+def state_sharding_tree(
+    mesh: Mesh, abstract_state, min_shard_size: int = DEFAULT_MIN_SHARD_SIZE
+):
+    """Map a train state of ShapeDtypeStructs to its NamedSharding tree."""
+    fsdp_size = mesh.shape[FSDP_AXIS]
+    return jax.tree.map(
+        lambda x: NamedSharding(mesh, parameter_spec(x.shape, fsdp_size, min_shard_size)),
+        abstract_state,
+    )
+
+
+def batch_sharding(mesh: Mesh) -> NamedSharding:
+    return NamedSharding(mesh, BATCH_SPEC)
+
+
+def shard_batch(sharding: NamedSharding, batch):
+    """Assemble this process's slice of each array into a globally sharded one."""
+    return jax.tree.map(
+        lambda x: jax.make_array_from_process_local_data(sharding, np.asarray(x)), batch)
+
+
+class DevicePrefetchIterator:
+    """Runs the host-to-device batch transfer a few batches ahead of the loop.
+
+    Without this the transfer sits on the critical path between steps, because
+    the loop only starts moving batch N+1 after step N has been dispatched.
+    """
+
+    def __init__(self, iterator: Iterator, sharding: NamedSharding, depth: int = 2,
+                 source_state=None):
+        self._iterator = iter(iterator)
+        self._sharding = sharding
+        self._queue = queue.Queue(maxsize=depth)
+        self._terminal: Optional[BaseException] = None
+        self._checkpointable = hasattr(self._iterator, 'get_state')
+        if source_state is not None:
+            if not self._checkpointable:
+                raise TypeError(
+                    f"{type(self._iterator).__name__} cannot resume from a saved position")
+            self._iterator.set_state(source_state)
+        # Position of the source iterator as of the batch most recently handed
+        # out, so a checkpoint resumes at the next unseen batch rather than at
+        # whatever the prefetch thread has already raced ahead to.
+        self.source_state = source_state
+        self._thread = threading.Thread(target=self._prefetch, daemon=True)
+        self._thread.start()
+
+    def _prefetch(self):
+        try:
+            while True:
+                batch = next(self._iterator)
+                state = self._iterator.get_state() if self._checkpointable else None
+                self._queue.put((shard_batch(self._sharding, batch), state))
+        except StopIteration:
+            self._queue.put(StopIteration())
+        except BaseException as error:  # surfaced on the consumer's thread
+            self._queue.put(error)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._terminal is not None:
+            raise self._terminal
+        item = self._queue.get()
+        if isinstance(item, BaseException):
+            self._terminal = item
+            raise item
+        batch, self.source_state = item
+        return batch
+
+# ---------------------------------------------------------------------------
+# Throughput accounting
+# ---------------------------------------------------------------------------
+
+# Dense bf16 peak per chip, from the vendors' own spec sheets. Only used to turn
+# measured FLOPs into a utilisation percentage; unknown hardware just skips MFU.
+PEAK_FLOPS_PER_DEVICE = {
+    'TPU v2': 45e12,
+    'TPU v3': 123e12,
+    'TPU v4': 275e12,
+    'TPU v5 lite': 197e12,
+    'TPU v5e': 197e12,
+    'TPU v5': 459e12,
+    'TPU v5p': 459e12,
+    'TPU v6 lite': 918e12,
+    'TPU v6e': 918e12,
+    'NVIDIA A100': 312e12,
+    'NVIDIA H100': 989e12,
+    'NVIDIA H200': 989e12,
+}
+
+
+def step_flops(jitted, *args, **kwargs) -> Optional[float]:
+    """FLOPs for one call of a jitted function, straight from the compiler.
+
+    Measured rather than derived from a hand-written parameter-count formula, so
+    it stays honest across architectures, remat and gradient accumulation.
+    """
+    analysis = jitted.lower(*args, **kwargs).compile().cost_analysis()
+    if isinstance(analysis, (list, tuple)):
+        analysis = analysis[0] if analysis else None
+    if not analysis or 'flops' not in analysis:
+        return None
+    return float(analysis['flops'])
+
+
+def model_flops_utilization(
+    flops_per_step: Optional[float], step_time: float, device_count: int
+) -> Optional[float]:
+    """Fraction of the cluster's peak FLOPs the training step actually achieved."""
+    if not flops_per_step or step_time <= 0:
+        return None
+    peak = PEAK_FLOPS_PER_DEVICE.get(jax.devices()[0].device_kind)
+    if peak is None:
+        return None
+    return flops_per_step / step_time / (peak * device_count)
+
+
+def enable_compilation_cache(path: str):
+    """Persist compiled executables so restarts skip XLA compilation.
+
+    The dominant cost of a restart-heavy TPU workflow, where every run otherwise
+    recompiles the same step function from scratch.
+    """
+    os.makedirs(path, exist_ok=True)
+    jax.config.update('jax_compilation_cache_dir', path)
+    # Defaults skip small/fast compilations; a training step is neither, and
+    # caching everything keeps startup predictable.
+    jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)
+    jax.config.update('jax_persistent_cache_min_compile_time_secs', 0.0)
+
 
 class AutoTextTokenizer:
     def __init__(self, tensor_type="pt", modelname="openai/clip-vit-large-patch14"):
