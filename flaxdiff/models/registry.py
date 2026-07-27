@@ -18,6 +18,7 @@ from .simple_mmdit import SimpleMMDiT, HierarchicalMMDiT
 from .ssm_dit import HybridSSMAttentionDiT
 from .video_dit import VideoDiT
 from .unet_3d import UNet3D
+from ..jepa.models import JepaEncoder, JepaVideoEncoder, JepaPredictor
 
 MODEL_REGISTRY = {
     'unet': Unet,
@@ -29,6 +30,9 @@ MODEL_REGISTRY = {
     'hybrid_dit': HybridSSMAttentionDiT,
     'video_dit': VideoDiT,
     'unet_3d': UNet3D,
+    'jepa_encoder': JepaEncoder,
+    'jepa_video_encoder': JepaVideoEncoder,
+    'jepa_predictor': JepaPredictor,
 }
 
 ARCHITECTURE_SUFFIX_FLAGS = {

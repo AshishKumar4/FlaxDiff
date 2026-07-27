@@ -13,7 +13,7 @@ telemetry) can surface them without the trainer knowing what they mean.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple, Type
+from typing import Any, Callable, Dict, Tuple, Type
 
 import jax
 import jax.numpy as jnp
@@ -43,6 +43,7 @@ class EMASpec:
 class Objective(ABC):
     """The learning problem: parameters, loss, EMA policy, validation artifacts."""
 
+    tag: str = "objective"  # names the checkpoint artifact this run publishes
     ema: EMASpec
 
     @abstractmethod
@@ -64,6 +65,8 @@ class Objective(ABC):
 
 class DiffusionObjective(Objective):
     """Denoising diffusion: sample a noise level, corrupt, predict, weight."""
+
+    tag = "diffusion"
 
     def __init__(
         self,

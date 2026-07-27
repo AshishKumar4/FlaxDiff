@@ -17,7 +17,7 @@ from flaxdiff.models.simple_dit import SimpleDiT
 from flaxdiff.predictors import get_diffusion_preset
 from flaxdiff.trainer import GeneralDiffusionTrainer
 from flaxdiff.trainer.general_diffusion_trainer import TrainState
-from flaxdiff.trainer.objectives import DiffusionObjective, EMASpec, Objective
+from flaxdiff.trainer.objectives import EMASpec, Objective
 
 RES = 8
 
