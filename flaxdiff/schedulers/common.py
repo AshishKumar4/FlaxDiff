@@ -18,11 +18,17 @@ class NoiseScheduler():
                     dtype=jnp.float32,
                     clip_min=-1.0,
                     clip_max=1.0,
+                    min_snr_gamma: float = None,
+                    prediction_transform=None,
                     *args, **kwargs):
         self.max_timesteps = timesteps
         self.dtype = dtype
         self.clip_min = clip_min
         self.clip_max = clip_max
+        if min_snr_gamma is not None and prediction_transform is None:
+            raise ValueError("min_snr_gamma needs the prediction transform it will be trained against")
+        self.min_snr_gamma = min_snr_gamma
+        self.prediction_transform = prediction_transform
         if type(timesteps) == int and timesteps > 1:
             timestep_generator = lambda rng, batch_size, max_timesteps = timesteps: jax.random.randint(rng, (batch_size,), 0, max_timesteps)
         else:
@@ -33,10 +39,28 @@ class NoiseScheduler():
         state, rng = state.get_random_key()
         timesteps = self.timestep_generator(rng, batch_size, self.max_timesteps)
         return timesteps, state
-    
+
+    def get_snr(self, steps) -> jnp.ndarray:
+        signal_rates, noise_rates = self.get_rates(steps, shape=(-1,))
+        return (signal_rates / noise_rates) ** 2
+
     def get_weights(self, steps, shape=(-1, 1, 1, 1)):
+        """Per-sample loss weight, in the target space of the paired parameterization.
+
+        min-SNR-gamma (Hang et al. 2023) is defined as min(SNR, gamma) on the
+        x_0 loss; the transform converts that into whichever space the trainer
+        actually computes the loss in. It replaces the schedule's own weighting
+        rather than stacking on top of it.
+        """
+        if self.min_snr_gamma is None:
+            return self.get_schedule_weights(steps, shape)
+        snr = self.get_snr(steps)
+        weights = jnp.minimum(snr, self.min_snr_gamma) / self.prediction_transform.target_error_scale(snr)
+        return weights.reshape(shape)
+
+    def get_schedule_weights(self, steps, shape=(-1, 1, 1, 1)):
         raise NotImplementedError
-    
+
     def get_rates(self, steps, shape=(-1, 1, 1, 1)) -> tuple[jnp.ndarray, jnp.ndarray]:
         raise NotImplementedError
     
@@ -77,7 +101,7 @@ class GeneralizedNoiseScheduler(NoiseScheduler):
         self.sigma_max = sigma_max
         self.sigma_data = sigma_data
     
-    def get_weights(self, steps, shape=(-1, 1, 1, 1)):
+    def get_schedule_weights(self, steps, shape=(-1, 1, 1, 1)):
         sigma = self.get_sigmas(steps)
         return (1 + (1 / (1 + ((1 - sigma ** 2)/(sigma ** 2)))) / (self.sigma_max ** 2)).reshape(shape)
     

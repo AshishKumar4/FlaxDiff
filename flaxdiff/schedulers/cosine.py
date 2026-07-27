@@ -34,7 +34,7 @@ class CosineContinuousNoiseScheduler(ContinuousNoiseScheduler):
         noise_rates = jnp.sin((jnp.pi * steps) / (2 * self.max_timesteps))
         return reshape_rates((signal_rates, noise_rates), shape=shape)
     
-    def get_weights(self, steps, shape=(-1, 1, 1, 1)) -> jnp.ndarray:
+    def get_schedule_weights(self, steps, shape=(-1, 1, 1, 1)) -> jnp.ndarray:
         alpha, sigma = self.get_rates(steps, shape=shape)
         return 1 / (1 + (alpha ** 2 / sigma ** 2))
     

@@ -47,7 +47,7 @@ class DiscreteNoiseScheduler(NoiseScheduler):
     def get_p2_weights(self, k, gamma):
         return (k + self.alpha_cumprod / (1 - self.alpha_cumprod)) ** -gamma
     
-    def get_weights(self, steps, shape=(-1, 1, 1, 1)):
+    def get_schedule_weights(self, steps, shape=(-1, 1, 1, 1)):
         steps = jnp.int16(steps)
         return self.p2_loss_weights[steps].reshape(shape)
 
