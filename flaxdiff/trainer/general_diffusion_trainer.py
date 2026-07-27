@@ -1,8 +1,9 @@
 import json
+import numpy as np
 import flax
 from flax import linen as nn
 import jax
-from typing import Callable, List, Dict, Tuple, Union, Any, Sequence, Type, Optional
+from typing import Callable, List, Dict, Tuple, Union, Any, Sequence, Optional
 from dataclasses import field, dataclass
 import jax.numpy as jnp
 import optax
@@ -55,43 +56,6 @@ class TrainState(SimpleTrainState):
 
 
 from flaxdiff.metrics.common import EvaluationMetric
-
-def generate_modelname(
-    dataset_name: str,
-    noise_schedule_name: str,
-    architecture_name: str,
-    model: nn.Module,
-    input_config: DiffusionInputConfig,
-    autoencoder: AutoEncoder = None,
-    frames_per_sample: int = None,
-) -> str:
-    """
-    Generate a model name based on the configuration.
-    
-    Args:
-        config: Configuration dictionary.
-        
-    Returns:
-        A string representing the model name.
-    """
-    import hashlib
-    import json
-    
-    # Extract key components for the name
-    
-    model_name = f"diffusion-{dataset_name}-res{input_config.sample_data_shape[-2]}"
-    
-    # model_name = f"diffusion-{dataset_name}-res{input_config.sample_data_shape[-2]}-{noise_schedule_name}-{architecture_name}"
-    
-    # if autoencoder is not None:
-    #     model_name += f"-vae"
-        
-    # if frames_per_sample is not None:
-    #     model_name += f"-frames_{frames_per_sample}"
-    
-    # model_name += f"-{'.'.join([cond.encoder.key for cond in input_config.conditions])}"
-    
-    return model_name
 
 class GeneralDiffusionTrainer(SimpleTrainer):
     """
@@ -147,32 +111,7 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         )
         self.input_config = input_config
         self.eval_metrics = eval_metrics
-        
-        if wandb_config is not None:
-            # If input_config is not in wandb_config, add it
-            if 'input_config' not in wandb_config['config']:
-                wandb_config['config']['input_config'] = input_config.serialize()
-            # If model is not in wandb_config, add it
-            if 'model' not in wandb_config['config']:
-                wandb_config['config']['model'] = serialize_model(model)
-            if 'autoencoder' not in wandb_config['config'] and autoencoder is not None:
-                wandb_config['config']['autoencoder'] = autoencoder.name
-                wandb_config['config']['autoencoder_opts'] = json.dumps(autoencoder.serialize())
-                
-            # Generate a model name based on the configuration
-            modelname = generate_modelname(
-                dataset_name=wandb_config['config']['arguments']['dataset'],
-                noise_schedule_name=wandb_config['config']['arguments']['noise_schedule'],
-                architecture_name=wandb_config['config']['arguments']['architecture'],
-                model=model,
-                input_config=input_config,
-                autoencoder=autoencoder,
-                frames_per_sample=frames_per_sample,
-            )
-            print("Model name:", modelname)
-            self.modelname = modelname
-            wandb_config['config']['modelname'] = modelname
-        
+
         self.noise_schedule = noise_schedule
         self.model_output_transform = model_output_transform
         self.unconditional_prob = unconditional_prob
@@ -200,6 +139,25 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                 native_resolution=native_resolution,
             )
         self.objective = objective
+
+        if wandb_config is not None:
+            # If input_config is not in wandb_config, add it
+            if 'input_config' not in wandb_config['config']:
+                wandb_config['config']['input_config'] = input_config.serialize()
+            # If model is not in wandb_config, add it
+            if 'model' not in wandb_config['config']:
+                wandb_config['config']['model'] = serialize_model(model)
+            if 'autoencoder' not in wandb_config['config'] and autoencoder is not None:
+                wandb_config['config']['autoencoder'] = autoencoder.name
+                wandb_config['config']['autoencoder_opts'] = json.dumps(autoencoder.serialize())
+
+            # Names the wandb model artifact, so runs of different objectives on
+            # the same dataset and resolution do not collide
+            dataset_name = wandb_config['config']['arguments']['dataset']
+            self.modelname = (
+                f"{objective.tag}-{dataset_name}-res{input_config.sample_data_shape[-2]}")
+            print("Model name:", self.modelname)
+            wandb_config['config']['modelname'] = self.modelname
 
         super().__init__(
             model=model,

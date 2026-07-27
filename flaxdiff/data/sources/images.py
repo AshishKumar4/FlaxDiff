@@ -187,6 +187,8 @@ class ImageTFDSAugmenter(DataAugmenter):
                 results = self.tokenize(caption)
                 return {
                     "image": image,
+                    # the class index, which the JEPA linear/kNN probes score against
+                    "label": np.int32(element['label']),
                     "text": {
                         "input_ids": results['input_ids'][0],
                         "attention_mask": results['attention_mask'][0],

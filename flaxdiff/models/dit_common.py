@@ -12,7 +12,7 @@ module owns the sandwich; the model files just arrange blocks.
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from typing import Optional
+from typing import Optional, Sequence
 from flax.typing import Dtype, PrecisionLike
 
 from .common import FourierEmbedding, TimeProjection
@@ -34,6 +34,28 @@ def scan_indices(scan_order: str, H_P: int, W_P: int):
     if scan_order == 'zigzag':
         return zigzag_indices(H_P, W_P)
     return None
+
+
+def scan_ordered_pos_embed(emb_dim: int, H_P: int, W_P: int, scan_order: str):
+    """2D sincos position embedding permuted into the scan order, so token i of
+    the sequence carries the signal for the 2D position it actually came from."""
+    pos_embed = build_2d_sincos_pos_embed(emb_dim, H_P, W_P)
+    idx = scan_indices(scan_order, H_P, W_P)
+    return pos_embed if idx is None else pos_embed[idx]
+
+
+def build_block_pattern(num_layers: int, ssm_attention_ratio: str = "3:1",
+                        block_pattern: Optional[Sequence[str]] = None):
+    """Per-layer mixer choice from a ratio string like '3:1', 'all-ssm', 'all-attn'."""
+    if block_pattern is not None:
+        return list(block_pattern)
+    if ssm_attention_ratio == "all-ssm":
+        return ['ssm'] * num_layers
+    if ssm_attention_ratio == "all-attn":
+        return ['attn'] * num_layers
+    n_ssm, n_attn = (int(part) for part in ssm_attention_ratio.split(':'))
+    unit = ['ssm'] * n_ssm + ['attn'] * n_attn
+    return (unit * (num_layers // len(unit) + 1))[:num_layers]
 
 
 class PatchSequenceEmbed(nn.Module):
@@ -83,15 +105,10 @@ class PatchSequenceEmbed(nn.Module):
         else:
             tokens = self.patch_embed(x)
 
-        # Fixed 2D sincos position embedding (order-invariant spatial signal).
-        # For hilbert/zigzag, reorder the row-major embedding to match the scan
-        # so each token gets the sincos for its real 2D position.
-        pos_embed = build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
-        pos_embed = jnp.asarray(pos_embed, dtype=tokens.dtype)
-        idx = scan_indices(self.scan_order, H_P, W_P)
-        if idx is not None:
-            pos_embed = pos_embed[idx]
-        tokens = tokens + pos_embed[None, :, :]
+        # Fixed 2D sincos position embedding (order-invariant spatial signal)
+        pos_embed = scan_ordered_pos_embed(
+            self.emb_features, H_P, W_P, self.scan_order)
+        tokens = tokens + jnp.asarray(pos_embed, dtype=tokens.dtype)[None, :, :]
         return tokens, inv_idx
 
 
