@@ -19,6 +19,7 @@ PatchSequenceEmbed produces, and come out sorted so that an SSM mixer scans
 them in a meaningful order.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -94,7 +95,7 @@ def multi_block_mask(
     S = grid[0] * grid[1]
     candidates = [
         (area, _factorizations(area, grid, aspect))
-        for area in range(max(1, int(jnp.ceil(scale[0] * S))), int(scale[1] * S) + 1)
+        for area in range(max(1, math.ceil(scale[0] * S)), math.floor(scale[1] * S) + 1)
     ]
     candidates = [(area, shapes) for area, shapes in candidates if shapes]
     if not candidates:

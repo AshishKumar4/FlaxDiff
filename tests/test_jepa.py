@@ -9,7 +9,7 @@ import pytest
 from flaxdiff.inputs import DiffusionInputConfig
 from flaxdiff.jepa import (
     JepaEncoder, JepaVideoEncoder, JepaObjective, multi_block_mask,
-    representation_health, linear_probe, knn_probe,
+    representation_health, normalize_targets, linear_probe, knn_probe,
 )
 from flaxdiff.jepa.models import JepaPredictor
 from flaxdiff.trainer import GeneralDiffusionTrainer
@@ -135,6 +135,20 @@ def test_video_encoder_and_predictor_shapes(mask, rng):
     assert out.shape == (2, FRAMES, mask.block_area, 32)
 
 
+def test_video_encoder_carries_a_temporal_signal(mask, rng):
+    """Tubelet masking keeps the spatial layout, so time is the only axis the
+    encoder can mix along: perturbing frame 0 must move frame 2's embedding."""
+    encoder = JepaVideoEncoder(patch_size=PATCH, emb_features=32, num_layers=1,
+                               num_heads=2, mlp_ratio=2)
+    context_idx, _ = mask.sample(rng, 2)
+    x = videos()
+    params = jax.tree.map(lambda p: p + 0.02, encoder.init(rng, x, context_idx))
+
+    before = encoder.apply(params, x, context_idx)
+    after = encoder.apply(params, x.at[:, 0].add(1.0), context_idx)
+    assert not jnp.allclose(before[:, 2], after[:, 2]), "no information flow across frames"
+
+
 def test_encoder_runs_on_the_ssm_mixer(mask, rng):
     """The hybrid SSM encoder is the point of the shared block: same interface."""
     encoder = make_encoder(ssm_attention_ratio="3:1", ssm_state_dim=8)
@@ -190,6 +204,62 @@ def test_video_objective_trains(mask, rng):
         params = optax.apply_updates(params, updates)
 
     assert float(loss_of(params)) < initial * 0.9
+
+
+def solid_colour_images(rs, n):
+    """One random colour per image, so a target block is fully determined by
+    anything else in the same image and by nothing in any other image."""
+    colours = rs.uniform(20, 235, (n, 1, 1, 3))
+    return jnp.asarray(np.clip(colours + rs.uniform(-15, 15, (n, RES, RES, 3)), 0, 255))
+
+
+def context_ablation(objective, params, ema, data, mask, rng):
+    """Prediction error from the true context vs. from another image's context."""
+    n, blocks = data.shape[0], mask.num_targets
+    context_idx, target_idx = mask.sample(rng, n)
+    full = normalize_targets(objective.encode(ema["params"]["context_encoder"], data))
+    targets = jnp.take_along_axis(
+        full[:, None], target_idx.reshape(n, blocks, -1, 1), axis=-2)
+    context = objective.encode(params["params"]["context_encoder"], data, context_idx)
+
+    def error(ctx):
+        predictions = objective.predictor.apply(
+            {"params": params["params"]["predictor"]},
+            jnp.repeat(ctx, blocks, axis=0),
+            jnp.repeat(context_idx, blocks, axis=0),
+            target_idx.reshape(n * blocks, -1),
+        ).reshape(targets.shape)
+        return float(jnp.mean((predictions - targets) ** 2))
+
+    return error(context), error(jnp.roll(context, 1, axis=0))
+
+
+def test_training_makes_the_prediction_depend_on_the_context(tmp_path, mask):
+    """The loss can be driven down by predicting the average target while
+    ignoring the context entirely - which would teach the encoder nothing.
+    Swapping in another image's context must cost real accuracy."""
+    rs = np.random.RandomState(0)
+    train_x, test_x = solid_colour_images(rs, 128), solid_colour_images(rs, 32)
+    normalized_test = (test_x - 127.5) / 127.5
+
+    trainer = make_jepa_trainer(tmp_path, mask, learning_rate=3e-3,
+                                momentum=(0.9, 0.99), momentum_steps=150)
+    objective = trainer.objective
+    before = context_ablation(objective, trainer.state.params, trainer.state.ema_params,
+                              normalized_test, mask, jax.random.PRNGKey(9))
+    assert before[1] / before[0] < 1.5, "a fresh predictor should not favour any context"
+
+    def batches():
+        while True:
+            yield {"image": train_x[rs.randint(0, len(train_x), 16)]}
+
+    state = trainer.fit({"train": batches, "train_len": 128, "local_batch_size": 16},
+                        training_steps_per_epoch=150, epochs=1, val_steps_per_epoch=0)
+
+    after = context_ablation(objective, state.params, state.ema_params,
+                             normalized_test, mask, jax.random.PRNGKey(9))
+    assert after[0] < before[0] / 2, "held-out prediction error did not improve"
+    assert after[1] / after[0] > 5.0, "the predictor still ignores its context"
 
 
 def test_no_gradient_reaches_the_target_branch(mask, rng):
@@ -256,11 +326,11 @@ def test_momentum_schedule_endpoints(mask):
     assert objective.ema.path == ("params", "context_encoder")
 
 
-def make_jepa_trainer(tmp_path, mask, **kwargs):
+def make_jepa_trainer(tmp_path, mask, learning_rate=1e-3, **kwargs):
     encoder = make_encoder()
     return GeneralDiffusionTrainer(
         model=encoder,
-        optimizer=optax.adam(1e-3),
+        optimizer=optax.adam(learning_rate),
         input_config=DiffusionInputConfig(
             sample_data_key="image", sample_data_shape=(RES, RES, 3), conditions=[]),
         rngs=jax.random.PRNGKey(0),

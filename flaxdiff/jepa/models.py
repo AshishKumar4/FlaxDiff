@@ -304,13 +304,13 @@ class JepaPredictor(nn.Module):
             pos = pos_embed[idx]                       # [B, N, P]
             return pos[:, None] if self.factorized else pos
 
-        num_targets = target_idx.shape[-1]
+        num_target_tokens = target_idx.shape[-1]
         context = self.proj_in(context) + positions(context_idx)
         targets = self.mask_token + positions(target_idx)
         if self.factorized:
-            targets = jnp.broadcast_to(targets, (*context.shape[:-2], num_targets,
-                                                 self.predictor_features))
+            targets = jnp.broadcast_to(
+                targets, (*context.shape[:-2], num_target_tokens, self.predictor_features))
 
         tokens = jnp.concatenate([context, targets], axis=-2)
         tokens = self.stack(tokens, train=train)
-        return self.proj_out(self.norm(tokens[..., -num_targets:, :]))
+        return self.proj_out(self.norm(tokens[..., -num_target_tokens:, :]))

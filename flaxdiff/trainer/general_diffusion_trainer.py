@@ -299,8 +299,7 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         global_device_count = jax.device_count()
         local_device_count = jax.local_device_count()
         process_index = jax.process_index()
-        generate_samples = val_step_fn
-        
+
         val_ds = iter(val_ds()) if val_ds else None
         print(f"Validation loop started for process index {process_index} with {global_device_count} devices.")
         # Evaluation step
@@ -313,13 +312,13 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                     batch = next(val_ds)
                     if self.distributed_training and global_device_count > 1:
                         batch = convert_to_global_tree(self.mesh, batch)
-                samples = generate_samples(val_state, batch)
+                artifacts = val_step_fn(val_state, batch)
 
                 if self.eval_metrics is not None:
                     for metric in self.eval_metrics:
                         try:
                             # Evaluate metrics
-                            metric_val = metric.function(samples, batch)
+                            metric_val = metric.function(artifacts, batch)
                             metrics[metric.name].append(metric_val)
                         except Exception as e:
                             print("Error in evaluation metrics:", e)
@@ -331,7 +330,7 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                     print(f"Evaluation started for process index {process_index}")
                     if self.wandb is not None and self.wandb:
                         self.objective.log_validation_artifacts(
-                            self.wandb, samples, current_step)
+                            self.wandb, artifacts, current_step)
 
             # Flatten the metrics
             if metrics:

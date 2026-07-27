@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, Tuple, Type
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 
 from ..schedulers import NoiseScheduler, get_coeff_shapes_tuple
@@ -175,8 +176,6 @@ class DiffusionObjective(Objective):
         return generate_samples
 
     def log_validation_artifacts(self, wandb, artifacts, step: int):
-        import numpy as np
-
         is_video = len(artifacts.shape) == 5
         for i in range(artifacts.shape[0]):
             sample = np.clip((np.array(artifacts[i]) + 1) * 127.5, 0, 255).astype(np.uint8)
