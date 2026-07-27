@@ -7,12 +7,15 @@ mean 0 and std s. This catches integrator bugs, step-domain bugs, and
 shape bugs in one place, with no training involved.
 """
 
+from dataclasses import dataclass
+
 import jax
 import jax.numpy as jnp
 import pytest
 from flax import linen as nn
 
-from flaxdiff.inputs import DiffusionInputConfig
+from flaxdiff.inputs import ConditionalInputConfig, DiffusionInputConfig
+from flaxdiff.inputs.encoders import ConditioningEncoder
 from flaxdiff.predictors import EpsilonPredictionTransform, KarrasPredictionTransform
 from flaxdiff.samplers.ddim import DDIMSampler
 from flaxdiff.samplers.ddpm import DDPMSampler, SimpleDDPMSampler
@@ -184,5 +187,119 @@ def test_multistep_dpm_reentrant():
     first = generate(model, sampler)
     second = generate(model, sampler)
     assert jnp.allclose(first, second, atol=1e-5)
+
+
+############################################################################################################
+# Interval-limited classifier-free guidance (Kynkaanniemi et al. 2024)
+############################################################################################################
+
+@dataclass
+class LabelEncoder(ConditioningEncoder):
+    """Smallest conditioning seam that still gives CFG a real conditional and
+    unconditional branch to interpolate between."""
+    @property
+    def key(self):
+        return "label"
+
+    def tokenize(self, data):
+        return jnp.asarray(data, dtype=jnp.float32).reshape(-1, 1)
+
+    def encode_from_tokens(self, tokens):
+        return tokens
+
+    def serialize(self):
+        return {}
+
+    @staticmethod
+    def deserialize(serialized_config):
+        raise NotImplementedError
+
+
+conditional_input_config = DiffusionInputConfig(
+    sample_data_key="image",
+    sample_data_shape=(8, 8, 3),
+    conditions=[
+        ConditionalInputConfig(
+            encoder=LabelEncoder(model=None, tokenizer=None),
+            conditioning_data_key="label",
+            unconditional_input=0.0,
+        )
+    ],
+)
+
+
+class ConditionalVPOracle(nn.Module):
+    """VPOracle offset by the label, so the guided output reads back the scale
+    that was actually applied."""
+    schedule: CosineNoiseScheduler
+
+    @nn.compact
+    def __call__(self, x, temb, label):
+        alpha, sigma = self.schedule.get_rates(temb, get_coeff_shapes_tuple(x))
+        eps = x * sigma / (alpha**2 * DATA_STD**2 + sigma**2)
+        return eps + label.reshape(get_coeff_shapes_tuple(x))
+
+
+def make_guided_sampler(**kwargs):
+    schedule = CosineNoiseScheduler(1000)
+    model = ConditionalVPOracle(schedule=schedule)
+    sampler = DDIMSampler(
+        model=model,
+        noise_schedule=schedule,
+        model_output_transform=EpsilonPredictionTransform(),
+        input_config=conditional_input_config,
+        **kwargs,
+    )
+    params = model.init(
+        jax.random.PRNGKey(1), jnp.ones((1, 8, 8, 3)), jnp.ones((1,)), jnp.ones((1, 1))
+    )
+    return params, sampler
+
+
+@pytest.mark.parametrize("progress,inside", [(0.1, False), (0.5, True), (0.9, False)])
+def test_interval_cfg_applies_only_inside_the_interval(progress, inside):
+    params, full = make_guided_sampler(guidance_scale=3.0)
+    _, interval = make_guided_sampler(guidance_scale=3.0, guidance_start=0.4, guidance_stop=0.6)
+    _, unguided = make_guided_sampler(guidance_scale=0.0)
+
+    x_t = jax.random.normal(jax.random.PRNGKey(3), (4, 8, 8, 3))
+    labels = jnp.full((4, 1), 0.7)
+    t = jnp.full((4,), (1.0 - progress) * 1000)
+
+    def output(sampler):
+        return sampler.sample_model(params, x_t, t, labels)[2]
+
+    matches_full = bool(jnp.allclose(output(interval), output(full), atol=1e-5))
+    matches_unguided = bool(jnp.allclose(output(interval), output(unguided), atol=1e-5))
+    assert matches_full is inside
+    assert matches_unguided is not inside
+
+
+def test_interval_cfg_defaults_to_the_full_range():
+    params, default = make_guided_sampler(guidance_scale=3.0)
+    _, explicit = make_guided_sampler(guidance_scale=3.0, guidance_start=0.0, guidance_stop=1.0)
+
+    x_t = jax.random.normal(jax.random.PRNGKey(3), (4, 8, 8, 3))
+    labels = jnp.full((4, 1), 0.7)
+    t = jnp.full((4,), 500.0)
+    assert jnp.allclose(
+        default.sample_model(params, x_t, t, labels)[2],
+        explicit.sample_model(params, x_t, t, labels)[2],
+        atol=1e-6,
+    )
+
+
+def test_empty_guidance_interval_generates_the_unguided_samples():
+    params, empty = make_guided_sampler(guidance_scale=3.0, guidance_start=0.9, guidance_stop=0.1)
+    _, unguided = make_guided_sampler(guidance_scale=0.0)
+
+    def run(sampler):
+        return sampler.generate_samples(
+            params, num_samples=16, resolution=8, diffusion_steps=25,
+            rngstate=RandomMarkovState(jax.random.PRNGKey(2)),
+            model_conditioning_inputs=(jnp.full((16, 1), 0.7),),
+        )
+
+    assert jnp.allclose(run(empty), run(unguided), atol=1e-5)
 
 
