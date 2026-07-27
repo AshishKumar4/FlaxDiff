@@ -10,32 +10,48 @@ import functools
 from jax.sharding import Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
 
-from ..schedulers import NoiseScheduler, get_coeff_shapes_tuple
+from ..schedulers import NoiseScheduler
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
-from ..samplers.common import DiffusionSampler
-from ..samplers.ddim import DDIMSampler
 
 from flaxdiff.utils import RandomMarkovState, serialize_model, get_latest_checkpoint
 from flaxdiff.inputs import ConditioningEncoder, ConditionalInputConfig, DiffusionInputConfig
 
 from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics, convert_to_global_tree
+from .objectives import Objective, DiffusionObjective
 
 from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
 from flax.training import dynamic_scale as dynamic_scale_lib
 import shutil
 
 
+def _replace_subtree(tree, path, value):
+    if not path:
+        return value
+    return {**tree, path[0]: _replace_subtree(tree[path[0]], path[1:], value)}
+
+
+def _subtree(tree, path):
+    for key in path:
+        tree = tree[key]
+    return tree
+
+
 class TrainState(SimpleTrainState):
     rngs: jax.random.PRNGKey
     ema_params: dict
 
-    def apply_ema(self, decay: float = 0.999):
-        new_ema_params = jax.tree_util.tree_map(
+    def apply_ema(self, decay: float = 0.999, path: Tuple[str, ...] = ()):
+        """EMA over a subtree of the parameters (the whole tree by default).
+
+        JEPA's target encoder is the EMA of the context encoder alone, so the
+        predictor's slice of the tree must be left out of the average.
+        """
+        new_subtree = jax.tree_util.tree_map(
             lambda ema, param: decay * ema + (1 - decay) * param,
-            self.ema_params,
-            self.params,
+            _subtree(self.ema_params, path),
+            _subtree(self.params, path),
         )
-        return self.replace(ema_params=new_ema_params)
+        return self.replace(ema_params=_replace_subtree(self.ema_params, path, new_subtree))
 
 
 from flaxdiff.metrics.common import EvaluationMetric
@@ -90,9 +106,10 @@ class GeneralDiffusionTrainer(SimpleTrainer):
     def __init__(self,
                  model: nn.Module,
                  optimizer: optax.GradientTransformation,
-                 noise_schedule: NoiseScheduler,
                  input_config: DiffusionInputConfig,
                  rngs: jax.random.PRNGKey,
+                 noise_schedule: NoiseScheduler = None,
+                 objective: Objective = None,
                  unconditional_prob: float = 0.12,
                  name: str = "GeneralDiffusion",
                  model_output_transform: DiffusionPredictionTransform = EpsilonPredictionTransform(),
@@ -103,17 +120,19 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                  eval_metrics: List[EvaluationMetric] = None,
                  best_tracker_metric: str = "train/best_loss",
                  ema_decay: float = 0.999,
+                 loss_fn: Callable = optax.l2_loss,
                  **kwargs
                  ):
         """
         Initialize the general diffusion trainer.
-        
+
         Args:
             model: Neural network model
             optimizer: Optimization algorithm
-            noise_schedule: Noise scheduler for diffusion process
             input_config: Configuration for input data, including keys, shapes and conditioning inputs
             rngs: Random number generator keys
+            noise_schedule: Noise scheduler for the default diffusion objective
+            objective: What to optimize. Defaults to diffusion over `model`.
             unconditional_prob: Probability of training with unconditional samples
             name: Name of this trainer
             model_output_transform: Transform for model predictions
@@ -167,6 +186,21 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                 native_resolution = native_resolution * autoencoder.downscale_factor
         self.native_resolution = native_resolution
 
+        if objective is None:
+            objective = DiffusionObjective(
+                model=model,
+                noise_schedule=noise_schedule,
+                model_output_transform=model_output_transform,
+                input_config=input_config,
+                input_shapes=input_shapes,
+                autoencoder=autoencoder,
+                unconditional_prob=unconditional_prob,
+                loss_fn=loss_fn,
+                ema_decay=ema_decay,
+                native_resolution=native_resolution,
+            )
+        self.objective = objective
+
         super().__init__(
             model=model,
             input_shapes=input_shapes,
@@ -174,6 +208,7 @@ class GeneralDiffusionTrainer(SimpleTrainer):
             rngs=rngs,
             name=name,
             wandb_config=wandb_config,
+            loss_fn=loss_fn,
             **kwargs
         )
         
@@ -184,8 +219,6 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         
         # List of conditional inputs
         self.conditional_inputs = input_config.conditions
-        # Determine if we're working with video or images
-        self.is_video = self._is_video_data()
         self.best_val_metrics = {}
 
         # val/<metric_name> -> True if higher is better (default lower-is-better)
@@ -204,8 +237,7 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         print("Generating states for DiffusionTrainer")
         rngs, subkey = jax.random.split(rngs)
 
-        input_vars = self.get_input_ones()
-        params = model.init(subkey, **input_vars)
+        params = self.objective.init_params(subkey)
 
         state = TrainState.create(
             apply_fn=model.apply,
@@ -218,121 +250,44 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         )
         return state, state
 
-    def fit(self, data, training_steps_per_epoch, epochs, val_steps_per_epoch=8, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
+    def fit(self, data, training_steps_per_epoch, epochs, val_steps_per_epoch=8, **validation_step_args):
         local_batch_size = data['local_batch_size']
-        validation_step_args = {
-            "sampler_class": sampler_class,
-            "sampling_noise_schedule": sampling_noise_schedule,
-        }
         return super().fit(
-            data, 
-            train_steps_per_epoch=training_steps_per_epoch, 
-            epochs=epochs, 
-            train_step_args={"batch_size": local_batch_size}, 
+            data,
+            train_steps_per_epoch=training_steps_per_epoch,
+            epochs=epochs,
+            train_step_args={"batch_size": local_batch_size},
             val_steps_per_epoch=val_steps_per_epoch,
             validation_step_args=validation_step_args,
         )
 
-    def _is_video_data(self):
-        sample_data_shape = self.input_config.sample_data_shape
-        return len(sample_data_shape) == 5
-        
     def _define_train_step(self, batch_size):
         """
-        Define the training step function for both image and video diffusion.
-        Optimized for efficient sharding and JIT compilation.
+        Define the training step: the objective supplies the loss, the trainer
+        supplies gradients, sharding, EMA and the state update.
         """
-        # Access class variables once for JIT optimization
-        noise_schedule = self.noise_schedule
-        model = self.model
-        model_output_transform = self.model_output_transform
-        loss_fn = self.loss_fn
+        objective = self.objective
         distributed_training = self.distributed_training
-        autoencoder = self.autoencoder
-        unconditional_prob = self.unconditional_prob
-        
-        input_config = self.input_config
-        sample_data_key = input_config.sample_data_key
-        
-        # JIT-optimized function for processing conditional inputs
-        # @functools.partial(jax.jit, static_argnums=(2,))
-        def process_conditioning(batch, uncond_mask):
-            return input_config.process_conditioning(
-                batch,
-                uncond_mask=uncond_mask,
-            )
+        ema = objective.ema
 
-        # Main training step function - optimized for JIT compilation and sharding
         def train_step(train_state: TrainState, rng_state: RandomMarkovState, batch, local_device_index):
             """Training step optimized for distributed execution."""
-            # Random key handling
             rng_state, key_fold = rng_state.get_random_key()
             folded_key = jax.random.fold_in(key_fold, local_device_index.reshape())
-            local_rng_state = RandomMarkovState(folded_key)
-            
-            # Extract and normalize data (works for both images and videos)
-            data = batch[sample_data_key]
-            local_batch_size = data.shape[0]
-            data = (jnp.asarray(data, dtype=jnp.float32) - 127.5) / 127.5
-            
-            # Autoencoder step (handles both image and video data)
-            if autoencoder is not None:
-                local_rng_state, enc_key = local_rng_state.get_random_key()
-                data = autoencoder.encode(data, enc_key)
-            
-            # Determine number of unconditional samples per mini batch randomly
-            local_rng_state, uncond_key = local_rng_state.get_random_key()
-            # Determine unconditional samples 
-            uncond_mask = jax.random.bernoulli(
-                uncond_key,
-                shape=(local_batch_size,),
-                p=unconditional_prob
-            )
-            
-            # Process conditioning
-            all_conditional_inputs = process_conditioning(batch, uncond_mask)
-            
-            # Generate diffusion timesteps
-            noise_level, local_rng_state = noise_schedule.generate_timesteps(local_batch_size, local_rng_state)
-            
-            # Generate noise
-            local_rng_state, noise_key = local_rng_state.get_random_key()
-            noise = jax.random.normal(noise_key, shape=data.shape, dtype=jnp.float32)
 
-            local_rng_state, dropout_key = local_rng_state.get_random_key()
-            
-            # Forward diffusion process
-            rates = noise_schedule.get_rates(noise_level, get_coeff_shapes_tuple(data))
-            noisy_data, c_in, expected_output = model_output_transform.forward_diffusion(data, noise, rates)
+            def objective_loss(params):
+                return objective.loss(params, train_state.ema_params, batch,
+                                      folded_key, train_state.step)
 
-            # Loss function
-            def model_loss(params):
-                # Apply model
-                inputs = noise_schedule.transform_inputs(noisy_data * c_in, noise_level)
-                preds = model.apply(
-                    params, *inputs, *all_conditional_inputs,
-                    train=True, rngs={'dropout': dropout_key},
-                )
-                
-                # Transform predictions and calculate loss
-                preds = model_output_transform.pred_transform(noisy_data, preds, rates)
-                sample_losses = loss_fn(preds, expected_output)
-                
-                # Apply loss weighting
-                weights = noise_schedule.get_weights(noise_level, get_coeff_shapes_tuple(sample_losses))
-                weighted_loss = sample_losses * weights
-                
-                return jnp.mean(weighted_loss)
-            
-            # Compute gradients and apply updates
             if train_state.dynamic_scale is not None:
                 # Mixed precision training with dynamic scale
-                grad_fn = train_state.dynamic_scale.value_and_grad(model_loss, axis_name="data")
-                dynamic_scale, is_finite, loss, grads = grad_fn(train_state.params)
-                
+                grad_fn = train_state.dynamic_scale.value_and_grad(
+                    objective_loss, has_aux=True, axis_name="data")
+                dynamic_scale, is_finite, (loss, aux), grads = grad_fn(train_state.params)
+
                 train_state = train_state.replace(dynamic_scale=dynamic_scale)
                 new_state = train_state.apply_gradients(grads=grads)
-                
+
                 # Handle NaN/Inf gradients
                 select_fn = functools.partial(jnp.where, is_finite)
                 new_state = new_state.replace(
@@ -340,104 +295,37 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                     params=jax.tree.map(select_fn, new_state.params, train_state.params)
                 )
             else:
-                # Standard gradient computation
-                grad_fn = jax.value_and_grad(model_loss)
-                loss, grads = grad_fn(train_state.params)
-                
+                grad_fn = jax.value_and_grad(objective_loss, has_aux=True)
+                (loss, aux), grads = grad_fn(train_state.params)
+
                 if distributed_training:
                     grads = jax.lax.pmean(grads, axis_name="data")
-                
+
                 new_state = train_state.apply_gradients(grads=grads)
-            
-            # Apply EMA update
-            new_state = new_state.apply_ema(self.ema_decay)
-            
-            # Average loss across devices if distributed
+
+            new_state = new_state.apply_ema(ema.decay(train_state.step), ema.path)
+
             if distributed_training:
                 loss = jax.lax.pmean(loss, axis_name="data")
-                
-            return new_state, loss, rng_state
+                aux = jax.tree.map(lambda v: jax.lax.pmean(v, axis_name="data"), aux)
+
+            return new_state, loss, aux, rng_state
 
         # Apply sharding for distributed training
         if distributed_training:
             train_step = shard_map(
-                train_step, 
-                mesh=self.mesh, 
-                in_specs=(P(), P(), P('data'), P('data')), 
-                out_specs=(P(), P(), P()),
+                train_step,
+                mesh=self.mesh,
+                in_specs=(P(), P(), P('data'), P('data')),
+                out_specs=(P(), P(), P(), P()),
             )
-            
+
         # Apply JIT compilation
         train_step = jax.jit(train_step, donate_argnums=(2))
         return train_step
 
-    def _define_validation_step(self, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
-        """
-        Define the validation step for both image and video diffusion models.
-        """
-        # Setup for validation
-        model = self.model
-        autoencoder = self.autoencoder
-        input_config = self.input_config
-        conditional_inputs = self.conditional_inputs
-        is_video = self.is_video
-        
-        # Get necessary parameters
-        image_size = self._get_image_size()
-        
-        # Get sequence length only for video data
-        sequence_length = self._get_sequence_length() if is_video else None
-        
-        # Initialize the sampler
-        sampler = sampler_class(
-            model=model,
-            noise_schedule=self.noise_schedule if sampling_noise_schedule is None else sampling_noise_schedule,
-            model_output_transform=self.model_output_transform,
-            input_config=input_config,
-            autoencoder=autoencoder,
-            guidance_scale=3.0,
-        )
-        
-        def generate_samples(
-            val_state: TrainState,
-            batch,
-            diffusion_steps: int,
-        ):
-            # Process all conditional inputs
-            model_conditioning_inputs = [cond_input(batch) for cond_input in conditional_inputs]
-            
-            # Determine batch size
-            batch_size = len(model_conditioning_inputs[0]) if model_conditioning_inputs else 4
-            
-            # Generate samples - works for both images and videos
-            return sampler.generate_samples(
-                params=val_state.ema_params,
-                resolution=image_size,
-                num_samples=batch_size,
-                sequence_length=sequence_length,  # Will be None for images
-                diffusion_steps=diffusion_steps,
-                end_step=0,
-                priors=None,
-                model_conditioning_inputs=tuple(model_conditioning_inputs),
-            )
-        
-        return generate_samples
-        
-    def _get_image_size(self):
-        """Helper to determine image size from available information."""
-        if self.native_resolution is not None:
-            return self.native_resolution
-            
-        sample_data_shape = self.input_config.sample_data_shape
-        return sample_data_shape[-2] # Assuming [..., H, W, C] format
-    
-    def _get_sequence_length(self):
-        """Helper to determine sequence length for video generation."""
-        if not self.is_video:
-            return None
-            
-        sample_data_shape = self.input_config.sample_data_shape
-        return sample_data_shape[1]  # Assuming [B,T,H,W,C] format
+    def _define_validation_step(self, **kwargs):
+        return self.objective.make_validation_step(**kwargs)
 
     def validation_loop(
         self,
@@ -446,10 +334,9 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         val_ds,
         val_steps_per_epoch,
         current_step,
-        diffusion_steps=200,
     ):
         """
-        Run validation and log samples for both image and video diffusion.
+        Score the objective's validation artifacts and let it visualize them.
         """
         global_device_count = jax.device_count()
         local_device_count = jax.local_device_count()
@@ -468,13 +355,8 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                     batch = next(val_ds)
                     if self.distributed_training and global_device_count > 1:
                         batch = convert_to_global_tree(self.mesh, batch)
-                # Generate samples
-                samples = generate_samples(
-                    val_state,
-                    batch,
-                    diffusion_steps,
-                )
-                
+                samples = generate_samples(val_state, batch)
+
                 if self.eval_metrics is not None:
                     for metric in self.eval_metrics:
                         try:
@@ -489,16 +371,10 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                     
                 if i == 0:
                     print(f"Evaluation started for process index {process_index}")
-                    # Log samples to wandb
                     if self.wandb is not None and self.wandb:
-                        import numpy as np
-                        
-                        # Process samples differently based on dimensionality
-                        if len(samples.shape) == 5:  # [B,T,H,W,C] - Video data
-                            self._log_video_samples(samples, current_step)
-                        else:  # [B,H,W,C] - Image data
-                            self._log_image_samples(samples, current_step)
-                    
+                        self.objective.log_validation_artifacts(
+                            self.wandb, samples, current_step)
+
             # Flatten the metrics
             if metrics:
                 metrics = {k: np.mean(v) for k, v in metrics.items()}
@@ -538,46 +414,7 @@ class GeneralDiffusionTrainer(SimpleTrainer):
             import traceback
             traceback.print_exc()
 
-            
-    def _log_video_samples(self, samples, current_step):
-        """Helper to log video samples to wandb."""
-        import numpy as np
-        from wandb import Video as wandbVideo
-        
-        for i in range(samples.shape[0]):
-            # Convert to numpy, denormalize and clip
-            sample = np.array(samples[i])
-            sample = (sample + 1) * 127.5
-            sample = np.clip(sample, 0, 255).astype(np.uint8)
-            
-            # Log as video
-            self.wandb.log({
-                f"video_sample_{i}": wandbVideo(
-                    sample, 
-                    fps=10, 
-                    caption=f"Video Sample {i} at step {current_step}"
-                )
-            }, step=current_step)
-            
-    def _log_image_samples(self, samples, current_step):
-        """Helper to log image samples to wandb."""
-        import numpy as np
-        from wandb import Image as wandbImage
-        
-        for i in range(samples.shape[0]):
-            # Convert to numpy, denormalize and clip
-            sample = np.array(samples[i])
-            sample = (sample + 1) * 127.5
-            sample = np.clip(sample, 0, 255).astype(np.uint8)
-            
-            # Log as image
-            self.wandb.log({
-                f"sample_{i}": wandbImage(
-                    sample, 
-                    caption=f"Sample {i} at step {current_step}"
-                )
-            }, step=current_step)
-            
+
     def push_to_registry(
         self,
         registry_name: str = 'wandb-registry-model',
