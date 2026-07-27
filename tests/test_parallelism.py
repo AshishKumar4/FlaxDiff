@@ -61,7 +61,7 @@ def run_losses(trainer, steps):
     state, rng = trainer.state, trainer.rngstate
     losses = []
     for _ in range(steps):
-        state, loss, rng, is_finite = train_step(state, rng, next(source))
+        state, loss, _, rng, is_finite = train_step(state, rng, next(source))
         assert bool(is_finite)
         losses.append(float(loss))
     return losses
@@ -257,7 +257,7 @@ def test_gradient_accumulation_updates_only_on_the_boundary(tmp_path):
 
     reference = snapshot(state)
     for micro in range(1, accum * 2 + 1):
-        state, _, rng, _ = train_step(state, rng, next(source))
+        state, _, _, rng, _ = train_step(state, rng, next(source))
         moved = any(not np.array_equal(a, b) for a, b in zip(reference, snapshot(state)))
         at_boundary = micro % accum == 0
         assert moved == at_boundary, f"micro-step {micro}: moved={moved}"

@@ -14,7 +14,7 @@ import inspect
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from typing import Optional
+from typing import Optional, Sequence
 from flax.typing import Dtype, PrecisionLike
 
 from .common import FourierEmbedding, TimeProjection
@@ -36,6 +36,28 @@ def scan_indices(scan_order: str, H_P: int, W_P: int):
     if scan_order == 'zigzag':
         return zigzag_indices(H_P, W_P)
     return None
+
+
+def scan_ordered_pos_embed(emb_dim: int, H_P: int, W_P: int, scan_order: str):
+    """2D sincos position embedding permuted into the scan order, so token i of
+    the sequence carries the signal for the 2D position it actually came from."""
+    pos_embed = build_2d_sincos_pos_embed(emb_dim, H_P, W_P)
+    idx = scan_indices(scan_order, H_P, W_P)
+    return pos_embed if idx is None else pos_embed[idx]
+
+
+def build_block_pattern(num_layers: int, ssm_attention_ratio: str = "3:1",
+                        block_pattern: Optional[Sequence[str]] = None):
+    """Per-layer mixer choice from a ratio string like '3:1', 'all-ssm', 'all-attn'."""
+    if block_pattern is not None:
+        return list(block_pattern)
+    if ssm_attention_ratio == "all-ssm":
+        return ['ssm'] * num_layers
+    if ssm_attention_ratio == "all-attn":
+        return ['attn'] * num_layers
+    n_ssm, n_attn = (int(part) for part in ssm_attention_ratio.split(':'))
+    unit = ['ssm'] * n_ssm + ['attn'] * n_attn
+    return (unit * (num_layers // len(unit) + 1))[:num_layers]
 
 
 class PatchSequenceEmbed(nn.Module):
@@ -85,15 +107,10 @@ class PatchSequenceEmbed(nn.Module):
         else:
             tokens = self.patch_embed(x)
 
-        # Fixed 2D sincos position embedding (order-invariant spatial signal).
-        # For hilbert/zigzag, reorder the row-major embedding to match the scan
-        # so each token gets the sincos for its real 2D position.
-        pos_embed = build_2d_sincos_pos_embed(self.emb_features, H_P, W_P)
-        pos_embed = jnp.asarray(pos_embed, dtype=tokens.dtype)
-        idx = scan_indices(self.scan_order, H_P, W_P)
-        if idx is not None:
-            pos_embed = pos_embed[idx]
-        tokens = tokens + pos_embed[None, :, :]
+        # Fixed 2D sincos position embedding (order-invariant spatial signal)
+        pos_embed = scan_ordered_pos_embed(
+            self.emb_features, H_P, W_P, self.scan_order)
+        tokens = tokens + jnp.asarray(pos_embed, dtype=tokens.dtype)[None, :, :]
         return tokens, inv_idx
 
 
@@ -203,11 +220,16 @@ class ModulatedBlock(nn.Module):
     mixer='ssm' replaces attention with a bidirectional S5 scan, optionally
     followed by Spatial-Mamba style 2D state fusion. freqs_cis is unused by
     the SSM mixer but kept in the interface so blocks are interchangeable.
+
+    modulated=False drops the adaLN-Zero conditioning path entirely, leaving a
+    plain pre-norm residual block with learned affine norms - the ViT block a
+    JEPA encoder needs, where there is no timestep to condition on.
     """
     features: int
     num_heads: int
     rope_emb: RotaryEmbedding = None
     mixer: str = 'attention'
+    modulated: bool = True
     mlp_ratio: int = 4
     dropout_rate: float = 0.0
     dtype: Optional[Dtype] = None
@@ -227,13 +249,17 @@ class ModulatedBlock(nn.Module):
         assert self.mixer in ('attention', 'ssm'), f"Unknown mixer {self.mixer}"
         hidden_features = int(self.features * self.mlp_ratio)
 
-        self.ada_params_module = AdaLNParams(
-            self.features, dtype=self.dtype, precision=self.precision)
+        if self.modulated:
+            self.ada_params_module = AdaLNParams(
+                self.features, dtype=self.dtype, precision=self.precision)
+        # Without modulation the norms carry their own affine, since there is
+        # no conditioning vector left to supply the shift and scale
+        affine = not self.modulated
         self.norm1 = nn.LayerNorm(
-            epsilon=self.norm_epsilon, use_scale=False, use_bias=False,
+            epsilon=self.norm_epsilon, use_scale=affine, use_bias=affine,
             dtype=self.dtype, name="norm1")
         self.norm2 = nn.LayerNorm(
-            epsilon=self.norm_epsilon, use_scale=False, use_bias=False,
+            epsilon=self.norm_epsilon, use_scale=affine, use_bias=affine,
             dtype=self.dtype, name="norm2")
 
         if self.mixer == 'attention':
@@ -307,9 +333,16 @@ class ModulatedBlock(nn.Module):
 
     @nn.compact
     def __call__(self, x, conditioning, freqs_cis, train: bool = False):
-        scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
-            self.ada_params_module(conditioning), 6, axis=-1
-        )
+        if self.modulated:
+            scale_mlp, shift_mlp, gate_mlp, scale_attn, shift_attn, gate_attn = jnp.split(
+                self.ada_params_module(conditioning), 6, axis=-1
+            )
+        else:
+            assert conditioning is None, "an unmodulated block takes no conditioning"
+            # Identity modulation - the block body below collapses to a plain
+            # pre-norm residual block without branching on the mode
+            scale_mlp = shift_mlp = scale_attn = shift_attn = 0.0
+            gate_mlp = gate_attn = 1.0
 
         # --- Mixer path (attention or SSM) ---
         residual = x
@@ -340,12 +373,17 @@ class ModulatedBlock(nn.Module):
         return x
 
 
+def identity_rope_freqs(seq_len: int, dim: int, dtype: Dtype = jnp.float32):
+    """RoPE frequencies that rotate by nothing, for sequences whose 1D index is
+    not a position (scan orders other than raster, masked token subsets)."""
+    shape = (seq_len, dim // 2)
+    return jnp.ones(shape, dtype=dtype), jnp.zeros(shape, dtype=dtype)
+
+
 def neutralized_rope_freqs(rope: RotaryEmbedding, seq_len: int, scan_order: str):
     """RoPE frequencies for the sequence, neutralized to identity for
     hilbert/zigzag scans where the 1D index is not a 2D position (the 2D
     sincos embedding already carries position there)."""
-    freqs_cos, freqs_sin = rope(seq_len=seq_len)
     if scan_order != 'raster':
-        freqs_cos = jnp.ones_like(freqs_cos)
-        freqs_sin = jnp.zeros_like(freqs_sin)
-    return freqs_cos, freqs_sin
+        return identity_rope_freqs(seq_len, rope.dim)
+    return rope(seq_len=seq_len)
