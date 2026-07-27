@@ -53,8 +53,13 @@ def representation_health(z) -> Dict[str, jax.Array]:
     }
 
 
-def _layer_norm(x, epsilon: float = 1e-6):
-    """Feature-wise layer norm with no learned affine, as applied to targets."""
+def normalize_targets(x, epsilon: float = 1e-6):
+    """Feature-wise layer norm with no learned affine.
+
+    Applied to the target encoder's output so the prediction problem keeps a
+    fixed scale as the encoder drifts, and so shrinking the representation is
+    not a way to lower the loss.
+    """
     mean = jnp.mean(x, axis=-1, keepdims=True)
     variance = jnp.var(x, axis=-1, keepdims=True)
     return (x - mean) * jax.lax.rsqrt(variance + epsilon)
@@ -110,7 +115,7 @@ class JepaObjective(Objective):
         num_targets = self.mask.num_targets
 
         # Target branch: the whole view through the EMA encoder, no gradient
-        full = _layer_norm(self.encode(ema_params["params"][CONTEXT_ENCODER], data))
+        full = normalize_targets(self.encode(ema_params["params"][CONTEXT_ENCODER], data))
         # [B, (T,) S, F] -> [B, M, (T,) n_tgt, F]
         frame_axis = (1,) if self.is_video else ()
         gather_idx = target_idx.reshape(batch_size, num_targets, *frame_axis, -1, 1)
