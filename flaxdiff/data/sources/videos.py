@@ -1,7 +1,7 @@
 import cv2
 import jax.numpy as jnp
 import grain.python as pygrain
-from flaxdiff.utils import AutoTextTokenizer
+from flaxdiff.utils import AutoTextTokenizer, AutoAudioProcessor
 from typing import Dict, Any, Callable, List, Optional, Tuple
 import random
 import os
@@ -172,6 +172,7 @@ class AudioVideoAugmenter(DataAugmenter):
         sequence_length: int = 16,
         audio_frame_padding: int = 3,
         method: Any = cv2.INTER_AREA,
+        audio_modelname: str = "facebook/wav2vec2-base-960h",
     ) -> Callable[[], pygrain.MapTransform]:
         """Create a transform for video datasets.
         
@@ -179,6 +180,8 @@ class AudioVideoAugmenter(DataAugmenter):
             frame_size: Size to scale video frames to.
             sequence_length: Number of frames to sample from each video.
             method: Interpolation method for resizing.
+            audio_modelname: HF audio model whose feature extractor prepares
+                the audio conditioning inputs.
             
         Returns:
             A callable that returns a pygrain.MapTransform.
@@ -188,7 +191,8 @@ class AudioVideoAugmenter(DataAugmenter):
         class AudioVideoTransform(pygrain.RandomMapTransform):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                self.tokenize = AutoAudioTokenizer(tensor_type="np")
+                self.tokenize = AutoAudioProcessor(
+                    tensor_type="np", modelname=audio_modelname)
             
             def random_map(self, element, rng: np.random.Generator) -> Dict[str, jnp.array]:
                 video_path = element["video_path"]
@@ -201,14 +205,14 @@ class AudioVideoAugmenter(DataAugmenter):
                     random_seed=random_seed,
                 )
                 
-                # Process caption
+                # Feature-extract the audio; key names differ per model, so
+                # pass the processor's output through untouched
                 results = self.tokenize(full_audio)
-                
+
                 return {
                     "video": video_frames,
                     "audio": {
-                        "input_ids": results['input_ids'][0],
-                        "attention_mask": results['attention_mask'][0],
+                        **{key: value[0] for key, value in results.items()},
                         "full_audio": full_audio,
                         "framewise_audio": framewise_audio,
                     }
