@@ -22,30 +22,48 @@ class DiffusionSampler:
         model_output_transform: DiffusionPredictionTransform,
         input_config: DiffusionInputConfig,
         guidance_scale: float = 0.0,
+        guidance_start: float = 0.0,
+        guidance_stop: float = 1.0,
         autoencoder: AutoEncoder = None,
     ):
         """Initialize the diffusion sampler.
-        
+
         Args:
             model: Neural network model
             params: Model parameters
             noise_schedule: Noise scheduler
             model_output_transform: Transform for model predictions
             guidance_scale: Scale for classifier-free guidance (0.0 means disabled)
+            guidance_start: Fraction of the trajectory after which guidance turns on
+            guidance_stop: Fraction of the trajectory after which guidance turns off
             autoencoder: Optional autoencoder for latent diffusion
         """
         self.model = model
         self.noise_schedule = noise_schedule
         self.model_output_transform = model_output_transform
         self.guidance_scale = guidance_scale
+        self.guidance_start = guidance_start
+        self.guidance_stop = guidance_stop
         self.autoencoder = autoencoder
         self.input_config = input_config
-        
+
         unconditionals = input_config.get_unconditionals()
-        
+
         if self.guidance_scale > 0:
             # Classifier free guidance
             print("Using classifier-free guidance")
+
+            def guidance_at(t):
+                """Interval-limited guidance (Kynkaanniemi et al. 2024).
+
+                Guidance hurts at high noise and buys nothing at low noise, so
+                outside [guidance_start, guidance_stop] the scale drops to 1,
+                which is exactly the plain conditional prediction. Progress runs
+                from 0 at pure noise to 1 at the clean sample.
+                """
+                progress = 1.0 - t / self.noise_schedule.max_timesteps
+                inside = (progress >= guidance_start) & (progress <= guidance_stop)
+                return jnp.where(inside, guidance_scale, 1.0)
 
             def sample_model(params, x_t, t, *conditioning_inputs):
                 # Concatenate unconditional and conditional inputs
@@ -71,7 +89,8 @@ class DiffusionSampler:
                 
                 # Split model output into unconditional and conditional parts
                 model_output_cond, model_output_uncond = jnp.split(model_output, 2, axis=0)
-                model_output = model_output_uncond + guidance_scale * (model_output_cond - model_output_uncond)
+                scale = guidance_at(t).reshape(get_coeff_shapes_tuple(model_output_cond))
+                model_output = model_output_uncond + scale * (model_output_cond - model_output_uncond)
 
                 x_0, eps = self.model_output_transform(x_t, model_output, t, self.noise_schedule)
                 return x_0, eps, model_output
