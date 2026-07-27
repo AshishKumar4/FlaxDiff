@@ -9,6 +9,8 @@ blocks are arranged (plain stack, U-shaped skips, hybrid patterns). This
 module owns the sandwich; the model files just arrange blocks.
 """
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
@@ -168,6 +170,30 @@ class PatchSequenceOutput(nn.Module):
             return hilbert_unpatchify(x_out, inv_idx, self.patch_size, H, W, self.output_channels)
         return unpatchify(x_out, channels=self.output_channels,
                           H_P=H // self.patch_size, W_P=W // self.patch_size)
+
+
+def remat_block(block_cls, enabled: bool, policy='dots'):
+    """Optionally rematerialize a block class.
+
+    Recomputing a block during the backward pass trades extra compute for a
+    large drop in activation memory, which is what caps trainable model size.
+    The default policy keeps the big matmul outputs so the recompute stays
+    cheap. Blocks carrying complex intermediates (the S5 mixer) must pass
+    policy=None: saving a residual goes through jax.lax.reduce_precision,
+    which only accepts floating dtypes.
+
+    `train` selects a Python branch, so it has to stay static; that also means
+    callers must pass it positionally for jax to see it as such.
+    """
+    if not enabled:
+        return block_cls
+    names = list(inspect.signature(block_cls.__call__).parameters)
+    return nn.remat(
+        block_cls,
+        static_argnums=tuple(i for i, name in enumerate(names) if name == 'train'),
+        policy=(jax.checkpoint_policies.dots_with_no_batch_dims_saveable
+                if policy == 'dots' else None),
+    )
 
 
 class ModulatedBlock(nn.Module):

@@ -7,9 +7,6 @@ from dataclasses import field, dataclass
 import jax.numpy as jnp
 import optax
 import functools
-from jax.sharding import Mesh, PartitionSpec as P
-from jax.experimental.shard_map import shard_map
-
 from ..schedulers import NoiseScheduler, get_coeff_shapes_tuple
 from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
 from ..samplers.common import DiffusionSampler
@@ -18,7 +15,9 @@ from ..samplers.ddim import DDIMSampler
 from flaxdiff.utils import RandomMarkovState, serialize_model, get_latest_checkpoint
 from flaxdiff.inputs import ConditioningEncoder, ConditionalInputConfig, DiffusionInputConfig
 
-from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics, convert_to_global_tree
+from flaxdiff.utils import shard_batch
+
+from .simple_trainer import SimpleTrainer, SimpleTrainState, Metrics
 
 from flaxdiff.models.autoencoder.autoencoder import AutoEncoder
 from flax.training import dynamic_scale as dynamic_scale_lib
@@ -200,23 +199,23 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         rngs: jax.random.PRNGKey,
         model: nn.Module = None,
         use_dynamic_scale: bool = False
-    ) -> Tuple[TrainState, TrainState]:
+    ) -> TrainState:
         print("Generating states for DiffusionTrainer")
-        rngs, subkey = jax.random.split(rngs)
 
-        input_vars = self.get_input_ones()
-        params = model.init(subkey, **input_vars)
+        def init_fn():
+            next_rngs, subkey = jax.random.split(rngs)
+            params = model.init(subkey, **self.get_input_ones())
+            return TrainState.create(
+                apply_fn=model.apply,
+                params=params,
+                ema_params=params,
+                tx=optimizer,
+                rngs=next_rngs,
+                metrics=Metrics.empty(),
+                dynamic_scale=dynamic_scale_lib.DynamicScale() if use_dynamic_scale else None,
+            )
 
-        state = TrainState.create(
-            apply_fn=model.apply,
-            params=params,
-            ema_params=params,
-            tx=optimizer,
-            rngs=rngs,
-            metrics=Metrics.empty(),
-            dynamic_scale = dynamic_scale_lib.DynamicScale() if use_dynamic_scale else None
-        )
-        return state, state
+        return self._build_state(init_fn)
 
     def fit(self, data, training_steps_per_epoch, epochs, val_steps_per_epoch=8, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
         local_batch_size = data['local_batch_size']
@@ -247,7 +246,6 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         model = self.model
         model_output_transform = self.model_output_transform
         loss_fn = self.loss_fn
-        distributed_training = self.distributed_training
         autoencoder = self.autoencoder
         unconditional_prob = self.unconditional_prob
         
@@ -263,13 +261,13 @@ class GeneralDiffusionTrainer(SimpleTrainer):
             )
 
         # Main training step function - optimized for JIT compilation and sharding
-        def train_step(train_state: TrainState, rng_state: RandomMarkovState, batch, local_device_index):
-            """Training step optimized for distributed execution."""
-            # Random key handling
-            rng_state, key_fold = rng_state.get_random_key()
-            folded_key = jax.random.fold_in(key_fold, local_device_index.reshape())
-            local_rng_state = RandomMarkovState(folded_key)
-            
+        def train_step(train_state: TrainState, rng_state: RandomMarkovState, batch):
+            """Training step over the global batch; GSPMD partitions it."""
+            # One key per step: threefry is partitionable, so every device draws
+            # its own slice of the same stream without folding in a device index.
+            rng_state, step_key = rng_state.get_random_key()
+            local_rng_state = RandomMarkovState(step_key)
+
             # Extract and normalize data (works for both images and videos)
             data = batch[sample_data_key]
             local_batch_size = data.shape[0]
@@ -324,52 +322,40 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                 
                 return jnp.mean(weighted_loss)
             
-            # Compute gradients and apply updates
+            # Compute gradients and apply updates. The loss is a mean over the
+            # batch-sharded axis, so its gradient carries the cross-device
+            # all-reduce on its own - no hand-written pmean.
             if train_state.dynamic_scale is not None:
                 # Mixed precision training with dynamic scale
-                grad_fn = train_state.dynamic_scale.value_and_grad(model_loss, axis_name="data")
-                dynamic_scale, is_finite, loss, grads = grad_fn(train_state.params)
-                
+                grad_fn = train_state.dynamic_scale.value_and_grad(model_loss)
+                dynamic_scale, grads_finite, loss, grads = grad_fn(train_state.params)
+
                 train_state = train_state.replace(dynamic_scale=dynamic_scale)
                 new_state = train_state.apply_gradients(grads=grads)
-                
+
                 # Handle NaN/Inf gradients
-                select_fn = functools.partial(jnp.where, is_finite)
+                select_fn = functools.partial(jnp.where, grads_finite)
                 new_state = new_state.replace(
                     opt_state=jax.tree.map(select_fn, new_state.opt_state, train_state.opt_state),
                     params=jax.tree.map(select_fn, new_state.params, train_state.params)
                 )
             else:
-                # Standard gradient computation
                 grad_fn = jax.value_and_grad(model_loss)
                 loss, grads = grad_fn(train_state.params)
-                
-                if distributed_training:
-                    grads = jax.lax.pmean(grads, axis_name="data")
-                
                 new_state = train_state.apply_gradients(grads=grads)
-            
+
             # Apply EMA update
             new_state = new_state.apply_ema(self.ema_decay)
-            
-            # Average loss across devices if distributed
-            if distributed_training:
-                loss = jax.lax.pmean(loss, axis_name="data")
-                
-            return new_state, loss, rng_state
 
-        # Apply sharding for distributed training
-        if distributed_training:
-            train_step = shard_map(
-                train_step, 
-                mesh=self.mesh, 
-                in_specs=(P(), P(), P('data'), P('data')), 
-                out_specs=(P(), P(), P()),
-            )
-            
-        # Apply JIT compilation
-        train_step = jax.jit(train_step, donate_argnums=(2))
-        return train_step
+            return new_state, loss, rng_state, jnp.isfinite(loss)
+
+        replicated = self.replicated
+        return jax.jit(
+            train_step,
+            in_shardings=(self.state_sharding, replicated, self.batch_sharding),
+            out_shardings=(self.state_sharding, replicated, replicated, replicated),
+            donate_argnums=(0,),
+        )
 
     def _define_validation_step(self, sampler_class: Type[DiffusionSampler]=DDIMSampler, sampling_noise_schedule: NoiseScheduler=None):
         """
@@ -451,8 +437,6 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         """
         Run validation and log samples for both image and video diffusion.
         """
-        global_device_count = jax.device_count()
-        local_device_count = jax.local_device_count()
         process_index = jax.process_index()
         generate_samples = val_step_fn
         
@@ -465,9 +449,7 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                 if val_ds is None:
                     batch = None
                 else:
-                    batch = next(val_ds)
-                    if self.distributed_training and global_device_count > 1:
-                        batch = convert_to_global_tree(self.mesh, batch)
+                    batch = shard_batch(self.batch_sharding, next(val_ds))
                 # Generate samples
                 samples = generate_samples(
                     val_state,
@@ -723,8 +705,11 @@ class GeneralDiffusionTrainer(SimpleTrainer):
             
     def save(self, epoch=0, step=0, state=None, rngstate=None):
         super().save(epoch=epoch, step=step, state=state, rngstate=rngstate)
-        
+
         if self.wandb is not None:
+            # Uploading reads the checkpoint back off disk, so the async write
+            # has to have landed first.
+            self.wait_for_checkpoints()
             checkpoint = get_latest_checkpoint(self.checkpoint_path())
             try:
                 is_good, is_best = self.__compare_run_against_best__(top_k=5, metric=self.best_tracker_metric, from_sweeps=hasattr(self, "wandb_sweep"))

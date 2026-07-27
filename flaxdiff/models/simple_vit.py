@@ -12,7 +12,7 @@ from flax.typing import Dtype, PrecisionLike
 from functools import partial
 from .hilbert import hilbert_indices, inverse_permutation, hilbert_patchify, hilbert_unpatchify
 from .vit_common import unpatchify, PatchEmbedding, RotaryEmbedding, RoPEAttention, AdaLNParams
-from .dit_common import ModulatedBlock
+from .dit_common import ModulatedBlock, remat_block
 
 
 class UViT(nn.Module):
@@ -262,6 +262,7 @@ class SimpleUDiT(nn.Module):
     precision: PrecisionLike = None
     force_fp32_for_softmax: bool = True # Passed to DiTBlock -> RoPEAttention
     attention_impl: Optional[str] = None
+    remat: bool = False
     norm_epsilon: float = 1e-5
     learn_sigma: bool = False
     use_hilbert: bool = False
@@ -309,7 +310,7 @@ class SimpleUDiT(nn.Module):
         )
 
         self.down_blocks = [
-            ModulatedBlock(
+            remat_block(ModulatedBlock, self.remat)(
                 features=self.emb_features,
                 num_heads=self.num_heads,
                 mlp_ratio=self.mlp_ratio,
@@ -324,7 +325,7 @@ class SimpleUDiT(nn.Module):
             ) for i in range(half_layers)
         ]
 
-        self.mid_block = ModulatedBlock(
+        self.mid_block = remat_block(ModulatedBlock, self.remat)(
             features=self.emb_features,
             num_heads=self.num_heads,
             mlp_ratio=self.mlp_ratio,
@@ -347,7 +348,7 @@ class SimpleUDiT(nn.Module):
              ) for i in range(half_layers)
         ]
         self.up_blocks = [
-            ModulatedBlock(
+            remat_block(ModulatedBlock, self.remat)(
                 features=self.emb_features,
                 num_heads=self.num_heads,
                 mlp_ratio=self.mlp_ratio,
@@ -406,16 +407,16 @@ class SimpleUDiT(nn.Module):
 
         skips = []
         for i in range(self.num_layers // 2):
-            x_seq = self.down_blocks[i](x_seq, conditioning=cond_emb, freqs_cis=None, train=train)
+            x_seq = self.down_blocks[i](x_seq, cond_emb, None, train)
             skips.append(x_seq)
 
-        x_seq = self.mid_block(x_seq, conditioning=cond_emb, freqs_cis=None, train=train)
+        x_seq = self.mid_block(x_seq, cond_emb, None, train)
 
         for i in range(self.num_layers // 2):
             skip_conn = skips.pop()
             x_seq = jnp.concatenate([x_seq, skip_conn], axis=-1)
             x_seq = self.up_dense[i](x_seq)
-            x_seq = self.up_blocks[i](x_seq, conditioning=cond_emb, freqs_cis=None, train=train)
+            x_seq = self.up_blocks[i](x_seq, cond_emb, None, train)
 
         x_out = self.final_norm(x_seq)
         x_out = self.final_proj(x_out)

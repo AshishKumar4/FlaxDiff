@@ -11,7 +11,7 @@ from flax.typing import Dtype, PrecisionLike
 
 from .dit_common import (
     PatchSequenceEmbed, ConditioningEmbed, PatchSequenceOutput,
-    ModulatedBlock, neutralized_rope_freqs,
+    ModulatedBlock, remat_block, neutralized_rope_freqs,
 )
 from .vit_common import RotaryEmbedding
 
@@ -35,6 +35,7 @@ class HybridSSMAttentionDiT(nn.Module):
     learn_sigma: bool = False
     qk_norm: bool = False
     attention_impl: Optional[str] = None
+    remat: bool = False
     use_hilbert: bool = False
     use_zigzag: bool = False  # ZigMa-style serpentine scan
     block_pattern: Optional[Sequence[str]] = None  # e.g., ['ssm','ssm','ssm','attn']
@@ -85,7 +86,7 @@ class HybridSSMAttentionDiT(nn.Module):
         blocks = []
         for i, block_type in enumerate(pattern):
             if block_type == 'ssm':
-                blocks.append(ModulatedBlock(
+                blocks.append(remat_block(ModulatedBlock, self.remat, policy=None)(
                     features=self.emb_features,
                     num_heads=self.num_heads,
                     rope_emb=self.rope,
@@ -102,7 +103,7 @@ class HybridSSMAttentionDiT(nn.Module):
                     name=f"ssm_block_{i}"
                 ))
             else:  # 'attn'
-                blocks.append(ModulatedBlock(
+                blocks.append(remat_block(ModulatedBlock, self.remat)(
                     features=self.emb_features,
                     num_heads=self.num_heads,
                     rope_emb=self.rope,
@@ -136,6 +137,6 @@ class HybridSSMAttentionDiT(nn.Module):
         freqs_cis = neutralized_rope_freqs(self.rope, x_seq.shape[1], self.scan_order)
 
         for block in self.blocks:
-            x_seq = block(x_seq, conditioning=cond_emb, freqs_cis=freqs_cis, train=train)
+            x_seq = block(x_seq, cond_emb, freqs_cis, train)
 
         return self.output(x_seq, inv_idx, H, W)
