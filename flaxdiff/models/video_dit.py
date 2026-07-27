@@ -16,7 +16,7 @@ from flax.typing import Dtype, PrecisionLike
 
 from .dit_common import (
     PatchSequenceEmbed, ConditioningEmbed, PatchSequenceOutput,
-    ModulatedBlock, neutralized_rope_freqs,
+    ModulatedBlock, remat_block, neutralized_rope_freqs,
 )
 from .vit_common import RotaryEmbedding
 
@@ -37,6 +37,7 @@ class VideoDiT(nn.Module):
     learn_sigma: bool = False
     qk_norm: bool = False
     attention_impl: Optional[str] = None
+    remat: bool = False
     use_hilbert: bool = False
     use_zigzag: bool = False
 
@@ -67,7 +68,7 @@ class VideoDiT(nn.Module):
             dim=dim_head, max_seq_len=1024, dtype=self.dtype, name="temporal_rope")
 
         def block(name):
-            return ModulatedBlock(
+            return remat_block(ModulatedBlock, self.remat)(
                 features=self.emb_features,
                 num_heads=self.num_heads,
                 mixer='attention',
@@ -112,10 +113,10 @@ class VideoDiT(nn.Module):
         freqs_temporal = self.temporal_rope(seq_len=T)
 
         for spatial, temporal in zip(self.spatial_blocks, self.temporal_blocks):
-            tokens = spatial(tokens, conditioning=cond_spatial, freqs_cis=freqs_spatial, train=train)
+            tokens = spatial(tokens, cond_spatial, freqs_spatial, train)
             # [B*T, S, F] -> [B*S, T, F]
             tokens = tokens.reshape(B, T, S, -1).transpose(0, 2, 1, 3).reshape(B * S, T, -1)
-            tokens = temporal(tokens, conditioning=cond_temporal, freqs_cis=freqs_temporal, train=train)
+            tokens = temporal(tokens, cond_temporal, freqs_temporal, train)
             # back to [B*T, S, F]
             tokens = tokens.reshape(B, S, T, -1).transpose(0, 2, 1, 3).reshape(B * T, S, -1)
 
