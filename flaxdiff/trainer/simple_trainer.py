@@ -20,7 +20,6 @@ from flaxdiff.utils import (
 )
 from flax.training import dynamic_scale as dynamic_scale_lib
 from dataclasses import dataclass
-import shutil
 
 PROCESS_COLOR_MAP = {
     0: "green",
@@ -229,24 +228,30 @@ class SimpleTrainer:
             os.makedirs(path)
         return path
 
-    def _checkpoint_template(self):
+    def _checkpoint_template(self, stored_keys):
         """Restore template plus the per-leaf args that place arrays on the mesh.
 
         Shapes and types come from the freshly built state, so a checkpoint
         written on one mesh restores onto whatever mesh this run is using.
         Restoring untyped used to silently discard opt_state and reset the step
         counter (and with it the lr schedule) on every resume.
+
+        The template must name exactly the keys the checkpoint holds: asking for
+        one it lacks is an error, and checkpoints predating iterator tracking -
+        or written from an iterator that cannot report a position - have no
+        dataset_state.
         """
-        abstract_state = jax.eval_shape(lambda: self.state)
         template = {
             'rngs': self.get_rngstate(),
-            'state': abstract_state,
+            'state': jax.eval_shape(lambda: self.state),
             'best_state': self.best_state,
             'best_loss': np.array(self.best_loss),
             'epoch': 0,
         }
-        if self.dataset_state is not None:
-            template['dataset_state'] = self.dataset_state
+        if 'dataset_state' in stored_keys:
+            # Length varies with the iterator's position, so orbax takes the
+            # shape from the checkpoint rather than from this placeholder.
+            template['dataset_state'] = np.zeros((1,), np.uint8)
         restore_args = jax.tree.map(lambda _: ocp.RestoreArgs(), template)
         # Only the train state is placed onto the mesh; everything else is
         # bookkeeping that belongs on the host.
@@ -255,25 +260,29 @@ class SimpleTrainer:
         return template, restore_args
 
     def load(self, checkpoint_path, checkpoint_step=None, load_directly_from_dir=False):
+        # The handler has to be registered for item_metadata to report the
+        # checkpoint's structure, which is what the template is built against.
         manager = ocp.CheckpointManager(
-            checkpoint_path, options=ocp.CheckpointManagerOptions(max_to_keep=4, create=False))
+            checkpoint_path, options=ocp.CheckpointManagerOptions(max_to_keep=4, create=False),
+            item_handlers=ocp.PyTreeCheckpointHandler())
 
         step = manager.latest_step() if checkpoint_step is None else checkpoint_step
         print("Loading model from checkpoint at step ", step)
         self.loaded_checkpoint_path = os.path.join(
             checkpoint_path if checkpoint_path else self.checkpoint_path(), f"{step}")
 
-        template, restore_args = self._checkpoint_template()
-        # A checkpoint written before iterator state was tracked simply has no
-        # such key, so ask for it only when the run can already produce one.
         target = checkpoint_path if load_directly_from_dir else step
+        template, restore_args = self._checkpoint_template(manager.item_metadata(target).keys())
         ckpt = manager.restore(
             target, args=ocp.args.PyTreeRestore(item=template, restore_args=restore_args))
 
         self.state = ckpt['state']
         self.best_state = ckpt['best_state']
         self.rngstate = ckpt['rngs']
-        self.dataset_state = ckpt.get('dataset_state')
+        stored_position = ckpt.get('dataset_state')
+        self.dataset_state = (
+            None if stored_position is None
+            else np.asarray(stored_position, np.uint8).tobytes())
         self.best_loss = float(ckpt['best_loss'])
         if self.best_loss == 0:
             # It cant be zero as that must have been some problem
@@ -294,7 +303,9 @@ class SimpleTrainer:
             'epoch': epoch,
         }
         if self.dataset_state is not None:
-            ckpt['dataset_state'] = self.dataset_state
+            # Grain reports its position as JSON bytes, which tensorstore has no
+            # dtype for; the raw bytes ride along as a uint8 array instead.
+            ckpt['dataset_state'] = np.frombuffer(self.dataset_state, np.uint8)
         try:
             self.checkpointer.save(step, args=ocp.args.PyTreeSave(ckpt), force=True)
         except Exception as e:
@@ -327,8 +338,6 @@ class SimpleTrainer:
         val_steps_per_epoch,
         current_step,
     ):
-        global_device_count = jax.device_count()
-        local_device_count = jax.local_device_count()
         process_index = jax.process_index()
         
         val_ds = iter(val_ds()) if val_ds else None

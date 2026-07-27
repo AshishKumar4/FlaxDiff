@@ -1,4 +1,3 @@
-import jax.numpy as jnp
 import grain.python as pygrain
 from typing import Dict, Any, Optional, Union, List, Callable
 import numpy as np

@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import flax.struct as struct
 import flax.linen as nn
-from typing import Any, Iterator, Optional
+from typing import Iterator, Optional
 import numpy as np
 import os
 import queue

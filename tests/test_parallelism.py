@@ -236,6 +236,67 @@ def test_sharded_checkpoint_roundtrips(tmp_path):
         np.testing.assert_allclose(np.asarray(before), np.asarray(after))
 
 
+def grain_image_loader(num_records=256):
+    """A checkpointable source that yields distinguishable image batches."""
+    import grain.python as pygrain
+
+    class ToImage(pygrain.MapTransform):
+        def map(self, index):
+            return {"image": np.full((RES, RES, 3), index, np.float32)}
+
+    return pygrain.DataLoader(
+        data_source=pygrain.RangeDataSource(0, num_records, 1),
+        sampler=pygrain.IndexSampler(num_records=num_records, shuffle=False, seed=0,
+                                     num_epochs=4, shard_options=pygrain.NoSharding()),
+        operations=[ToImage(), pygrain.Batch(BATCH, drop_remainder=True)],
+        worker_count=0,
+    )
+
+
+def test_resume_continues_mid_epoch(tmp_path):
+    """A resumed run must not replay the batches it already trained on."""
+    steps = 3
+    data = {"train": grain_image_loader, "train_len": BATCH * 64,
+            "local_batch_size": BATCH, "global_batch_size": BATCH}
+
+    trainer = make_trainer(tmp_path, "resume", distributed_training=True)
+    trainer.fit(data, training_steps_per_epoch=steps, epochs=1, val_steps_per_epoch=0)
+    assert trainer.dataset_state is not None, "iterator position was never captured"
+    trainer.wait_for_checkpoints()
+
+    resumed = make_trainer(tmp_path, "resume", distributed_training=True,
+                           load_from_checkpoint=trainer.checkpoint_path())
+    assert resumed.dataset_state == trainer.dataset_state
+
+    # The next batch after resuming is the one the first run would have seen next
+    reference = DevicePrefetchIterator(
+        iter(grain_image_loader()), trainer.batch_sharding,
+        source_state=trainer.dataset_state)
+    resumed_iter = DevicePrefetchIterator(
+        iter(grain_image_loader()), resumed.batch_sharding,
+        source_state=resumed.dataset_state)
+    np.testing.assert_array_equal(np.asarray(next(resumed_iter)["image"]),
+                                  np.asarray(next(reference)["image"]))
+
+    # and it is past the batches already consumed
+    fresh = DevicePrefetchIterator(iter(grain_image_loader()), resumed.batch_sharding)
+    first = np.asarray(next(fresh)["image"])
+    assert not np.array_equal(np.asarray(next(resumed_iter)["image"]), first)
+
+
+def test_load_tolerates_checkpoints_without_iterator_state(tmp_path):
+    """Checkpoints written before iterator tracking must still restore."""
+    trainer = make_trainer(tmp_path, "legacy", distributed_training=True)
+    assert trainer.dataset_state is None
+    trainer.save(epoch=0, step=1)
+    trainer.wait_for_checkpoints()
+
+    restored = make_trainer(tmp_path, "legacy", distributed_training=True,
+                            load_from_checkpoint=trainer.checkpoint_path())
+    assert int(restored.state.step) == 0
+    assert restored.dataset_state is None
+
+
 def test_checkpoint_restores_onto_a_different_mesh(tmp_path):
     """A run saved with FSDP must be resumable on a replicated mesh."""
     trainer = make_trainer(tmp_path, "mesh", distributed_training=True,
