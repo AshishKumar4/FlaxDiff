@@ -101,7 +101,11 @@ parser.add_argument('--dataset_path', type=str,
                     default='/home/mrwhite0racle/gcs_mount', help="Dataset location path")
 
 parser.add_argument('--noise_schedule', type=str, default='edm',
-                    choices=['cosine', 'karras', 'edm'], help='Noise schedule')
+                    choices=['cosine', 'karras', 'edm', 'flow', 'flow_matching'], help='Noise schedule')
+parser.add_argument('--min_snr_gamma', type=float, default=None,
+                    help='min-SNR-gamma loss weighting (Hang et al. 2023). 5.0 is the paper default; unset keeps the schedule own weighting.')
+parser.add_argument('--flow_shift', type=float, default=1.0,
+                    help='Resolution shift for the flow matching schedule. See flaxdiff.schedulers.flow.compute_resolution_shift.')
 
 # Any name from flaxdiff.models.registry, optionally with +2d/+hilbert/+zigzag
 # suffixes; validated by build_model against the registry itself
@@ -469,6 +473,10 @@ def main(args):
             from flaxdiff.metrics.images import get_clip_score_metric
             print("Using CLIPScore (val/clip_score, higher is better) for validation")
             eval_metrics.append(get_clip_score_metric())
+        if 'fid' in args.val_metrics:
+            from flaxdiff.metrics.fid import get_fid_metric
+            print("Using per-batch FID (val/fid) for validation")
+            eval_metrics.append(get_fid_metric())
     
     CONFIG = {
         "model": model_config,
@@ -493,7 +501,9 @@ def main(args):
     
     batches = batches if args.steps_per_epoch is None else args.steps_per_epoch
 
-    train_schedule, sampling_schedule, prediction_transform = get_diffusion_preset(args.noise_schedule)
+    train_schedule, sampling_schedule, prediction_transform = get_diffusion_preset(
+        args.noise_schedule, shift=args.flow_shift, min_snr_gamma=args.min_snr_gamma,
+    )
     
     if args.experiment_name is not None:
         experiment_name = args.experiment_name
