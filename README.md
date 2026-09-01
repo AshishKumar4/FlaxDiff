@@ -10,6 +10,8 @@ FlaxDiff is a library of tools (schedulers, samplers, models, etc.) designed and
 
 I initially started this project in Keras, being familiar with TensorFlow 2.0, but transitioned to Flax, powered by Jax, for its performance and ease of use. The old notebooks and models, including my first Flax models, are also provided.
 
+The `Diffusion_flax_linen.ipynb` notebook is my main workspace for experiments. Several checkpoints are uploaded to the `pretrained` folder along with a copy of the working notebook associated with each checkpoint. *You may need to copy the notebook to the working root for it to function properly.*
+
 The library has since grown beyond images: it now also covers video diffusion, flow matching, latent diffusion with a VAE, and I-JEPA/V-JEPA self-supervised training, all running through the same trainer with data-parallel and FSDP sharding. The bigger text-conditional models in the gallery were trained on a TPU-v4-32 pod.
 
 ## Example Notebooks from scratch
@@ -20,7 +22,7 @@ In the `tutorial notebooks` folder, you will find comprehensive notebooks for va
 
 - **[Diffusion explained (nbviewer link)](https://nbviewer.org/github/AshishKumar4/FlaxDiff/blob/main/tutorial%20notebooks/simple%20diffusion%20flax.ipynb) [(local link)](tutorial%20notebooks/simple%20diffusion%20flax.ipynb)**
 
-  - An in-depth exploration of the concept of Diffusion based generative models, DDPM (Denoising Diffusion Probabilistic Models), DDIM (Denoising Diffusion Implicit Models), and the SDE/ODE generalizations of diffusion, with step-by-step explainations and code.
+  - **WORK IN PROGRESS** An in-depth exploration of the concept of Diffusion based generative models, DDPM (Denoising Diffusion Probabilistic Models), DDIM (Denoising Diffusion Implicit Models), and the SDE/ODE generalizations of diffusion, with step-by-step explainations and code.
 
   <a target="_blank" href="https://colab.research.google.com/github/AshishKumar4/FlaxDiff/blob/main/tutorial%20notebooks/simple%20diffusion%20flax.ipynb">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
@@ -33,13 +35,42 @@ In the `tutorial notebooks` folder, you will find comprehensive notebooks for va
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
 </a>
 
+These notebooks aim to provide a very easy to understand and step-by-step guide to the various diffusion models and techniques. They are designed to be beginner-friendly, and thus although they may not adhere to the exact formulations and implementations of the original papers to make them more understandable and generalizable, I have tried my best to keep them as accurate as possible. If you find any mistakes or have any suggestions, please feel free to open an issue or a pull request.
+
 #### Other resources
 
 - **[Multi-host Data parallel training script in JAX](./training.py)**
-  - Training script for multi-host data parallel training in JAX, to serve as a reference for training large models on multiple GPUs/TPUs across multiple hosts.
+  - Training script for multi-host data parallel training in JAX, to serve as a reference for training large models on multiple GPUs/TPUs across multiple hosts. A full-fledged tutorial notebook is in the works.
 
 - **[TPU utilities for making life easier](./tpu-tools/)**
   - A collection of utilities and scripts to make working with TPUs easier, such as cli to create/start/stop/setup TPUs, script to setup TPU VMs (install everything you need), mounting gcs datasets etc.
+
+## Disclaimer (and About Me)
+
+I worked as a Machine Learning Researcher at Hyperverge from 2019-2021, focusing on computer vision, specifically facial anti-spoofing and facial detection & recognition. Since switching to my current job in 2021, I haven't engaged in as much R&D work, leading me to start this pet project to revisit and relearn the fundamentals and get familiar with the state-of-the-art. My current role involves primarily Golang system engineering with some applied ML work just sprinkled in. Therefore, the code may reflect my learning journey. Please forgive any mistakes and do open an issue to let me know.
+
+Also, few of the text may be generated with help of github copilot, so please excuse any mistakes in the text.
+
+## Index
+
+- [A Versatile and simple Diffusion Library](#a-versatile-and-simple-diffusion-library)
+- [Disclaimer (and About Me)](#disclaimer-and-about-me)
+- [Features](#features)
+  - [Schedulers](#schedulers)
+  - [Model Predictors](#model-predictors)
+  - [Samplers](#samplers)
+  - [Training](#training)
+  - [Models](#models)
+  - [Metrics](#metrics)
+- [Installation of FlaxDiff](#installation)
+- [Getting Started with FlaxDiff](#getting-started)
+  - [Training Example](#training-example)
+  - [Inference Example](#inference-example)
+- [References and Acknowledgements](#references-and-acknowledgements)
+- [Pending things to do list](#pending-things-to-do-list)
+- [Gallery](#gallery)
+- [Contribution](#contribution)
+- [License](#license)
 
 ## Features
 
@@ -55,7 +86,7 @@ Implemented in `flaxdiff.schedulers`:
 - **EDMNoiseScheduler** (`flaxdiff.schedulers.EDMNoiseScheduler`): A sigma-parameterized continuous scheduler based on the EDM paper, best suited for training with the KarrasVENoiseScheduler.
 - **FlowMatchingScheduler** (`flaxdiff.schedulers.FlowMatchingScheduler`): A rectified-flow scheduler with logit-normal timestep sampling and resolution-dependent shifting, as used in Stable Diffusion 3.
 
-### Model Prediction Transforms
+### Model Predictors
 Implemented in `flaxdiff.predictors`:
 - **EpsilonPredictionTransform** (`flaxdiff.predictors.EpsilonPredictionTransform`): The model predicts the noise in the data.
 - **DirectPredictionTransform** (`flaxdiff.predictors.DirectPredictionTransform`): The model predicts the original data from the noisy data.
@@ -192,10 +223,6 @@ images = pipeline.generate_samples(
     guidance_scale=3.0, conditioning_data=["a water lily", "a rose"],
 )
 ```
-
-## Disclaimer (and About Me)
-
-I worked as a Machine Learning Researcher at Hyperverge from 2019-2021, focusing on computer vision, specifically facial anti-spoofing and facial detection & recognition. Since switching to my current job in 2021, I haven't engaged in as much R&D work, leading me to start this pet project to revisit and relearn the fundamentals and get familiar with the state-of-the-art. My current role involves primarily Golang system engineering with some applied ML work just sprinkled in. Therefore, the code may reflect my learning journey. Please forgive any mistakes and do open an issue to let me know.
 
 ## References and Acknowledgements
 

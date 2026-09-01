@@ -29,6 +29,5 @@ class DDPMSampler(DiffusionSampler):
         next_samples = next_signal_rate * reconstructed_samples + pred_noise_coeff * pred_noise + noise * gamma
         return next_samples, state
 
-# The two used to be separate implementations; the posterior-table variant
-# crashed for batched steps and could not handle strided sampling
+# Back-compat alias; older configs and notebooks import SimpleDDPMSampler.
 SimpleDDPMSampler = DDPMSampler

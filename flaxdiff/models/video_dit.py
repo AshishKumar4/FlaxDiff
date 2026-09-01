@@ -1,7 +1,6 @@
 """
 Video DiT with factorized spatial-temporal attention, built from the shared
-DiT machinery. This replaces the old diffusers-derived UNet3D, which was
-never wired into the registry and whose upstream flax blocks no longer exist.
+DiT machinery.
 
 Each layer is a spatial ModulatedBlock over the patch tokens of every frame
 followed by a temporal ModulatedBlock over the frame axis of every patch

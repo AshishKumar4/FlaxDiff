@@ -1,17 +1,11 @@
 """VoxCeleb2 audio-video source for the unified media pipeline.
 
-This module was rebuilt, not restored. Its previous contents were a torch
-`Dataset` lifted from another project: it imported `d2lv2_lightning`,
-`.face_mask`, `.prompt_templates` and `.audio`, none of which have ever existed
-in this repository, so the module could not be imported at all. The pipeline it
-fed (face masks, mel windows, template token maps) is out of scope here.
-
-What remains is the part FlaxDiff needs: enumerate a VoxCeleb2 tree and hand the
-grain pipeline one record per utterance. Clip sampling, audio features and
-batching are the AudioVideoAugmenter's job (see `sources/videos.py`), which
-reads clips with `av_utils.read_av_random_clip` and featurises audio with
-`flaxdiff.utils.AutoAudioProcessor`. Every AV dependency is therefore imported
-lazily, inside those readers - importing this module costs nothing.
+Enumerates a VoxCeleb2 tree and hands the grain pipeline one record per
+utterance. Clip sampling, audio features and batching are the
+AudioVideoAugmenter's job (see `sources/videos.py`), which reads clips with
+`av_utils.read_av_random_clip` and featurises audio with
+`flaxdiff.utils.AutoAudioProcessor`. Every AV dependency is imported lazily,
+inside those readers - importing this module costs nothing.
 """
 
 import os

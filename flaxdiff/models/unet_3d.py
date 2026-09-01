@@ -7,10 +7,6 @@ with zero-initialized temporal attention blocks interleaved at each
 resolution level. Zero init means a freshly inflated model reproduces the 2D
 UNet frame by frame, so a pretrained image checkpoint (inflate_unet_params)
 is the starting point and training only has to learn motion.
-
-This replaces the old diffusers-derived UNet3D, which was never wired into
-any training path and could not load our checkpoints (different blocks,
-different param tree, upstream deleted).
 """
 
 import jax
