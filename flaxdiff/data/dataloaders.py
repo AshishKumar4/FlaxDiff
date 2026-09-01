@@ -6,7 +6,8 @@ import cv2  # Added missing import
 from flaxdiff.utils import AutoTextTokenizer
 from .dataset_map import datasetMap, onlineDatasetMap, mediaDatasetMap
 import traceback
-from .online_loader import OnlineStreamingDataLoader
+# NOTE: .online_loader is imported lazily inside the two `*_online` factories.
+# It needs HF `datasets`, which the grain paths must not require.
 from functools import partial
 
 
@@ -199,6 +200,8 @@ def get_dataset_grain(
     worker_buffer_size=20,
     seed=0,
     dataset_source="/mnt/gcs_mount/arrayrecord2/cc12m/",
+    val_batch_size=32,
+    val_worker_count=8,
 ):
     """Legacy function for getting grain dataset loaders for images.
     
@@ -215,6 +218,8 @@ def get_dataset_grain(
         worker_buffer_size: Size of the worker buffer.
         seed: Random seed.
         dataset_source: Source path for the dataset.
+        val_batch_size: Batch size for the validation loader.
+        val_worker_count: Number of worker processes for the validation loader.
         
     Returns:
         Dictionary with train dataset function and metadata.
@@ -232,13 +237,15 @@ def get_dataset_grain(
         shard_options=pygrain.ShardByJaxProcess(),
     )
 
-    # val_sampler = pygrain.IndexSampler(
-    #     num_records=len(data_source) if count is None else count,
-    #     shuffle=False,
-    #     seed=seed,
-    #     num_epochs=num_epochs,
-    #     shard_options=pygrain.ShardByJaxProcess(),
-    # )
+    # Validation reads the same records in canonical order: sharing the
+    # shuffled train sampler made "validation" a random slice of training data.
+    val_sampler = pygrain.IndexSampler(
+        num_records=len(data_source) if count is None else count,
+        shuffle=False,
+        seed=seed,
+        num_epochs=num_epochs,
+        shard_options=pygrain.ShardByJaxProcess(),
+    )
     
     def get_trainset():
         transformations = [
@@ -261,14 +268,14 @@ def get_dataset_grain(
     def get_valset():
         transformations = [
             augmenter(),
-            pygrain.Batch(32, drop_remainder=True),
+            pygrain.Batch(val_batch_size, drop_remainder=True),
         ]
 
         loader = pygrain.DataLoader(
             data_source=data_source,
-            sampler=train_sampler,
+            sampler=val_sampler,
             operations=transformations,
-            worker_count=8,
+            worker_count=val_worker_count,
             read_options=pygrain.ReadOptions(
                 32, 128
             ),
@@ -319,8 +326,14 @@ def get_dataset_online(
     Returns:
         Dictionary with train dataset function and metadata.
     """
+    if data_name not in onlineDatasetMap:
+        raise ValueError(f"Dataset {data_name} not found in onlineDatasetMap")
+
+    # Imported here, not at module scope: the streaming stack needs HF
+    # `datasets`, which the grain paths above deliberately do without.
+    from .online_loader import OnlineStreamingDataLoader
+
     local_batch_size = batch_size // jax.process_count()
-    
     sources = onlineDatasetMap[data_name]["source"]
     dataloader = OnlineStreamingDataLoader(
             sources, 
@@ -350,6 +363,28 @@ def get_dataset_online(
 # New unified dataset loader for both images and videos
 # ---------------------------------------------------------------------------------
 
+class _SourceSlice:
+    """Random-access view over `source[start:stop]`.
+
+    Gives the train and validation loaders disjoint index ranges while each
+    keeps a stock grain IndexSampler, so sharding and epoch handling stay
+    grain's. Plain attributes only: grain pickles the source to its workers.
+    """
+
+    def __init__(self, source: Any, start: int, stop: int):
+        self.source = source
+        self.start = start
+        self.length = stop - start
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, index: int):
+        if not 0 <= index < self.length:
+            raise IndexError(index)
+        return self.source[self.start + index]
+
+
 def get_media_dataset_grain(
     data_name: str,
     batch_size: int = 64,
@@ -363,9 +398,11 @@ def get_media_dataset_grain(
     read_buffer_size: int = 50,
     worker_buffer_size: int = 20,
     seed: int = 0,
-    dataset_source: str = None,
+    dataset_source: Optional[str] = None,
     media_type: Optional[str] = None,  # Will be auto-detected if None
     additional_transform_kwargs: Dict[str, Any] = None,
+    val_count: Optional[int] = None,
+    val_batch_size: Optional[int] = None,
 ):
     """Get a grain dataset loader for any media type (image or video).
     
@@ -382,25 +419,39 @@ def get_media_dataset_grain(
         read_buffer_size: Size of the read buffer.
         worker_buffer_size: Size of the worker buffer.
         seed: Random seed.
-        dataset_source: Source path for the dataset.
+        dataset_source: Root path the dataset's source resolves its files
+            against. Required - there is no sane default for a bucket mount
+            or a local media tree.
         media_type: Type of media ("image" or "video"). Auto-detected if None.
         additional_transform_kwargs: Additional arguments for the transform.
-        
+        val_count: Records held out, in canonical source order, as a
+            validation split; the train loader then covers the rest. None
+            (default) means no validation loader.
+        val_batch_size: Batch size of the validation loader. Defaults to the
+            train loader's local batch size.
+
     Returns:
-        Dictionary with train dataset function and metadata.
+        Dictionary with train dataset function and metadata; with val_count set
+        it also carries "val" and "val_len" for the held-out split.
     """
     if data_name not in mediaDatasetMap:
         raise ValueError(f"Dataset {data_name} not found in mediaDatasetMap")
-    
+    if not dataset_source:
+        raise ValueError(
+            f"get_media_dataset_grain('{data_name}') needs an explicit dataset_source: "
+            "media sources resolve their files against it, and an unset one used to "
+            "reach os.path.join(None, ...) inside the source itself."
+        )
+
     media_dataset = mediaDatasetMap[data_name]
-    
+
     # Auto-detect media_type if not provided
     if media_type is None:
         media_type = media_dataset.media_type
-    
+
     # Get the data source and augmenter
     data_source = media_dataset.get_source(dataset_source)
-    
+
     # Prepare transform kwargs
     transform_kwargs = {
         "image_scale" if media_type == "image" else "frame_size": media_scale,
@@ -409,7 +460,7 @@ def get_media_dataset_grain(
     }
     if additional_transform_kwargs:
         transform_kwargs.update(additional_transform_kwargs)
-    
+
     augmenter = media_dataset.get_augmenter(**transform_kwargs)
 
     # Calculate local batch size for distributed training
@@ -421,9 +472,26 @@ def get_media_dataset_grain(
     else:
         # Some data sources like video files list don't have __len__
         dataset_length = count if count is not None else 1000000  # Default large number
-    
-    sampler = pygrain.IndexSampler(
-        num_records=dataset_length,
+
+    train_source, val_source = data_source, None
+    if val_count:
+        if not hasattr(data_source, "__len__"):
+            raise ValueError(
+                "A validation split needs a data source of known length; "
+                f"'{data_name}' does not report one."
+            )
+        if not 0 < val_count < dataset_length:
+            raise ValueError(
+                f"val_count must be within 1..{dataset_length - 1} records for "
+                f"'{data_name}', got {val_count}"
+            )
+        val_source = _SourceSlice(data_source, 0, val_count)
+        train_source = _SourceSlice(data_source, val_count, dataset_length)
+
+    train_length = dataset_length if val_source is None else len(train_source)
+
+    train_sampler = pygrain.IndexSampler(
+        num_records=train_length,
         shuffle=True,
         seed=seed,
         num_epochs=num_epochs,
@@ -438,8 +506,8 @@ def get_media_dataset_grain(
         ]
 
         loader = pygrain.DataLoader(
-            data_source=data_source,
-            sampler=sampler,
+            data_source=train_source,
+            sampler=train_sampler,
             operations=transformations,
             worker_count=worker_count,
             read_options=pygrain.ReadOptions(
@@ -449,13 +517,49 @@ def get_media_dataset_grain(
         )
         return loader
 
-    return {
+    dataset = {
         "train": get_trainset,
-        "train_len": dataset_length,
+        "train_len": train_length,
         "local_batch_size": local_batch_size,
         "global_batch_size": batch_size,
         "media_type": media_type,
     }
+
+    if val_source is None:
+        return dataset
+
+    # Its own unshuffled sampler: sharing the train sampler turned validation
+    # into a random slice of the training stream.
+    val_sampler = pygrain.IndexSampler(
+        num_records=len(val_source),
+        shuffle=False,
+        seed=seed,
+        num_epochs=num_epochs,
+        shard_options=pygrain.ShardByJaxProcess(),
+    )
+
+    def get_valset():
+        """Get a validation dataset iterator."""
+        transformations = [
+            augmenter(),
+            pygrain.Batch(val_batch_size or local_batch_size, drop_remainder=True),
+        ]
+
+        loader = pygrain.DataLoader(
+            data_source=val_source,
+            sampler=val_sampler,
+            operations=transformations,
+            worker_count=worker_count,
+            read_options=pygrain.ReadOptions(
+                read_thread_count, read_buffer_size
+            ),
+            worker_buffer_size=worker_buffer_size,
+        )
+        return loader
+
+    dataset["val"] = get_valset
+    dataset["val_len"] = len(val_source)
+    return dataset
 
 
 def get_media_dataset_online(
@@ -522,7 +626,11 @@ def get_media_dataset_online(
         "timeout": timeout,
         "retries": retries,
     }
-    
+
+    # Imported here, not at module scope: the streaming stack needs HF
+    # `datasets`, which the grain paths above deliberately do without.
+    from .online_loader import OnlineStreamingDataLoader
+
     dataloader = OnlineStreamingDataLoader(sources, **dataloader_kwargs)
     
     def get_trainset():
