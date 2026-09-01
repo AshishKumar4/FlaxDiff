@@ -2,377 +2,252 @@
 
 **This project is partially supported by [Google TPU Research Cloud](https://sites.research.google/trc/about/). I would like to thank the Google Cloud TPU team for providing me with the resources to train the bigger text-conditional models in multi-host distributed settings.**
 
-## A Versatile and simple Diffusion Library
+## A JAX/Flax library for training diffusion models from scratch
 
-In recent years, diffusion and score-based multi-step models have revolutionized the generative AI domain. However, the latest research in this field has become highly math-intensive, making it challenging to understand how state-of-the-art diffusion models work and generate such impressive images. Replicating this research in code can be daunting.
+FlaxDiff is a library of schedulers, prediction transforms, samplers, model
+architectures, data pipelines and a distributed trainer, written in JAX/Flax
+(Linen). The code aims to stay readable: every technique is implemented plainly
+and tested against its paper's invariants.
 
-FlaxDiff is a library of tools (schedulers, samplers, models, etc.) designed and implemented in an easy-to-understand way. The focus is on understandability and readability over performance. I started this project as a hobby to familiarize myself with Flax and Jax and to learn about diffusion and the latest research in generative AI.
-
-I initially started this project in Keras, being familiar with TensorFlow 2.0, but transitioned to Flax, powered by Jax, for its performance and ease of use. The old notebooks and models, including my first Flax models, are also provided.
-
-The `Diffusion_flax_linen.ipynb` notebook is my main workspace for experiments. Several checkpoints are uploaded to the `pretrained` folder along with a copy of the working notebook associated with each checkpoint. *You may need to copy the notebook to the working root for it to function properly.*
-
-## Example Notebooks from scratch
-
-In the `example notebooks` folder, you will find comprehensive notebooks for various diffusion techniques, written entirely from scratch and are independent of the FlaxDiff library. Each notebook includes detailed explanations of the underlying mathematics and concepts, making them invaluable resources for learning and understanding diffusion models.
-
-### Available Notebooks and Resources
-
-- **[Diffusion explained (nbviewer link)](https://nbviewer.org/github/AshishKumar4/FlaxDiff/blob/main/tutorial%20notebooks/simple%20diffusion%20flax.ipynb) [(local link)](tutorial%20notebooks/simple%20diffusion%20flax.ipynb)** 
-
-  - **WORK IN PROGRESS** An in-depth exploration of the concept of Diffusion based generative models, DDPM (Denoising Diffusion Probabilistic Models), DDIM (Denoising Diffusion Implicit Models), and the SDE/ODE generalizations of diffusion, with step-by-step explainations and code.
-  
-  <a target="_blank" href="https://colab.research.google.com/github/AshishKumar4/FlaxDiff/blob/main/tutorial%20notebooks/simple%20diffusion%20flax.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a>
-
-- **[EDM (Elucidating the Design Space of Diffusion-based Generative Models)](tutorial%20notebooks/edm%20tutorial.ipynb)**
-  - **TODO** A thorough guide to EDM, discussing the innovative approaches and techniques used in this advanced diffusion model.
-  
-  <a target="_blank" href="https://colab.research.google.com/github/AshishKumar4/FlaxDiff/blob/main/tutorial%20notebooks/edm%20tutorial.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a>
-
-These notebooks aim to provide a very easy to understand and step-by-step guide to the various diffusion models and techniques. They are designed to be beginner-friendly, and thus although they may not adhere to the exact formulations and implementations of the original papers to make them more understandable and generalizable, I have tried my best to keep them as accurate as possible. If you find any mistakes or have any suggestions, please feel free to open an issue or a pull request.
-
-#### Other resources
-
-- **[Multi-host Data parallel training script in JAX](./training.py)**
-  - Training script for multi-host data parallel training in JAX, to serve as a reference for training large models on multiple GPUs/TPUs across multiple hosts. A full-fledged tutorial notebook is in the works.
-
-- **[TPU utilities for making life easier](./tpu-tools/)**
-  - A collection of utilities and scripts to make working with TPUs easier, such as cli to create/start/stop/setup TPUs, script to setup TPU VMs (install everything you need), mounting gcs datasets etc.
-
-## Disclaimer (and About Me)
-
-I worked as a Machine Learning Researcher at Hyperverge from 2019-2021, focusing on computer vision, specifically facial anti-spoofing and facial detection & recognition. Since switching to my current job in 2021, I haven't engaged in as much R&D work, leading me to start this pet project to revisit and relearn the fundamentals and get familiar with the state-of-the-art. My current role involves primarily Golang system engineering with some applied ML work just sprinkled in. Therefore, the code may reflect my learning journey. Please forgive any mistakes and do open an issue to let me know.
-
-Also, few of the text may be generated with help of github copilot, so please excuse any mistakes in the text.
-
-## Index
-
-- [A Versatile and Easy-to-Understand Diffusion Library](#a-versatile-and-easy-to-understand-diffusion-library)
-- [Disclaimer (and About Me)](#disclaimer-and-about-me)
-- [Features](#features)
-  - [Schedulers](#schedulers)
-  - [Model Predictors](#model-predictors)
-  - [Samplers](#samplers)
-  - [Training](#training)
-  - [Models](#models)
-- [Installation of FlaxDiff](#installation)
-- [Getting Started with FlaxDiff](#getting-started)
-  - [Training Example](#training-example)
-  - [Inference Example](#inference-example)
-- [References and Acknowledgements](#references-and-acknowledgements)
-- [Pending things to do list](#pending-things-to-do-list)
-- [Gallery](#gallery)
-- [Contribution](#contribution)
-- [License](#license)
-
-## Features
-
-### Schedulers
-Implemented in `flaxdiff.schedulers`:
-- **LinearNoiseSchedule** (`flaxdiff.schedulers.LinearNoiseSchedule`): A beta-parameterized discrete scheduler.
-- **CosineNoiseScheduler** (`flaxdiff.schedulers.CosineNoiseScheduler`): A beta-parameterized discrete scheduler.
-- **ExpNoiseSchedule** (`flaxdiff.schedulers.ExpNoiseSchedule`): A beta-parameterized discrete scheduler.
-- **CosineContinuousNoiseScheduler** (`flaxdiff.schedulers.CosineContinuousNoiseScheduler`): A continuous scheduler.
-- **CosineGeneralNoiseScheduler** (`flaxdiff.schedulers.CosineGeneralNoiseScheduler`): A continuous sigma parameterized cosine scheduler.
-- **KarrasVENoiseScheduler** (`flaxdiff.schedulers.KarrasVENoiseScheduler`): A sigma-parameterized continuous scheduler proposed by Karras et al. 2022, best suited for inference.
-- **EDMNoiseScheduler** (`flaxdiff.schedulers.EDMNoiseScheduler`): A sigma-parameterized continuous scheduler based on the Exponential Diffusion Model (EDM), best suited for training with the KarrasKarrasVENoiseScheduler.
-
-### Model Predictors
-Implemented in `flaxdiff.predictors`:
-- **EpsilonPredictor** (`flaxdiff.predictors.EpsilonPredictor`): Predicts the noise in the data.
-- **X0Predictor** (`flaxdiff.predictors.X0Predictor`): Predicts the original data from the noisy data.
-- **VPredictor** (`flaxdiff.predictors.VPredictor`): Predicts a linear combination of the data and noise, commonly used in the EDM.
-- **KarrasEDMPredictor** (`flaxdiff.predictors.KarrasEDMPredictor`): A generalized predictor for the EDM, integrating various parameterizations.
-
-### Samplers
-Implemented in `flaxdiff.samplers`:
-- **DDPMSampler** (`flaxdiff.samplers.DDPMSampler`): Implements the Denoising Diffusion Probabilistic Model (DDPM) sampling process.
-- **DDIMSampler** (`flaxdiff.samplers.DDIMSampler`): Implements the Denoising Diffusion Implicit Model (DDIM) sampling process.
-- **EulerSampler** (`flaxdiff.samplers.EulerSampler`): An ODE solver sampler using Euler's method.
-- **HeunSampler** (`flaxdiff.samplers.HeunSampler`): An ODE solver sampler using Heun's method.
-- **RK4Sampler** (`flaxdiff.samplers.RK4Sampler`): An ODE solver sampler using the Runge-Kutta method.
-- **MultiStepDPM** (`flaxdiff.samplers.MultiStepDPM`): Implements a multi-step sampling method inspired by the Multistep DPM solver as presented here: [tonyduan/diffusion](https://github.com/tonyduan/diffusion/blob/fcc0ed829baf29e1493b460b073e735a848c08ea/src/samplers.py#L44)) 
-
-### Training
-Implemented in `flaxdiff.trainer`:
-- **DiffusionTrainer** (`flaxdiff.trainer.DiffusionTrainer`): A class designed to facilitate the training of diffusion models. It manages the training loop, loss calculation, and model updates.
-
-### Models
-Implemented in `flaxdiff.models`:
-- **UNet** (`flaxdiff.models.simple_unet.SimpleUNet`): A sample UNET architecture for diffusion models.
-- **Layers**: A library of layers including upsampling (`flaxdiff.models.simple_unet.Upsample`), downsampling (`flaxdiff.models.simple_unet.Downsample`), Time embeddings (`flaxdiff.models.simple_unet.FouriedEmbedding`), attention (`flaxdiff.models.simple_unet.AttentionBlock`), and residual blocks (`flaxdiff.models.simple_unet.ResidualBlock`).
+It trains image and video diffusion models (UNet, DiT, MMDiT, UViT, hybrid
+SSM-attention, factorized video DiT), flow-matching models, and I-JEPA/V-JEPA
+self-supervised encoders — all through one trainer and one `Objective` seam.
+Data-parallel and FSDP sharding run through `jax.jit` + `NamedSharding` on a
+`(data, fsdp)` mesh and work from a single host up to multi-host TPU pods.
 
 ## Installation
 
-To install FlaxDiff, you need to have Python 3.10 or higher:
+Python 3.11+:
 
 ```bash
 pip install flaxdiff
 ```
 
-Or for development, clone the repo and install in editable mode with the test dependencies:
+Optional extras:
+
+| Extra | Enables |
+|---|---|
+| `flaxdiff[av]` | video/audio sources and readers (OpenCV, decord, moviepy, PyAV) |
+| `flaxdiff[metrics]` | FID (scipy) and Inception weight download |
+| `flaxdiff[streaming]` | online URL-streaming loader (HF `datasets`) |
+| `flaxdiff[tfds]` | TFDS-backed dataset sources |
+| `flaxdiff[test]` | pytest |
+
+Development:
 
 ```bash
 pip install -e .[test]
-pytest -m "not network"
+JAX_PLATFORMS=cpu pytest -m "not network" -q
 ```
 
-## Getting Started
+## The pieces
 
-### Training Example
+- **Schedulers** (`flaxdiff.schedulers`): `LinearNoiseScheduler`,
+  `CosineNoiseScheduler`, `ExpNoiseScheduler`, `CosineGeneralNoiseScheduler`,
+  `SqrtContinuousNoiseScheduler`, `KarrasVENoiseScheduler`, `EDMNoiseScheduler`
+  (EDM2 defaults), `FlowMatchingScheduler` (SD3 logit-normal timesteps,
+  resolution shift).
+- **Prediction transforms** (`flaxdiff.predictors`): `EpsilonPredictionTransform`,
+  `DirectPredictionTransform` (x0), `VPredictionTransform`,
+  `FlowMatchPredictionTransform`, `KarrasPredictionTransform`, and
+  `get_diffusion_preset(name)` — one call pairing a training schedule, a
+  sampling schedule and a transform for `"edm"`, `"karras"`, `"cosine"` and
+  `"flow"`.
+- **Samplers** (`flaxdiff.samplers`): `DDPMSampler`, `DDIMSampler`,
+  `EulerSampler`, `EulerAncestralSampler`, `SimplifiedEulerSampler`,
+  `HeunSampler`, `RK4Sampler`, `MultiStepDPM` — all with classifier-free
+  guidance, including interval-limited guidance.
+- **Models** (`flaxdiff.models`, built via `flaxdiff.models.registry.build_model`):
+  `unet`, `unet_3d` (with 2D→3D checkpoint inflation), `uvit`, `simple_dit`,
+  `simple_udit`, `simple_mmdit`, `hierarchical_mmdit`, `hybrid_dit` (S5 SSM +
+  attention), `video_dit`, plus JEPA encoders/predictor. Hilbert and zigzag
+  patch scan orders are supported via `+hilbert` / `+zigzag` suffixes.
+- **Autoencoders** (`flaxdiff.models.autoencoder`): `StableDiffusionVAE`
+  (vendored Flax VAE, HF hub weights) and `SimpleAutoEncoder` for latent
+  diffusion without external weights.
+- **Trainer** (`flaxdiff.trainer`): `GeneralDiffusionTrainer` on top of
+  `SimpleTrainer` — data-parallel + FSDP sharding, mixed precision, EMA,
+  gradient accumulation, async Orbax checkpointing with exact data-iterator
+  resume, wandb logging and registry publishing. Objectives:
+  `DiffusionObjective` and `JepaObjective` (`flaxdiff.jepa`).
+- **Data** (`flaxdiff.data`): Grain pipelines over TFDS/GCS/local sources for
+  images and audio-video, plus an online URL-streaming loader.
+- **Metrics** (`flaxdiff.metrics`): FID (vendored InceptionV3), CLIP score,
+  PSNR, SSIM, and JEPA linear/kNN probes.
+- **Inference** (`flaxdiff.inference`): `DiffusionInferencePipeline` — load a
+  local checkpoint or a wandb run/registry model and generate.
 
-Here is a simplified example to get you started with training a diffusion model using FlaxDiff:
+## Training example
 
 ```python
-from flaxdiff.schedulers import EDMNoiseScheduler, KarrasVENoiseScheduler
-from flaxdiff.predictors import KarrasPredictionTransform
-from flaxdiff.models.simple_unet import Unet
-from flaxdiff.trainer import DiffusionTrainer
-from flaxdiff.data.datasets import get_dataset_grain
-from flaxdiff.utils import defaultTextEncodeModel
-from flaxdiff.samplers.euler import EulerAncestralSampler
-import jax
-import jax.numpy as jnp
-import optax
 from datetime import datetime
+import jax, optax
 
-BATCH_SIZE = 16
-IMAGE_SIZE = 128
+from flaxdiff.data.dataloaders import get_dataset_grain
+from flaxdiff.inputs import DiffusionInputConfig, ConditionalInputConfig
+from flaxdiff.inputs.encoders import CLIPTextEncoder
+from flaxdiff.models.registry import build_model
+from flaxdiff.predictors import get_diffusion_preset
+from flaxdiff.trainer import GeneralDiffusionTrainer
+from flaxdiff.samplers.euler import EulerAncestralSampler
 
-# Define noise scheduler
-edm_schedule = EDMNoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
-karas_ve_schedule = KarrasVENoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5)
-# Define model
-unet = Unet(emb_features=256, 
-            feature_depths=[64, 64, 128, 256, 512],
-            attention_configs=[
-                None,
-                {"heads":8, "dtype":jnp.float16, "flash_attention":False, "use_projection":True, "use_self_and_cross":True}, 
-                {"heads":8, "dtype":jnp.float16, "flash_attention":False, "use_projection":True, "use_self_and_cross":True}, 
-                {"heads":8, "dtype":jnp.float16, "flash_attention":False, "use_projection":True, "use_self_and_cross":True}, 
-                {"heads":8, "dtype":jnp.float16, "flash_attention":False, "use_projection":False, "use_self_and_cross":False}
-                ],
-            num_res_blocks=2,
-            num_middle_res_blocks=1
-)
-# Load dataset
+BATCH_SIZE, IMAGE_SIZE = 16, 128
+
 data = get_dataset_grain("oxford_flowers102", batch_size=BATCH_SIZE, image_scale=IMAGE_SIZE)
-datalen = data['train_len']
-batches = datalen // BATCH_SIZE
 
-input_shapes = {
-    "x": (IMAGE_SIZE, IMAGE_SIZE, 3),
-    "temb": (),
-    "textcontext": (77, 768)
-}
-text_encoder = defaultTextEncodeModel()
+text_encoder = CLIPTextEncoder.from_modelname("openai/clip-vit-large-patch14")
+input_config = DiffusionInputConfig(
+    sample_data_key="image",
+    sample_data_shape=(IMAGE_SIZE, IMAGE_SIZE, 3),
+    conditions=[ConditionalInputConfig(encoder=text_encoder)],
+)
 
-# Construct a validation set by the prompts
-val_prompts = ['water tulip', ' a water lily', ' a water lily', ' a photo of a rose', ' a photo of a rose', ' a water lily', ' a water lily', ' a photo of a marigold', ' a photo of a marigold']
+train_schedule, sample_schedule, transform = get_diffusion_preset("edm")
 
-def get_val_dataset(batch_size=8):
-    for i in range(0, len(val_prompts), batch_size):
-        prompts = val_prompts[i:i + batch_size]
-        tokens = text_encoder.tokenize(prompts)
-        yield tokens
+model = build_model("simple_dit", dict(
+    emb_features=512, num_layers=8, num_heads=8, patch_size=8,
+))
 
-data['test'] = get_val_dataset
-data['test_len'] = len(val_prompts)
-
-# Define optimizer
-solver = optax.adam(2e-4)
-
-# Create trainer
-trainer = DiffusionTrainer(
-    unet, optimizer=solver, 
-    input_shapes=input_shapes,
-    noise_schedule=edm_schedule,
-    rngs=jax.random.PRNGKey(4), 
-    name="Diffusion_SDE_VE_" + datetime.now().strftime("%Y-%m-%d_%H:%M:%S"),
-    model_output_transform=KarrasPredictionTransform(sigma_data=edm_schedule.sigma_data),
-    encoder=text_encoder,
+trainer = GeneralDiffusionTrainer(
+    model=model,
+    optimizer=optax.adamw(2e-4),
+    input_config=input_config,
+    noise_schedule=train_schedule,
+    model_output_transform=transform,
+    rngs=jax.random.PRNGKey(4),
+    name=f"flowers-edm-{datetime.now():%Y-%m-%d_%H%M}",
     distributed_training=True,
-    wandb_config = {
-        "project": 'mlops-msml605-project',
-        "name": f"prototype-{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}",
-})
+    checkpoint_base_path="./checkpoints",
+)
 
-# Train the model
-final_state = trainer.fit(data, batches, epochs=2000, sampler_class=EulerAncestralSampler, sampling_noise_schedule=karas_ve_schedule)
+trainer.fit(
+    data,
+    training_steps_per_epoch=data["train_len"] // BATCH_SIZE,
+    epochs=100,
+    sampler_class=EulerAncestralSampler,
+    sampling_noise_schedule=sample_schedule,
+)
 ```
 
-### Inference Example
+The full-featured entry points are [`training.py`](./training.py) (diffusion,
+all architectures/datasets/parallelism flags) and
+[`training_jepa.py`](./training_jepa.py) (I-JEPA/V-JEPA on the same trainer).
 
-Here is a simplified example for generating images using a trained model:
+## Inference example
 
 ```python
-from flaxdiff.samplers.euler import EulerSampler
+from flaxdiff.inference.pipeline import DiffusionInferencePipeline
 
-sampler = EulerSampler(
-    trainer.model,
-    noise_schedule=karas_ve_schedule,
-    model_output_transform=trainer.model_output_transform,
-    input_config=input_config,
+pipeline = DiffusionInferencePipeline.from_wandb_registry(
+    modelname="diffusion-model", project="my-project",
 )
-
-samples = sampler.generate_samples(
-    params=trainer.state.ema_params,
-    num_samples=64,
-    resolution=128,
-    diffusion_steps=100,
+images = pipeline.generate_samples(
+    num_samples=16, resolution=128, diffusion_steps=50,
+    guidance_scale=3.0, conditioning_data=["a water lily", "a rose"],
 )
-plotImages(samples, dpi=300)
 ```
+
+## Tutorials
+
+Notebooks written from scratch, independent of the library, with the maths
+explained step by step:
+
+- **[Diffusion explained (nbviewer)](https://nbviewer.org/github/AshishKumar4/FlaxDiff/blob/main/tutorial%20notebooks/simple%20diffusion%20flax.ipynb)
+  [(local)](tutorial%20notebooks/simple%20diffusion%20flax.ipynb)** — DDPM,
+  DDIM, and the SDE/ODE view of diffusion.
+  <a target="_blank" href="https://colab.research.google.com/github/AshishKumar4/FlaxDiff/blob/main/tutorial%20notebooks/simple%20diffusion%20flax.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
+- **[EDM tutorial](tutorial%20notebooks/edm%20tutorial.ipynb)** — work in
+  progress.
+
+Other useful pieces:
+
+- **[Multi-host data-parallel training script](./training.py)** — reference for
+  multi-host JAX training on TPU pods.
+- **[TPU utilities](./tpu-tools/)** — CLI to create/setup/manage TPU VMs and
+  pods, mount GCS datasets, and launch multi-host runs.
+
+## Testing
+
+```bash
+JAX_PLATFORMS=cpu pytest -m "not network" -q
+```
+
+The suite covers model forwards for every architecture, scheduler/transform
+invariants, sampler convergence against an analytic denoiser, flow matching,
+trainer smoke runs (image + video), FSDP/data-parallel parity and sharding on a
+simulated 8-device mesh, sharded checkpoint round-trips with mid-epoch data
+resume, JEPA objectives under FSDP, and metrics. Tests marked `network`
+download pretrained weights and are excluded by default.
+
+## About
+
+I worked as a Machine Learning Researcher at Hyperverge from 2019-2021,
+focusing on computer vision. I started this project to relearn the fundamentals
+and keep up with the state of the art. The code reflects that journey — if you
+find mistakes, please open an issue.
 
 ## References and Acknowledgements
 
 ### Research papers and preprints
-- The Original Denoising Diffusion Probabilistic Models (DDPM) [paper](https://arxiv.org/abs/2006.11239)
+- Denoising Diffusion Probabilistic Models (DDPM) [paper](https://arxiv.org/abs/2006.11239)
 - Denoising Diffusion Implicit Models (DDIM) [paper](https://arxiv.org/abs/2010.02502)
 - Improved Denoising Diffusion Probabilistic Models [paper](https://arxiv.org/abs/2102.09672)
 - Diffusion Models beat GANs on image synthesis [paper](https://arxiv.org/pdf/2105.05233)
 - Score-Based Generative Modeling through Stochastic Differential Equations [paper](https://arxiv.org/pdf/2011.13456)
 - Elucidating the design space of Diffusion-based generative models (EDM) [paper](https://arxiv.org/abs/2206.00364)
-- Perception Prioritized Training of Diffusion Models (P2 Weighting) [paper](https://arxiv.org/abs/2204.00227)
-- Pseudo Numerical Methods for Diffusion Models on Manifolds (PNMDM) [paper](https://arxiv.org/abs/2202.09778)
-- The DPM-Solver:A Fast ODE Solver for Diffusion Probabilistic Model Sampling in Around 10 Steps [paper](https://arxiv.org/pdf/2206.00927)
+- Perception Prioritized Training of Diffusion Models (P2 weighting) [paper](https://arxiv.org/abs/2204.00227)
+- Pseudo Numerical Methods for Diffusion Models on Manifolds [paper](https://arxiv.org/abs/2202.09778)
+- DPM-Solver [paper](https://arxiv.org/pdf/2206.00927)
+- Scalable Diffusion Models with Transformers (DiT) [paper](https://arxiv.org/abs/2212.09748)
+- Scaling Rectified Flow Transformers (SD3 / MMDiT) [paper](https://arxiv.org/abs/2403.03206)
+- Flow Matching for Generative Modeling [paper](https://arxiv.org/abs/2210.02747)
+- Self-Supervised Learning from Images with a Joint-Embedding Predictive Architecture (I-JEPA) [paper](https://arxiv.org/abs/2301.08243)
+- Simplified State Space Layers for Sequence Modeling (S5) [paper](https://arxiv.org/abs/2208.04933)
+- Applying Guidance in a Limited Interval Improves Sample and Distribution Quality (interval-limited CFG) [paper](https://arxiv.org/abs/2404.07724)
+- Diffusion-LM Improves Controllable Text Generation (sqrt schedule) [paper](https://arxiv.org/abs/2205.14217)
 
 ### Useful blogs and codebases
-
-- An incredible series of blogs on various diffusion related topics by [Sander Dieleman](https://sander.ai/posts/). The posts particularly on [diffusion models](https://sander.ai/2022/01/31/diffusion.html), [Typicality](https://sander.ai/2020/09/01/typicality.html), [Geometry of Diffusion Guidance](https://sander.ai/2023/08/28/geometry.html#warning) and [Noise Schedules](https://sander.ai/2024/06/14/noise-schedules.html) are a must read
-- An awesome blog series by Tony Duan on [Diffusion models from scratch](https://www.tonyduan.com/diffusion/index.html). Although it trains models for MNIST and the implementations are a bit basic, the maths is explained in a very nice way. The codebase is [here](https://github.com/tonyduan/diffusion)
-- The [k-diffusion](https://github.com/crowsonkb/k-diffusion/) codebase Katherine Crowson, which hosts an exhaustive implementation of the EDM paper (Karras et al) along with the DPM-Solver, DPM-Solver++ (both 2S and 2M) in pytorch. Most other diffusion libraries borrow from this.
-- The [Official EDM implementation](https://github.com/NVlabs/edm) by Tero Karras, in pytorch. Really neat code and the reference implementation for all the karras based samplers/schedules.
-- The [Hugging Face Diffusers Library](https://github.com/huggingface/diffusers), Arguably the most complete set of implementations for the latest state-of-the-art techniques and concepts in this field. Written mainly in pytorch, but with flax implementations also available for a lot of the concepts, the focus of this repository is on completeness and ease of understanding as well.
-- The [Keras DDPM Tutorial](https://keras.io/examples/generative/ddpm/) by A_K Nain, and the [Keras DDIM implementation](https://keras.io/examples/generative/ddim/) by András Béres, which are great starting points for beginners to understand the basics of diffusion models. I started my journey by trying to implement the concepts introduced in these tutorials from scratch.
-- Special thanks to ChatGPT-4 by OpenAI for helping clear my doubts.
-
-## Pending things to do list
-
-- **Advanced solvers like DPM/DPM2/DPM++ etc**
-- **SDE versions of the current ODE solvers i.e, ancestral sampling**
-- **Text Conditioned image generation**
-- **Classifier and Classified Free Guidance**
+- [Sander Dieleman's blog](https://sander.ai/posts/) — particularly the posts on [diffusion models](https://sander.ai/2022/01/31/diffusion.html), [typicality](https://sander.ai/2020/09/01/typicality.html), [the geometry of diffusion guidance](https://sander.ai/2023/08/28/geometry.html) and [noise schedules](https://sander.ai/2024/06/14/noise-schedules.html).
+- Tony Duan's [Diffusion models from scratch](https://www.tonyduan.com/diffusion/index.html) and its [codebase](https://github.com/tonyduan/diffusion).
+- Katherine Crowson's [k-diffusion](https://github.com/crowsonkb/k-diffusion/) — the reference for EDM-style samplers in PyTorch.
+- The [official EDM implementation](https://github.com/NVlabs/edm) by Tero Karras.
+- The [Hugging Face Diffusers library](https://github.com/huggingface/diffusers) — the vendored Flax VAE and parts of the attention module derive from it (Apache-2.0, headers preserved).
+- [jax-fid](https://github.com/matthias-wright/jax-fid) — origin of the vendored InceptionV3.
+- The [Keras DDPM](https://keras.io/examples/generative/ddpm/) and [DDIM](https://keras.io/examples/generative/ddim/) tutorials, where this journey started.
 
 ## Gallery
 
-### Images generated by Euler Ancestral Sampler in 200 Steps [text2image with CFG]
-Model trained on Laion-Aesthetics 12M + CC12M + MS COCO + 1M aesthetic 6+ subset of COYO-700M on TPU-v4-32:
-`a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful landscape with a river with mountains, a beautiful forest with a river and sunlight, a beautiful forest with a river and sunlight, a beautiful forest with a river and sunlight, a beautiful forest with a river and sunlight, a beautiful forest with a river and sunlight, a beautiful forest with a river and sunlight, a beautiful forest with a river and sunlight, a beautiful forest with a river and sunlight, a big mansion with a garden, a big mansion with a garden, a big mansion with a garden, a big mansion with a garden, a big mansion with a garden, a big mansion with a garden, a big mansion with a garden, a big mansion with a garden`
+### Text-to-image with CFG, Euler Ancestral, 200 steps
+Model trained on LAION-Aesthetics 12M + CC12M + MS COCO + 1M aesthetic 6+ subset of COYO-700M on a TPU-v4-32:
+`a beautiful landscape with a river with mountains …`
 
-**Params**:
-`Dataset: Laion-Aesthetics 12M + CC12M + MS COCO + 1M aesthetic 6+ subset of COYO-700M`
-`Batch size: 256`
-`Image Size: 128`
-`Training Epochs: 5`
-`Steps per epoch: 74573`
-`Model Configurations: feature_depths=[128, 256, 512, 1024]`
-
-`Training Noise Schedule: EDMNoiseScheduler`
-`Inference Noise Schedule: KarrasEDMPredictor`
+**Params:** `feature_depths=[128, 256, 512, 1024]`, batch 256, image 128, 5 epochs, 74573 steps/epoch, EDM schedule.
 
 ![EulerA with CFG](images/medium_epoch5.png)
 
-### Images generated by Euler Ancestral Sampler in 200 Steps [text2image with CFG]
-Images generated by the following prompts using classifier free guidance with guidance factor = 2:
-`'water tulip, a water lily, a water lily, a water lily, a photo of a marigold, a water lily, a water lily, a photo of a lotus, a photo of a lotus, a photo of a lotus, a photo of a rose, a photo of a rose, a photo of a rose, a photo of a rose, a photo of a rose'`
-
-**Params**: 
-`Dataset: oxford_flowers102`
-`Batch size: 16`
-`Image Size: 128`
-`Training Epochs: 1000`
-`Steps per epoch: 511`
-
-`Training Noise Schedule: EDMNoiseScheduler`
-`Inference Noise Schedule: KarrasEDMPredictor`
+### Text-to-image with CFG (guidance 2), oxford_flowers102
+`water tulip, a water lily, …`
 
 ![EulerA with CFG](images/text2img%20euler%20ancestral%201.png)
 
-### Images generated by Euler Ancestral Sampler in 200 Steps [text2image with CFG]
-Images generated by the following prompts using classifier free guidance with guidance factor = 4: 
-`'water tulip, a water lily, a water lily, a photo of a rose, a photo of a rose, a water lily, a water lily, a photo of a marigold, a photo of a marigold, a photo of a marigold, a water lily, a photo of a sunflower, a photo of a lotus, columbine, columbine, an orchid, an orchid, an orchid, a water lily, a water lily, a water lily, columbine, columbine, a photo of a sunflower, a photo of a sunflower, a photo of a sunflower, a photo of a lotus, a photo of a lotus, a photo of a marigold, a photo of a marigold, a photo of a rose, a photo of a rose, a photo of a rose, orange dahlia, orange dahlia, a lenten rose, a lenten rose, a water lily, a water lily, a water lily, a water lily, an orchid, an orchid, an orchid, hard-leaved pocket orchid, bird of paradise, bird of paradise, a photo of a lovely rose, a photo of a lovely rose, a photo of a globe-flower, a photo of a globe-flower, a photo of a lovely rose, a photo of a lovely rose, a photo of a ruby-lipped cattleya, a photo of a ruby-lipped cattleya, a photo of a lovely rose, a water lily, a osteospermum, a osteospermum, a water lily, a water lily, a water lily, a red rose, a red rose'`
-
-**Params**: 
-`Dataset: oxford_flowers102`
-`Batch size: 16`
-`Image Size: 128`
-`Training Epochs: 1000`
-`Steps per epoch: 511`
-
-`Training Noise Schedule: EDMNoiseScheduler`
-`Inference Noise Schedule: KarrasEDMPredictor`
+### Text-to-image with CFG (guidance 4), oxford_flowers102
+`water tulip, a water lily, a photo of a rose, …`
 
 ![EulerA with CFG](images/text2img%20euler%20ancestral%202.png)
 
-### Images generated by DDPM Sampler in 1000 steps [Unconditional]
-
-**Params**: 
-`Dataset: oxford_flowers102`
-`Batch size: 16`
-`Image Size: 64`
-`Training Epochs: 1000`
-`Steps per epoch: 511`
-
-`Training Noise Schedule: CosineNoiseScheduler`
-`Inference Noise Schedule: CosineNoiseScheduler`
-
-`Model: UNet(emb_features=256, 
-            feature_depths=[64, 128, 256, 512],
-            attention_configs=[{"heads":4}, {"heads":4}, {"heads":4}, {"heads":4}, {"heads":4}],
-            num_res_blocks=2,
-            num_middle_res_blocks=1)`
+### Unconditional, DDPM sampler, 1000 steps, oxford_flowers102 (64px)
+Cosine schedule, `UNet(emb_features=256, feature_depths=[64, 128, 256, 512])`.
 
 ![DDPM Sampler results](images/ddpm2.png)
 
-### Images generated by DDPM Sampler in 1000 steps [Unconditional]
-
-**Params**: 
-`Dataset: oxford_flowers102`
-`Batch size: 16`
-`Image Size: 64`
-`Training Epochs: 1000`
-`Steps per epoch: 511`
-
-`Training Noise Schedule: CosineNoiseScheduler`
-`Inference Noise Schedule: CosineNoiseScheduler`
-
-`Model: UNet(emb_features=256, 
-            feature_depths=[64, 128, 256, 512],
-            attention_configs=[{"heads":4}, {"heads":4}, {"heads":4}, {"heads":4}, {"heads":4}],
-            num_res_blocks=2,
-            num_middle_res_blocks=1)`
-
-![DDPM Sampler results](images/ddpm.png)
-
-### Images generated by Heun Sampler in 10 steps (20 model inferences as Heun takes 2x inference steps) [Unconditional]
-
-**Params**: 
-`Dataset: oxford_flowers102`
-`Batch size: 16`
-`Image Size: 64`
-`Training Epochs: 1000`
-`Steps per epoch: 511`
-
-`Training Noise Schedule: EDMNoiseScheduler`
-`Inference Noise Schedule: KarrasEDMPredictor`
-
-`Model: UNet(emb_features=256, 
-            feature_depths=[64, 128, 256, 512],
-            attention_configs=[{"heads":4}, {"heads":4}, {"heads":4}, {"heads":4}, {"heads":4}],
-            num_res_blocks=2,
-            num_middle_res_blocks=1)`
+### Unconditional, Heun sampler, 10 steps (20 model evals), oxford_flowers102 (64px)
+EDM schedule.
 
 ![Heun Sampler results](images/heun.png)
 
-
 ## Contribution
 
-Feel free to contribute by opening issues or submitting pull requests. Let's make FlaxDiff better together!
+Feel free to contribute by opening issues or submitting pull requests.
 
 ## License
 

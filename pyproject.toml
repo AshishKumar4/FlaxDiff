@@ -36,6 +36,14 @@ license = "MIT"
 
 [project.optional-dependencies]
 test = ["pytest"]
+# AV/video sources and readers (lazy imports in flaxdiff.data)
+av = ["opencv-python", "decord", "moviepy", "av", "pillow"]
+# FID (scipy sqrtm) and Inception weight download
+metrics = ["scipy", "requests"]
+# Online URL-streaming loader (HF datasets-backed)
+streaming = ["datasets"]
+# TFDS-backed dataset sources
+tfds = ["tensorflow-datasets", "tensorflow"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

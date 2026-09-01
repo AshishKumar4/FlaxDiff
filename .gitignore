@@ -25,3 +25,6 @@ artifacts
 datasets/datasets
 # local working docs
 PLAN.md
+NEWREPO.md
+.claude/
+.venv/
