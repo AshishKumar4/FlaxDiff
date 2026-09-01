@@ -197,20 +197,6 @@ class ImageTFDSAugmenter(DataAugmenter):
         
         return TFDSTransform
     
-    def create_filter(self, image_scale: int = 256):
-        class FilterTransform(pygrain.FilterTransform):
-            def map(self, element) -> bool:
-                return True
-"""
-Batch structure:
-{
-"image": image_batch,
-"text": {
-    "input_ids": input_ids_batch,
-    "attention_mask": attention_mask_batch,
-}
-
-"""
 
 # ----------------------------------------------------------------------------------
 # GCS Image Source
@@ -336,50 +322,49 @@ class ImageGCSAugmenter(DataAugmenter):
         
         return GCSTransform
     
-    def create_filter(self, image_scale: int = 256):
-        import torch.nn.functional as F
+    def create_filter(self, image_scale: int = 256) -> Callable[[], pygrain.FilterTransform]:
+        """Create a CLIP similarity filter for GCS image datasets.
+
+        This is the only filter in the data layer and it is opt-in: nothing in
+        the grain pipelines applies it automatically, callers wire it in
+        themselves (see the `gcs_filters` helper). Only instantiating the
+        returned class loads torch and transformers, so building the filter
+        costs nothing on hosts without them.
+
+        Args:
+            image_scale: Size the surrounding pipeline scales images to.
+
+        Returns:
+            A callable that returns a pygrain.FilterTransform.
+        """
+
         class FilterTransform(pygrain.FilterTransform):
-            """
-            Filter transform for GCS data source.
-            """
+            """Drops image/caption pairs whose CLIP similarity is below 0.25."""
+
             def __init__(self, model=None, processor=None, method=cv2.INTER_AREA):
                 super().__init__()
+                import torch.nn.functional as functional
+                self.functional = functional
                 self.image_scale = image_scale
                 if model is None:
-                    from transformers import AutoProcessor, CLIPVisionModelWithProjection, FlaxCLIPModel, CLIPModel
+                    from transformers import AutoProcessor, CLIPModel
                     model_name = "openai/clip-vit-base-patch32"
                     model = CLIPModel.from_pretrained(model_name)
                     processor = AutoProcessor.from_pretrained(model_name, use_fast=False)
                 self.method = method
                 self.model = model
                 self.processor = processor
-                
-                # def _filter_(pixel_values, input_ids):
-                #     image_embeds = self.model.get_image_features(pixel_values=pixel_values)
-                #     text_embeds = self.model.get_text_features(input_ids=input_ids)
-                #     image_embeds = image_embeds / jnp.linalg.norm(image_embeds, axis=-1, keepdims=True)
-                #     text_embeds = text_embeds / jnp.linalg.norm(text_embeds, axis=-1, keepdims=True)
-                #     similarity = jnp.sum(image_embeds * text_embeds, axis=-1)
-                #     return jnp.all(similarity >= 0.25)
-                
-                # self._filter_ = _filter_
 
             def filter(self, data: Dict[str, Any]) -> bool:
-                images = [data['image']]
-                texts = [data['caption']]
-                inputs = self.processor(text=texts, images=images, return_tensors="pt", padding=True, truncation=True)
-                # result = self._filter_(
-                #     pixel_values=inputs['pixel_values'],
-                #     input_ids=inputs['input_ids']
-                # )
-                # return result
-                
+                inputs = self.processor(
+                    text=[data['caption']], images=[data['image']],
+                    return_tensors="pt", padding=True, truncation=True,
+                )
                 image_embeds = self.model.get_image_features(pixel_values=inputs['pixel_values'])
                 text_embeds = self.model.get_text_features(input_ids=inputs['input_ids'])
-                similarity = F.cosine_similarity(image_embeds, text_embeds)
-                # Filter out images with similarity less than 0.25
+                similarity = self.functional.cosine_similarity(image_embeds, text_embeds)
                 return similarity[0] >= 0.25
-                
+
         return FilterTransform
 
 
