@@ -6,7 +6,7 @@ import tqdm
 from flax import linen as nn
 from typing import List, Tuple, Dict, Any, Optional
 
-from ..predictors import DiffusionPredictionTransform, EpsilonPredictionTransform
+from ..predictors import DiffusionPredictionTransform
 from ..schedulers import NoiseScheduler, get_coeff_shapes_tuple
 from ..utils import RandomMarkovState, MarkovState, clip_images
 from flaxdiff.models.autoencoder import AutoEncoder

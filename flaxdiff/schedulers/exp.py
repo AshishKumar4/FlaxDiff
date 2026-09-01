@@ -8,6 +8,6 @@ def exp_beta_schedule(timesteps, start_angle=0.008, end_angle=0.999):
     betas = 1 - (alphas_bar[1:] / alphas_bar[:-1])
     return np.clip(betas, 0, end_angle)
 
-class ExpNoiseSchedule(DiscreteNoiseScheduler):
+class ExpNoiseScheduler(DiscreteNoiseScheduler):
     def __init__(self, timesteps, beta_start=0.008, beta_end=0.999, *args, **kwargs):
         super().__init__(timesteps, beta_start, beta_end, schedule_fn=exp_beta_schedule, *args, **kwargs)

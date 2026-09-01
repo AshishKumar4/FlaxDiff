@@ -229,6 +229,3 @@ class SpatialFusionConv(nn.Module):
             )(y_2d)
             out = out + dw
         return out
-
-
-# --- SSM DiT Block ---
