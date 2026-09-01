@@ -2,6 +2,7 @@ from .sources.base import MediaDataset, DataSource, DataAugmenter
 from .sources.images import ImageTFDSSource, ImageGCSSource, CombinedImageGCSSource
 from .sources.images import ImageTFDSAugmenter, ImageGCSAugmenter
 from .sources.videos import VideoTFDSSource, VideoLocalSource, AudioVideoAugmenter
+from .sources.voxceleb2 import VoxCeleb2Source
 
 # ---------------------------------------------------------------------------------
 # Legacy compatibility mappings
@@ -152,9 +153,10 @@ mediaDatasetMap = {
         media_type="image"
     ),
     
-    # Video dataset
+    # Audio-video dataset: pass the dataset root as dataset_source, the source
+    # scans <root>/train/<identity>/<clip>/<utterance>.mp4 itself.
     "voxceleb2": MediaDataset(
-        source=VideoLocalSource(),
+        source=VoxCeleb2Source(split="train"),
         augmenter=AudioVideoAugmenter(),
         media_type="video"
     ),
