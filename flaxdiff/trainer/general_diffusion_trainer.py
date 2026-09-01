@@ -514,28 +514,34 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         return False, False
             
     def save(self, epoch=0, step=0, state=None, rngstate=None):
+        # Persistence first and unguarded: if the checkpoint did not land, the
+        # run has to hear about it.
         super().save(epoch=epoch, step=step, state=state, rngstate=rngstate)
 
-        if self.wandb is not None:
+        if self.wandb is None:
+            return
+
+        # Everything below is publishing, not persistence. A wandb outage, a
+        # registry rejection or a checkpoint directory that has already been
+        # handed to the registry must not take the run down - and must never
+        # reach the rmtree, which is the only thing here that destroys data.
+        try:
             # Uploading reads the checkpoint back off disk, so the async write
             # has to have landed first.
             self.wait_for_checkpoints()
             checkpoint = get_latest_checkpoint(self.checkpoint_path())
-            try:
-                is_good, is_best = self.__compare_run_against_best__(top_k=5, metric=self.best_tracker_metric, from_sweeps=hasattr(self, "wandb_sweep"))
-                if is_good:
-                    # Push to registry with appropriate aliases
-                    aliases = []
-                    if is_best:
-                        aliases.append("best")
-                    self.push_to_registry(aliases=aliases)
-                    print("Model pushed to registry successfully with aliases:", aliases)
-                    # Only delete after a successful registry push - the local
-                    # checkpoint is the only copy otherwise
-                    shutil.rmtree(checkpoint, ignore_errors=True)
-                    print(f"Checkpoint deleted at {checkpoint}")
-                else:
-                    print("Current run is not one of the best runs. Keeping local checkpoint.")
-            except Exception as e:
-                print(f"Error during registry operations: {e}")
-                print(f"Checkpoint preserved at {checkpoint}")
+            is_good, is_best = self.__compare_run_against_best__(
+                top_k=5, metric=self.best_tracker_metric,
+                from_sweeps=hasattr(self, "wandb_sweep"))
+            if not is_good:
+                print("Current run is not one of the best runs. Keeping local checkpoint.")
+                return
+            aliases = ["best"] if is_best else []
+            self.push_to_registry(aliases=aliases)
+            print("Model pushed to registry successfully with aliases:", aliases)
+            # Only delete after a successful registry push - the local
+            # checkpoint is the only copy otherwise
+            shutil.rmtree(checkpoint, ignore_errors=True)
+            print(f"Checkpoint deleted at {checkpoint}")
+        except Exception as e:
+            print(f"Error during registry operations, local checkpoint preserved: {e}")

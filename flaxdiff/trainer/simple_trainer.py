@@ -164,6 +164,9 @@ class SimpleTrainer:
         # Position of the data iterator, carried through checkpoints so a resume
         # continues mid-epoch instead of replaying from the top.
         self.dataset_state = None
+        # Highest step this trainer has written a checkpoint for, so the final
+        # save at the end of fit() does not duplicate an in-loop one.
+        self.last_saved_step = None
 
         self.latest_step = 0
         if load_from_checkpoint is not None:
@@ -306,10 +309,12 @@ class SimpleTrainer:
             # Grain reports its position as JSON bytes, which tensorstore has no
             # dtype for; the raw bytes ride along as a uint8 array instead.
             ckpt['dataset_state'] = np.frombuffer(self.dataset_state, np.uint8)
-        try:
-            self.checkpointer.save(step, args=ocp.args.PyTreeSave(ckpt), force=True)
-        except Exception as e:
-            print("Error saving checkpoint", e)
+        # Deliberately unguarded: a checkpoint that failed to write is data
+        # loss, and printing it while the run carries on hides exactly that.
+        # The write is async, so a failure inside it surfaces from
+        # wait_for_checkpoints() rather than here.
+        self.checkpointer.save(step, args=ocp.args.PyTreeSave(ckpt), force=True)
+        self.last_saved_step = step
 
     def _define_train_step(self, **kwargs):
         raise NotImplementedError("Subclasses must define their train step")
@@ -564,7 +569,12 @@ class SimpleTrainer:
                 print(colored(f"\n\tEpoch {current_epoch} completed. Avg Loss: {avg_loss}, Time: {total_time:.2f}s, Best Loss: {self.best_loss}", 'green'))
                     
                 
-        self.save(epochs)
+        # The in-loop saves are conditional, so the state the run ends on may
+        # never have been written. It has to go out under its real step: the
+        # default of 0 used to leave a step-0 checkpoint holding the final
+        # weights, which a resume then restarts the schedule from.
+        if self.last_saved_step != self.latest_step:
+            self.save(self.latest_step // train_steps_per_epoch, self.latest_step)
         self.wait_for_checkpoints()
         return self.state
 
