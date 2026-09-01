@@ -145,39 +145,40 @@ def parse_config(config, overrides=None):
 def load_from_checkpoint(
     checkpoint_dir: str,
 ):
-    try:
-        checkpointer = PyTreeCheckpointer()
-        options = CheckpointManagerOptions(create=False)
-        # Convert checkpoint_dir to absolute path
-        checkpoint_dir = os.path.abspath(checkpoint_dir)
-        manager = CheckpointManager(checkpoint_dir, checkpointer, options)
-        ckpt = manager.restore(checkpoint_dir)
-        # Extract as above
-        state, best_state = None, None
-        if 'state' in ckpt:
-            state = ckpt['state']
-        if 'best_state' in ckpt:
-            best_state = ckpt['best_state']
-        print(f"Loaded checkpoint from local dir {checkpoint_dir}")
-        return state, best_state
-    except Exception as e:
-        print(f"Warning: Failed to load checkpoint from local dir: {e}")
-        return None, None
-    
+    """Restore (state, best_state) from a single orbax checkpoint directory.
+
+    Raises if the checkpoint cannot be read: the callers below decide what a
+    failed load means, and reporting it as an empty pair made an unusable
+    pipeline look like a successful one.
+    """
+    checkpointer = PyTreeCheckpointer()
+    options = CheckpointManagerOptions(create=False)
+    # Convert checkpoint_dir to absolute path
+    checkpoint_dir = os.path.abspath(checkpoint_dir)
+    manager = CheckpointManager(checkpoint_dir, checkpointer, options)
+    ckpt = manager.restore(checkpoint_dir)
+    print(f"Loaded checkpoint from local dir {checkpoint_dir}")
+    return ckpt.get('state'), ckpt.get('best_state')
+
 def load_from_wandb_run(
     run,
     project: str,
     entity: str = None,
 ):
     """
-    Loads model from wandb model registry.
+    Loads model from a wandb run's latest model artifact.
+
+    Returns (states, config, run, artifact); every element is None if the
+    lookup failed, so a caller can tell a miss from a load.
     """
-    # Get the model version from wandb
     states = None
     config = None
+    artifact = None
     try:
         if isinstance(run, str):
             run = get_wandb_run(run, project, entity)
+        if run is None:
+            raise ValueError("No wandb run found")
         # Search for model artifact
         models = [i for i in run.logged_artifacts() if i.type == 'model']
         if len(models) == 0:
@@ -185,7 +186,7 @@ def load_from_wandb_run(
         # Pick out any model artifact
         highest_version = max([{'version':int(i.version[1:]), 'name': i.qualified_name} for i in models], key=lambda x: x['version'])
         wandb_modelname = highest_version['name']
-        
+
         print(f"Loading model from wandb: {wandb_modelname} out of versions {[i.version for i in models]}")
         artifact = run.use_artifact(wandb.Api().artifact(wandb_modelname))
         ckpt_dir = artifact.download()
@@ -206,11 +207,14 @@ def load_from_wandb_registry(
 ):
     """
     Loads model from wandb model registry.
+
+    Returns (states, config, run, artifact); every element is None if the
+    lookup failed, so a caller can tell a miss from a load.
     """
-    # Get the model version from wandb
     states = None
     config = None
     run = None
+    artifact = None
     try:
         artifact = wandb.Api().artifact(f"{registry}/{modelname}:{version}")
         ckpt_dir = artifact.download()

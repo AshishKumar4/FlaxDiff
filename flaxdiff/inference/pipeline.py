@@ -24,19 +24,15 @@ from flaxdiff.inference.utils import parse_config, load_from_wandb_run, load_fro
 
 @dataclass
 class InferencePipeline:
-    """Inference pipeline for a general model."""
+    """Inference pipeline for a general model.
+
+    Loading is the concrete pipelines' business: what a checkpoint holds and
+    which components have to be rebuilt around it is model-specific.
+    """
     name: str = None
     model: nn.Module = None
     state: SimpleTrainState = None
     best_state: SimpleTrainState = None
-    
-    def from_wandb(
-        self,
-        wandb_run: str,
-        wandb_project: str,
-        wandb_entity: str,
-    ):
-        raise NotImplementedError("InferencePipeline does not support from_wandb.")    
 
 @dataclass
 class DiffusionInferencePipeline(InferencePipeline):

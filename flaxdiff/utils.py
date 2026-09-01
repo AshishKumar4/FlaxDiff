@@ -36,12 +36,25 @@ def serialize_model(model: nn.Module):
     return model_dict
 
 def get_latest_checkpoint(checkpoint_path):
-    checkpoint_files = os.listdir(checkpoint_path)
-    # Sort files by step number
-    checkpoint_files = sorted([int(i) for i in checkpoint_files])
-    latest_step = checkpoint_files[-1]
-    latest_checkpoint = os.path.join(checkpoint_path, str(latest_step))
-    return latest_checkpoint
+    """Path of the highest-numbered step directory under a checkpoint root.
+
+    Orbax leaves entries that are not steps next to them - lock files, the
+    manager's own metadata, `<step>.orbax-checkpoint-tmp` directories from a
+    write that was interrupted - and a step directory can exist while still
+    being empty. int()-ing every name blew up on the first of those, so this
+    only considers directories whose name is a number and which hold something.
+    """
+    steps = []
+    for entry in os.listdir(checkpoint_path):
+        if not entry.isdecimal():
+            continue
+        step_path = os.path.join(checkpoint_path, entry)
+        if not os.path.isdir(step_path) or not os.listdir(step_path):
+            continue
+        steps.append(int(entry))
+    if not steps:
+        raise FileNotFoundError(f"No checkpoint step directory in {checkpoint_path}")
+    return os.path.join(checkpoint_path, str(max(steps)))
 
 class MarkovState(struct.PyTreeNode):
     pass

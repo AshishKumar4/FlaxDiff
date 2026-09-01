@@ -47,6 +47,7 @@ class ConditionalInputConfig:
             "encoder": self.encoder.serialize(),
             "encoder_key": self.encoder.key,
             "conditioning_data_key": self.conditioning_data_key,
+            "pretokenized": self.pretokenized,
             "unconditional_input": self.unconditional_input,
             "model_key_override": self.model_key_override,
         }
@@ -64,11 +65,15 @@ class ConditionalInputConfig:
         encoder = encoder_class.deserialize(serialized_config["encoder"])
         # Deserialize the rest of the configuration
         conditioning_data_key = serialized_config.get("conditioning_data_key")
+        # Configs written before pretokenization was serialized carry the
+        # dataclass default, which is what those runs trained with.
+        pretokenized = serialized_config.get("pretokenized", False)
         unconditional_input = serialized_config.get("unconditional_input")
         model_key_override = serialized_config.get("model_key_override")
         return ConditionalInputConfig(
             encoder=encoder,
             conditioning_data_key=conditioning_data_key,
+            pretokenized=pretokenized,
             unconditional_input=unconditional_input,
             model_key_override=model_key_override,
         )

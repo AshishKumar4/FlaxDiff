@@ -80,6 +80,7 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                  eval_metrics: List[EvaluationMetric] = None,
                  best_tracker_metric: str = "train/best_loss",
                  ema_decay: float = 0.999,
+                 grad_accum_steps: int = 1,
                  loss_fn: Callable = optax.l2_loss,
                  **kwargs
                  ):
@@ -98,6 +99,9 @@ class GeneralDiffusionTrainer(SimpleTrainer):
             model_output_transform: Transform for model predictions
             autoencoder: Optional autoencoder for latent diffusion
             native_resolution: Native resolution of the data
+            grad_accum_steps: Micro-batches per optimizer update. Must match the
+                every_k_schedule of the optax.MultiSteps wrapper on `optimizer`,
+                otherwise the EMA runs on a different clock than the params.
             **kwargs: Additional arguments for parent class
         """
         # Initialize with parent DiffusionTrainer but without encoder parameter
@@ -105,6 +109,9 @@ class GeneralDiffusionTrainer(SimpleTrainer):
             autoencoder=autoencoder,
         )
         self.eval_metrics = eval_metrics
+        if grad_accum_steps < 1:
+            raise ValueError(f"grad_accum_steps must be at least 1, got {grad_accum_steps}")
+        self.grad_accum_steps = grad_accum_steps
 
         if native_resolution is None:
             sample_shape = input_config.sample_data_shape
@@ -210,6 +217,7 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         """
         objective = self.objective
         ema = objective.ema
+        accum = self.grad_accum_steps
 
         def train_step(train_state: TrainState, rng_state: RandomMarkovState, batch):
             """Training step over the global batch; GSPMD partitions it."""
@@ -246,7 +254,23 @@ class GeneralDiffusionTrainer(SimpleTrainer):
 
             # The EMA copy is sharded like the params it tracks, so averaging a
             # subtree stays a local read-modify-write on every device.
-            new_state = new_state.apply_ema(ema.decay(train_state.step), ema.path)
+            #
+            # `train_state.step` counts micro-batches, and under MultiSteps the
+            # params only move on every accum-th one. The EMA has to run on that
+            # same clock: averaging every micro-step would blend in params that
+            # never changed and advance the decay schedule accum times too fast.
+            # The schedule is therefore indexed by completed updates, and the
+            # average only happens on the micro-step whose update lands.
+            update_index = train_state.step // accum
+            if accum == 1:
+                new_state = new_state.apply_ema(ema.decay(update_index), ema.path)
+            else:
+                new_state = jax.lax.cond(
+                    (train_state.step + 1) % accum == 0,
+                    lambda s: s.apply_ema(ema.decay(update_index), ema.path),
+                    lambda s: s,
+                    new_state,
+                )
 
             return new_state, loss, aux, rng_state, jnp.isfinite(loss)
 
@@ -490,28 +514,34 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         return False, False
             
     def save(self, epoch=0, step=0, state=None, rngstate=None):
+        # Persistence first and unguarded: if the checkpoint did not land, the
+        # run has to hear about it.
         super().save(epoch=epoch, step=step, state=state, rngstate=rngstate)
 
-        if self.wandb is not None:
+        if self.wandb is None:
+            return
+
+        # Everything below is publishing, not persistence. A wandb outage, a
+        # registry rejection or a checkpoint directory that has already been
+        # handed to the registry must not take the run down - and must never
+        # reach the rmtree, which is the only thing here that destroys data.
+        try:
             # Uploading reads the checkpoint back off disk, so the async write
             # has to have landed first.
             self.wait_for_checkpoints()
             checkpoint = get_latest_checkpoint(self.checkpoint_path())
-            try:
-                is_good, is_best = self.__compare_run_against_best__(top_k=5, metric=self.best_tracker_metric, from_sweeps=hasattr(self, "wandb_sweep"))
-                if is_good:
-                    # Push to registry with appropriate aliases
-                    aliases = []
-                    if is_best:
-                        aliases.append("best")
-                    self.push_to_registry(aliases=aliases)
-                    print("Model pushed to registry successfully with aliases:", aliases)
-                    # Only delete after a successful registry push - the local
-                    # checkpoint is the only copy otherwise
-                    shutil.rmtree(checkpoint, ignore_errors=True)
-                    print(f"Checkpoint deleted at {checkpoint}")
-                else:
-                    print("Current run is not one of the best runs. Keeping local checkpoint.")
-            except Exception as e:
-                print(f"Error during registry operations: {e}")
-                print(f"Checkpoint preserved at {checkpoint}")
+            is_good, is_best = self.__compare_run_against_best__(
+                top_k=5, metric=self.best_tracker_metric,
+                from_sweeps=hasattr(self, "wandb_sweep"))
+            if not is_good:
+                print("Current run is not one of the best runs. Keeping local checkpoint.")
+                return
+            aliases = ["best"] if is_best else []
+            self.push_to_registry(aliases=aliases)
+            print("Model pushed to registry successfully with aliases:", aliases)
+            # Only delete after a successful registry push - the local
+            # checkpoint is the only copy otherwise
+            shutil.rmtree(checkpoint, ignore_errors=True)
+            print(f"Checkpoint deleted at {checkpoint}")
+        except Exception as e:
+            print(f"Error during registry operations, local checkpoint preserved: {e}")

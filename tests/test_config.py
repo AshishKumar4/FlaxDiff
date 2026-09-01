@@ -7,9 +7,14 @@ different model than the one in the checkpoint.
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from flaxdiff.inference.utils import parse_config
+from flaxdiff.inputs import (
+    CONDITIONAL_ENCODERS_REGISTRY, ConditionalInputConfig, ConditioningEncoder,
+    DiffusionInputConfig,
+)
 
 
 def make_config(model_overrides=None, arguments_overrides=None):
@@ -141,3 +146,79 @@ def test_registry_suffix_canonicalization():
     name, flags = canonicalize_architecture("hybrid_dit+2d+hilbert")
     assert name == "hybrid_dit"
     assert flags == {"use_2d_fusion": True, "use_hilbert": True}
+
+
+# --------------------------------------------------------------------------
+# Input config round-trip
+# --------------------------------------------------------------------------
+
+class StubEncoder(ConditioningEncoder):
+    """A registry-shaped encoder with nothing to download."""
+
+    @property
+    def key(self):
+        return "stub"
+
+    def tokenize(self, data):
+        return {"tokens": np.zeros((len(data), 3), np.int32)}
+
+    def encode_from_tokens(self, tokens):
+        return np.zeros((len(tokens["tokens"]), 3, 4), np.float32)
+
+    def serialize(self):
+        return {"modelname": self.model}
+
+    @staticmethod
+    def deserialize(serialized_config):
+        return StubEncoder(model=serialized_config["modelname"], tokenizer=None)
+
+
+@pytest.fixture
+def stub_encoder_registry(monkeypatch):
+    monkeypatch.setitem(CONDITIONAL_ENCODERS_REGISTRY, "stub", StubEncoder)
+
+
+def make_condition(pretokenized=True):
+    return ConditionalInputConfig(
+        encoder=StubEncoder(model="stub-model", tokenizer=None),
+        conditioning_data_key="caption",
+        pretokenized=pretokenized,
+        unconditional_input="",
+        model_key_override="textcontext",
+    )
+
+
+@pytest.mark.parametrize("pretokenized", [True, False])
+def test_conditional_input_config_roundtrip(stub_encoder_registry, pretokenized):
+    """Whether the batch holds raw data or pretokenized tensors decides which
+    encoder call the run makes, so dropping it on the round-trip silently
+    changes what inference feeds the model."""
+    restored = ConditionalInputConfig.deserialize(make_condition(pretokenized).serialize())
+
+    assert restored.pretokenized is pretokenized
+    assert restored.conditioning_data_key == "caption"
+    assert restored.model_key_override == "textcontext"
+    assert restored.unconditional_input == ""
+    assert restored.encoder.model == "stub-model"
+
+
+def test_input_config_roundtrip_carries_conditions(stub_encoder_registry):
+    """The whole config as parse_config receives it, not just one condition."""
+    config = DiffusionInputConfig(
+        sample_data_key="image", sample_data_shape=(32, 32, 3),
+        conditions=[make_condition(pretokenized=True)])
+    restored = DiffusionInputConfig.deserialize(config.serialize())
+
+    assert restored.sample_data_key == "image"
+    assert restored.sample_data_shape == (32, 32, 3)
+    assert [c.pretokenized for c in restored.conditions] == [True]
+
+
+def test_conditional_input_config_defaults_pretokenized_for_older_configs(
+        stub_encoder_registry):
+    """Configs logged before pretokenization was serialized have no such key;
+    they trained with the dataclass default."""
+    serialized = make_condition(pretokenized=True).serialize()
+    del serialized["pretokenized"]
+
+    assert ConditionalInputConfig.deserialize(serialized).pretokenized is False
