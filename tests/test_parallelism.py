@@ -463,3 +463,59 @@ def test_checkpoint_restores_onto_a_different_mesh(tmp_path):
     for before, after in zip(jax.tree.leaves(trainer.state.params),
                              jax.tree.leaves(restored.state.params)):
         np.testing.assert_allclose(np.asarray(before), np.asarray(after))
+
+
+# --------------------------------------------------------------------------
+# The whole run, on a real mesh
+# --------------------------------------------------------------------------
+
+def peak_to_peak_metric(seen):
+    """A real EvaluationMetric over the sampler's artifacts.
+
+    Deliberately not CLIP or FID: those download pretrained weights. What is
+    under test is the metric plumbing - artifacts in, score out, best tracked,
+    logged - which is identical whatever the score means.
+    """
+    def peak_to_peak(generated, batch):
+        seen.append((np.asarray(generated).shape,
+                     None if batch is None else np.asarray(batch["image"]).shape))
+        return jnp.max(generated) - jnp.min(generated)
+
+    return EvaluationMetric(function=peak_to_peak, name="sample_range")
+
+
+@pytest.mark.parametrize("fsdp_size", [1, 4])
+def test_fit_end_to_end_with_validation_and_metrics(tmp_path, fsdp_size):
+    """A full run on the simulated 8-device mesh: training, the validation
+    loop with its sampler, an evaluation metric, and the final checkpoint.
+
+    Parametrized over pure data parallelism and a 2x4 data/fsdp mesh, because
+    validation samples from the *sharded* EMA parameters - a layout the
+    training step alone never exercises.
+    """
+    seen = []
+    trainer = make_trainer(tmp_path, f"e2e-fsdp{fsdp_size}", distributed_training=True,
+                           fsdp_size=fsdp_size, fsdp_min_param_size=TINY,
+                           eval_metrics=[peak_to_peak_metric(seen)])
+    assert trainer.mesh.shape["data"] == jax.device_count() // fsdp_size
+    assert trainer.mesh.shape["fsdp"] == fsdp_size
+    sharded = [x for x in jax.tree.leaves(trainer.state.ema_params)
+               if 'fsdp' in str(x.sharding.spec)]
+    assert bool(sharded) == (fsdp_size > 1)
+    # 200 sampler steps per validation batch is the production default and pure
+    # overhead here; the loop is what is under test, not the sample quality.
+    trainer.objective.diffusion_steps = 4
+
+    data = {"train": batches, "val": batches, "train_len": BATCH * 8,
+            "local_batch_size": BATCH, "global_batch_size": BATCH}
+    state = trainer.fit(data, training_steps_per_epoch=2, epochs=1, val_steps_per_epoch=1)
+
+    assert int(state.step) == 2
+    # the sanity validation before training, then one after the epoch
+    assert seen == [((4, RES, RES, 3), (BATCH, RES, RES, 3))] * 2
+
+    score = trainer.best_val_metrics["val/sample_range"]
+    assert np.isfinite(score) and score > 0
+
+    trainer.wait_for_checkpoints()
+    assert trainer.checkpointer.latest_step() == 2
