@@ -83,11 +83,13 @@ def ssim(
     """
     pred, _ = _as_frame_batch(predictions)
     targ, _ = _as_frame_batch(targets)
-    # vmap over frames then channels: each (H, W) plane is scored independently
-    scores = jax.vmap(
+    # vmap over frames then channels: each (H, W) plane is scored independently,
+    # giving (N, C) which collapses to one score per frame
+    per_channel = jax.vmap(
         jax.vmap(_ssim_single_channel, in_axes=(2, 2, None)),
         in_axes=(0, 0, None),
     )(pred, targ, data_range)
+    scores = jnp.mean(per_channel, axis=-1)
     return scores if per_example else jnp.mean(scores)
 
 
