@@ -1,7 +1,6 @@
+import jax
 import jax.numpy as jnp
 from .common import GeneralizedNoiseScheduler
-import math
-import jax
 from ..utils import RandomMarkovState
 
 class KarrasVENoiseScheduler(GeneralizedNoiseScheduler):
@@ -50,19 +49,6 @@ class KarrasVENoiseScheduler(GeneralizedNoiseScheduler):
         timesteps = timesteps.astype(jnp.float32)
         return timesteps, state
     
-class SimpleExpNoiseScheduler(KarrasVENoiseScheduler):
-    def __init__(self, timesteps, sigma_min=0.002, sigma_max=80, rho=7., sigma_data=0.5, *args, **kwargs):
-        super().__init__(timesteps=timesteps, sigma_min=sigma_min, sigma_max=sigma_max, sigma_data=sigma_data, *args, **kwargs)
-        if type(timesteps) == int and timesteps > 1:
-            n = timesteps
-        else:
-            n = 1000
-        self.sigmas = jnp.exp(jnp.linspace(math.log(sigma_min), math.log(sigma_max), n))
-
-    def get_sigmas(self, steps) -> jnp.ndarray:
-        steps = jnp.int16(steps)
-        return self.sigmas[steps]
-
 class EDMNoiseScheduler(KarrasVENoiseScheduler):
     """Training sigmas drawn from exp(N(P_mean, P_std^2)).
 

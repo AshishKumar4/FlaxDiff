@@ -2,61 +2,156 @@
 
 These encode the properties the rest of the library relies on:
 variance preservation for VP schedules, alpha=1 for the generalized (VE)
-schedules, and exact invertibility of the forward diffusion.
+schedules, monotone SNR along the trajectory, rate shapes that broadcast
+against image and video batches, and exact invertibility of the forward
+diffusion.
+
+SCHEDULES below is the single table every shared invariant runs over, and
+test_every_exported_scheduler_is_covered fails if a scheduler is exported
+without being added to it, so new schedulers inherit the invariants.
 """
 
 import jax
 import jax.numpy as jnp
 import pytest
 
+import flaxdiff.schedulers as schedulers
 from flaxdiff.predictors import (
     EpsilonPredictionTransform,
     VPredictionTransform,
     get_diffusion_preset,
 )
 from flaxdiff.schedulers import (
+    CosineContinuousNoiseScheduler,
+    CosineGeneralNoiseScheduler,
     CosineNoiseScheduler,
-    LinearNoiseSchedule,
-    KarrasVENoiseScheduler,
     EDMNoiseScheduler,
+    ExpNoiseScheduler,
+    FlowMatchingScheduler,
+    KarrasVENoiseScheduler,
+    LinearNoiseScheduler,
+    SqrtContinuousNoiseScheduler,
 )
 from flaxdiff.schedulers.common import get_coeff_shapes_tuple
 
-VP_SCHEDULES = [
-    ("cosine", lambda: CosineNoiseScheduler(1000), jnp.array([10, 300, 600, 900])),
-    ("linear", lambda: LinearNoiseSchedule(1000), jnp.array([10, 300, 600, 900])),
-]
-VE_SCHEDULES = [
-    ("karras_ve", lambda: KarrasVENoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5), jnp.array([0.05, 0.3, 0.6, 0.95])),
-    ("edm", lambda: EDMNoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5), jnp.array([0.05, 0.3, 0.6, 0.95])),
+# Timesteps ascending from low to high noise, in each schedule's own domain:
+# an index into the beta table for the discrete schedules, [0, 1] for the
+# continuous ones.
+DISCRETE_STEPS = jnp.array([10, 300, 600, 900])
+CONTINUOUS_STEPS = jnp.array([0.05, 0.3, 0.6, 0.95])
+
+# (class, factory, probe steps, family) — family picks the extra rate identity:
+# 'vp' is variance preserving, 've' keeps alpha=1 and scales the input,
+# 'flow' is the rectified-flow linear path.
+SCHEDULES = [
+    (CosineNoiseScheduler, lambda: CosineNoiseScheduler(1000), DISCRETE_STEPS, 'vp'),
+    (LinearNoiseScheduler, lambda: LinearNoiseScheduler(1000), DISCRETE_STEPS, 'vp'),
+    (ExpNoiseScheduler, lambda: ExpNoiseScheduler(1000), DISCRETE_STEPS, 'vp'),
+    (CosineContinuousNoiseScheduler, lambda: CosineContinuousNoiseScheduler(), CONTINUOUS_STEPS, 'vp'),
+    (SqrtContinuousNoiseScheduler, lambda: SqrtContinuousNoiseScheduler(), CONTINUOUS_STEPS, 'vp'),
+    (CosineGeneralNoiseScheduler, lambda: CosineGeneralNoiseScheduler(), CONTINUOUS_STEPS, 've'),
+    (KarrasVENoiseScheduler, lambda: KarrasVENoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5), CONTINUOUS_STEPS, 've'),
+    (EDMNoiseScheduler, lambda: EDMNoiseScheduler(1, sigma_max=80, rho=7, sigma_data=0.5), CONTINUOUS_STEPS, 've'),
+    (FlowMatchingScheduler, lambda: FlowMatchingScheduler(), CONTINUOUS_STEPS, 'flow'),
 ]
 
+# Base classes: no rates of their own, so nothing to assert invariants against
+ABSTRACT_SCHEDULERS = {
+    'NoiseScheduler',
+    'GeneralizedNoiseScheduler',
+    'DiscreteNoiseScheduler',
+    'ContinuousNoiseScheduler',
+}
+# Exported helpers that are not schedulers
+EXPORTED_HELPERS = {
+    'get_coeff_shapes_tuple',
+    'reshape_rates',
+    'compute_resolution_shift',
+    'linear_beta_schedule',
+    'cosine_beta_schedule',
+    'exp_beta_schedule',
+}
 
-@pytest.mark.parametrize("name,make,steps", VP_SCHEDULES)
-def test_vp_variance_preserving(name, make, steps):
+ALL_CASES = [(cls, make, steps, family) for cls, make, steps, family in SCHEDULES]
+ALL_IDS = [cls.__name__ for cls, _, _, _ in SCHEDULES]
+VP_CASES = [case for case in ALL_CASES if case[3] == 'vp']
+VP_IDS = [case[0].__name__ for case in VP_CASES]
+VE_CASES = [case for case in ALL_CASES if case[3] == 've']
+VE_IDS = [case[0].__name__ for case in VE_CASES]
+
+
+def test_every_exported_scheduler_is_covered():
+    """Exporting a scheduler without adding it to SCHEDULES fails here."""
+    exported = set(schedulers.__all__) - EXPORTED_HELPERS - ABSTRACT_SCHEDULERS
+    assert exported == {cls.__name__ for cls, _, _, _ in SCHEDULES}
+
+
+def test_abstract_schedulers_stay_exported():
+    """They are the documented subclassing surface."""
+    assert ABSTRACT_SCHEDULERS <= set(schedulers.__all__)
+
+
+@pytest.mark.parametrize("cls,make,steps,family", ALL_CASES, ids=ALL_IDS)
+def test_snr_decreases_along_the_trajectory(cls, make, steps, family):
+    """t runs from clean to noisy, so the signal-to-noise ratio must fall."""
+    snr = make().get_snr(steps)
+    assert jnp.all(jnp.diff(snr) < 0), snr
+
+
+@pytest.mark.parametrize("cls,make,steps,family", ALL_CASES, ids=ALL_IDS)
+@pytest.mark.parametrize("sample_shape", [(8, 8, 3), (2, 8, 8, 3)], ids=['image', 'video'])
+def test_rates_broadcast_against_the_sample(cls, make, steps, family, sample_shape):
+    """get_coeff_shapes_tuple is how every caller shapes the rates: the result
+    must broadcast against the batch it came from, for images and for video."""
+    x = jnp.zeros((len(steps),) + sample_shape)
+    shape = get_coeff_shapes_tuple(x)
+    assert shape == (-1,) + (1,) * (x.ndim - 1)
+
+    alpha, sigma = make().get_rates(steps, shape=shape)
+    assert alpha.shape == sigma.shape == (len(steps),) + (1,) * (x.ndim - 1)
+    assert (alpha * x).shape == x.shape
+
+
+@pytest.mark.parametrize("cls,make,steps,family", ALL_CASES, ids=ALL_IDS)
+@pytest.mark.parametrize("sample_shape", [(8, 8, 3), (2, 8, 8, 3)], ids=['image', 'video'])
+def test_forward_diffusion_invertible(cls, make, steps, family, sample_shape, rng):
+    """remove_all_noise inverts add_noise exactly at the same timestep."""
     schedule = make()
-    alpha, sigma = schedule.get_rates(steps, shape=(-1,))
+    key0, key1 = jax.random.split(rng)
+    full_shape = (len(steps),) + sample_shape
+    x0 = jax.random.normal(key0, full_shape)
+    noise = jax.random.normal(key1, full_shape)
+    xt = schedule.add_noise(x0, noise, steps)
+    recovered = schedule.remove_all_noise(xt, noise, steps)
+    assert xt.shape == x0.shape
+    assert jnp.max(jnp.abs(recovered - x0)) < 1e-4
+
+
+@pytest.mark.parametrize("cls,make,steps,family", VP_CASES, ids=VP_IDS)
+def test_vp_variance_preserving(cls, make, steps, family):
+    alpha, sigma = make().get_rates(steps, shape=(-1,))
     assert jnp.allclose(alpha**2 + sigma**2, 1.0, atol=1e-5)
 
 
-@pytest.mark.parametrize("name,make,steps", VE_SCHEDULES)
-def test_ve_signal_rate_is_one(name, make, steps):
-    schedule = make()
-    alpha, sigma = schedule.get_rates(steps, shape=(-1,))
+@pytest.mark.parametrize("cls,make,steps,family", VE_CASES, ids=VE_IDS)
+def test_ve_signal_rate_is_one(cls, make, steps, family):
+    alpha, sigma = make().get_rates(steps, shape=(-1,))
     assert jnp.allclose(alpha, 1.0)
     # Noise grows monotonically with t
     assert jnp.all(jnp.diff(sigma) > 0)
 
 
-@pytest.mark.parametrize("name,make,steps", VP_SCHEDULES + VE_SCHEDULES)
-def test_forward_diffusion_invertible(name, make, steps, rng):
-    schedule = make()
-    key0, key1 = jax.random.split(rng)
-    x0 = jax.random.normal(key0, (4, 8, 8, 3))
-    noise = jax.random.normal(key1, (4, 8, 8, 3))
-    xt = schedule.add_noise(x0, noise, steps)
-    recovered = schedule.remove_all_noise(xt, noise, steps)
-    assert jnp.max(jnp.abs(recovered - x0)) < 1e-4
+def test_flow_matching_stays_on_the_linear_path():
+    """Rectified flow: x_t = (1 - t) x_0 + t eps, so the rates sum to one."""
+    alpha, sigma = FlowMatchingScheduler().get_rates(CONTINUOUS_STEPS, shape=(-1,))
+    assert jnp.allclose(alpha + sigma, 1.0, atol=1e-6)
+
+
+def test_sqrt_schedule_matches_the_diffusion_lm_formula():
+    """Li et al. 2022: alpha = sqrt(1 - t), sigma = sqrt(t)."""
+    alpha, sigma = SqrtContinuousNoiseScheduler().get_rates(CONTINUOUS_STEPS, shape=(-1,))
+    assert jnp.allclose(alpha, jnp.sqrt(1 - CONTINUOUS_STEPS), atol=1e-6)
+    assert jnp.allclose(sigma, jnp.sqrt(CONTINUOUS_STEPS), atol=1e-6)
 
 
 def test_karras_weights_match_edm_lambda():

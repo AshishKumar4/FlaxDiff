@@ -32,7 +32,9 @@ def frechet_distance(mu_a, sigma_a, mu_b, sigma_b, eps=1e-6) -> float:
     mu_a, mu_b = np.atleast_1d(mu_a), np.atleast_1d(mu_b)
     sigma_a, sigma_b = np.atleast_2d(sigma_a), np.atleast_2d(sigma_b)
 
-    covmean, _ = linalg.sqrtm(sigma_a.dot(sigma_b), disp=False)
+    # scipy >= 1.16 dropped the `disp` kwarg; sqrtm returns (possibly
+    # complex) results without it.
+    covmean = linalg.sqrtm(sigma_a.dot(sigma_b))
     if not np.isfinite(covmean).all():
         # Singular product covariance, nudge the diagonal as in the reference
         # implementations rather than returning a nan

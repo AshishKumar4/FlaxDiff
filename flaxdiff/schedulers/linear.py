@@ -8,6 +8,6 @@ def linear_beta_schedule(timesteps, beta_start=0.0001, beta_end=0.02):
     betas = np.linspace(beta_start, beta_end, timesteps, dtype=np.float64)
     return betas
 
-class LinearNoiseSchedule(DiscreteNoiseScheduler):
+class LinearNoiseScheduler(DiscreteNoiseScheduler):
     def __init__(self, timesteps, beta_start=0.0001, beta_end=0.02, *args, **kwargs):
         super().__init__(timesteps, beta_start, beta_end, schedule_fn=linear_beta_schedule, *args, **kwargs)
