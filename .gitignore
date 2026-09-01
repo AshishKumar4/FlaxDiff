@@ -22,7 +22,7 @@ gcsfuse.yml
 *.arrow
 artifacts
 *.parquet
-datasets/datasets
+dataset-prep/datasets
 # local working docs
 PLAN.md
 NEWREPO.md
