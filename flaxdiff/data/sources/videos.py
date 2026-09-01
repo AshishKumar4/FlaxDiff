@@ -1,16 +1,13 @@
 import cv2
 import jax.numpy as jnp
 import grain.python as pygrain
-from flaxdiff.utils import AutoTextTokenizer, AutoAudioProcessor
-from typing import Dict, Any, Callable, List, Optional, Tuple
-import random
+from flaxdiff.utils import AutoAudioProcessor
+from typing import Dict, Any, Callable, List, Optional
+import hashlib
 import os
+import pickle
 import numpy as np
-from functools import partial
 from .base import DataSource, DataAugmenter
-import numpy as np
-import subprocess
-import shutil
 from .av_utils import read_av_random_clip
 
 # ----------------------------------------------------------------------------------
@@ -96,58 +93,58 @@ class VideoLocalSource(DataSource):
         """
         self.extensions = extensions
         self.cache_dir = cache_dir
+        self.directory = None
+        self.video_paths = []
         if directory:
             self.load_paths(directory, clear_cache)
-    
+
     def load_paths(self, directory: str, clear_cache: bool = False):
-        """Load video paths from a directory."""
+        """Scan `directory` for videos, caching the file list on disk.
+
+        The cache key is a content hash of the directory path, not `hash()`,
+        whose string salt changes every interpreter run.
+        """
         if self.directory == directory and not clear_cache:
-            # If the directory hasn't changed and cache is not cleared, return cached paths
             return
         self.directory = directory
-        
-        # Use gather_video_paths to get all video paths and cache them 
-        # in a local dictionary for future use
-        
-        # Generate a hash for the directory to use as a key
-        self.directory_hash = hash(directory)
 
-        # Check if the cache directory exists
-        if os.path.exists(self.cache_dir):
-            # Load cached video paths if available
-            cache_file = os.path.join(self.cache_dir, f"video_paths_{self.directory_hash}.txt")
-            import pickle
-            if os.path.exists(cache_file) and not clear_cache:
-                with open(cache_file, 'rb') as f:
-                    video_paths = pickle.load(f)
-                print(f"Loaded cached video paths from {cache_file}")
-            else:
-                # If no cache file, gather video paths and save them
-                print(f"Cache file not found or clear_cache is True. Gathering video paths from {directory}")
-                video_paths = gather_video_paths(directory, self.extensions)
+        cache_file = None
+        if self.cache_dir:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            digest = hashlib.sha1(directory.encode("utf-8")).hexdigest()[:16]
+            cache_file = os.path.join(self.cache_dir, f"video_paths_{digest}.pkl")
+
+        if cache_file and os.path.exists(cache_file) and not clear_cache:
+            with open(cache_file, 'rb') as f:
+                video_paths = pickle.load(f)
+            print(f"Loaded {len(video_paths)} cached video paths from {cache_file}")
+        else:
+            print(f"Gathering video paths from {directory}")
+            video_paths = gather_video_paths(directory, self.extensions)
+            if cache_file:
                 with open(cache_file, 'wb') as f:
                     pickle.dump(video_paths, f)
-                print(f"Cached video paths to {cache_file}")
-        
+                print(f"Cached {len(video_paths)} video paths to {cache_file}")
+
         self.video_paths = video_paths
-    
+
     def get_source(self, path_override: str = None) -> List[Dict[str, Any]]:
         """Get the local video data source.
-        
+
         Args:
-            path_override: Override directory path.
-            
+            path_override: Directory to scan, overriding the configured one.
+
         Returns:
             A list of dictionaries with video paths.
         """
         if path_override:
             self.load_paths(path_override)
-            
-        video_paths = self.video_paths
-        dataset = []
-        for video_path in video_paths:
-            dataset.append({"video_path": video_path})
-        return dataset
+        if self.directory is None:
+            raise ValueError(
+                "VideoLocalSource has no directory to read: pass directory=... "
+                "when constructing it, or a path override to get_source()."
+            )
+        return [{"video_path": video_path} for video_path in self.video_paths]
 
 # ----------------------------------------------------------------------------------
 # Video Augmenter
@@ -175,18 +172,31 @@ class AudioVideoAugmenter(DataAugmenter):
         audio_modelname: str = "facebook/wav2vec2-base-960h",
     ) -> Callable[[], pygrain.MapTransform]:
         """Create a transform for video datasets.
-        
+
         Args:
             frame_size: Size to scale video frames to.
             sequence_length: Number of frames to sample from each video.
+            audio_frame_padding: Extra audio frames kept on either side of the
+                sampled clip.
             method: Interpolation method for resizing.
             audio_modelname: HF audio model whose feature extractor prepares
                 the audio conditioning inputs.
-            
+
         Returns:
-            A callable that returns a pygrain.MapTransform.
+            A callable that returns a pygrain.MapTransform. Records carrying a
+            "caption" (e.g. from VoxCeleb2Source) keep it, so the video
+            collate_fn can tokenize the prompt.
         """
         num_frames = sequence_length
+
+        def resize_clip(frames: np.ndarray) -> np.ndarray:
+            """Clip readers return native resolution; the model wants frame_size."""
+            if frames.shape[1] == frame_size and frames.shape[2] == frame_size:
+                return frames
+            return np.stack([
+                cv2.resize(frame, (frame_size, frame_size), interpolation=method)
+                for frame in frames
+            ])
         
         class AudioVideoTransform(pygrain.RandomMapTransform):
             def __init__(self, *args, **kwargs):
@@ -204,13 +214,15 @@ class AudioVideoAugmenter(DataAugmenter):
                     audio_frame_padding=audio_frame_padding,
                     random_seed=random_seed,
                 )
-                
+                video_frames = resize_clip(video_frames)
+
                 # Feature-extract the audio; key names differ per model, so
                 # pass the processor's output through untouched
                 results = self.tokenize(full_audio)
 
                 return {
                     "video": video_frames,
+                    "caption": element.get("caption", ""),
                     "audio": {
                         **{key: value[0] for key, value in results.items()},
                         "full_audio": full_audio,
@@ -219,41 +231,3 @@ class AudioVideoAugmenter(DataAugmenter):
                 }
         
         return AudioVideoTransform
-
-    
-    def create_filter(self, image_scale: int = 256):
-        class FilterTransform(pygrain.FilterTransform):
-            def map(self, element) -> bool:
-                return True
-
-# ----------------------------------------------------------------------------------
-# Helper functions for video datasets
-# ----------------------------------------------------------------------------------
-
-# def create_video_dataset_from_directory(
-#     directory: str,
-#     extensions: List[str] = ['.mp4', '.avi', '.mov', '.webm'],
-#     frame_size: int = 256,
-# ) -> Tuple[List[Dict[str, Any]], AudioVideoAugmenter]:
-#     """Create a video dataset from a directory of video files.
-    
-#     Args:
-#         directory: Directory containing video files.
-#         extensions: List of valid video file extensions.
-#         frame_size: Size to scale video frames to.
-#         num_frames: Number of frames to sample from each video.
-        
-#     Returns:
-#         Tuple of (dataset, augmenter) for the video dataset.
-#     """
-#     source = VideoLocalSource(
-#         directory=directory,
-#         extensions=extensions,
-#     )
-    
-#     augmenter = AudioVideoAugmenter(
-#         num_frames=num_frames
-#     )
-    
-#     dataset = source.get_source()
-#     return dataset, augmenter

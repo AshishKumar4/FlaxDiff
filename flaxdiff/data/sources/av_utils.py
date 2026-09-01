@@ -9,6 +9,34 @@ import numpy as np
 from typing import Tuple, Optional, Union, List
 from .audio_utils import read_audio
 
+
+def choose_clip_start(
+    total_frames: int,
+    num_frames: int,
+    padding: int,
+    rng: np.random.Generator,
+) -> int:
+    """Pick a random clip start leaving `padding` frames on either side.
+
+    Takes an explicit Generator: the readers used to call np.random.seed(), which
+    reseeded the process-global RNG from inside data-loading workers and silently
+    perturbed every other consumer of np.random.
+
+    Args:
+        total_frames: Number of frames in the video.
+        num_frames: Number of frames the clip needs.
+        padding: Frames kept available on either side of the clip.
+        rng: Random source; seed it per call for reproducibility.
+
+    Returns:
+        The start frame index.
+    """
+    min_start = padding
+    max_start = total_frames - num_frames - padding
+    if max_start <= min_start:
+        return min_start
+    return int(rng.integers(min_start, max_start))
+
 def get_video_fps(video_path: str):
     cam = cv2.VideoCapture(video_path)
     fps = cam.get(cv2.CAP_PROP_FPS)
@@ -119,9 +147,9 @@ def read_av_improved(
     if end is not None:
         duration = (end - start) / fps
     
-    # Get video frames using PyVideoReader
+    # Get video frames using PyVideoReader; end=None means "to the end"
     vr = PyVideoReader(path)
-    video = vr.decode(start_frame=start, end_frame=None)
+    video = vr.decode(start_frame=start, end_frame=end)
     
     # Get audio data using our custom audio utilities
     audio, _ = read_audio(
@@ -210,9 +238,7 @@ def read_av_random_clip_moviepy(
         Tuple of (frame_wise_audio, full_padded_audio, video_frames) where video_frames is a numpy array.
     """
     from moviepy import VideoFileClip
-    # Set random seed if provided
-    if random_seed is not None:
-        np.random.seed(random_seed)
+    rng = np.random.default_rng(random_seed)
     # Load the video
     video = VideoFileClip(video_path).with_fps(target_fps)
     original_duration = video.duration
@@ -225,12 +251,8 @@ def read_av_random_clip_moviepy(
     if total_frames < num_frames + 2 * effective_padding:
         raise ValueError(f"Video has only {total_frames} frames, but {num_frames + 2 * effective_padding} were requested (including effective padding)")
 
-    # Adjust the range for start_idx to account for effective padding
-    min_start_idx = effective_padding
-    max_start_idx = total_frames - num_frames - effective_padding
-
     # Select a random start frame that allows for padding on both sides
-    start_idx = np.random.randint(min_start_idx, max_start_idx) if max_start_idx > min_start_idx else min_start_idx
+    start_idx = choose_clip_start(total_frames, num_frames, effective_padding, rng)
     end_idx = start_idx + num_frames
     
     # Convert to time
@@ -332,9 +354,7 @@ def read_av_random_clip_alt(
     """
     from moviepy import VideoFileClip, AudioFileClip
     from video_reader import PyVideoReader
-    # Set random seed if provided
-    if random_seed is not None:
-        np.random.seed(random_seed)
+    rng = np.random.default_rng(random_seed)
     # Load the video
     vr = PyVideoReader(video_path)
     info = vr.get_info()
@@ -347,12 +367,8 @@ def read_av_random_clip_alt(
     if total_frames < num_frames + 2 * effective_padding:
         raise ValueError(f"Video has only {total_frames} frames, but {num_frames + 2 * effective_padding} were requested (including effective padding)")
 
-    # Adjust the range for start_idx to account for effective padding
-    min_start_idx = effective_padding
-    max_start_idx = total_frames - num_frames - effective_padding
-
     # Select a random start frame that allows for padding on both sides
-    start_idx = np.random.randint(min_start_idx, max_start_idx) if max_start_idx > min_start_idx else min_start_idx
+    start_idx = choose_clip_start(total_frames, num_frames, effective_padding, rng)
     end_idx = start_idx + num_frames
     
     video_frames = vr.decode(start_idx, end_idx)
@@ -425,8 +441,7 @@ def read_av_random_clip_pyav(
     from video_reader import PyVideoReader
     import av
 
-    if random_seed is not None:
-        np.random.seed(random_seed)
+    rng = np.random.default_rng(random_seed)
 
     # --- 1) Determine which video frames to read ---
     vr = PyVideoReader(video_path)
@@ -438,13 +453,7 @@ def read_av_random_clip_pyav(
             f"Video has only {total_frames} frames but needs {needed_frames} (with padding)."
         )
 
-    min_start = eff_pad
-    max_start = total_frames - num_frames - eff_pad
-    start_idx = (
-        np.random.randint(min_start, max_start)
-        if max_start > min_start
-        else min_start
-    )
+    start_idx = choose_clip_start(total_frames, num_frames, eff_pad, rng)
     end_idx = start_idx + num_frames
 
     # --- 2) Decode the chosen video frames ---

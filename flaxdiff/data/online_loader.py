@@ -834,7 +834,19 @@ def dataMapper(map: Dict[str, Any]):
 
 
 class OnlineStreamingDataLoader:
-    """Data loader for streaming media data from online sources."""
+    """Data loader for streaming media data from online sources.
+
+    Repeat contract: this loader is an endless stream. The worker pool in
+    `parallel_media_loader` walks its shards in a `while True` loop, reshuffling
+    the dataset between passes, and `__next__` retries rather than stopping when
+    the queue is briefly empty - so iteration only ends by raising StopIteration
+    if the background loader thread has died. Callers bound training themselves
+    (steps per epoch); `for batch in loader` never terminates on its own.
+
+    Sharding is decided once, at construction: the dataset is sharded by
+    `global_process_index`/`global_process_count` and each process then repeats
+    only its own shard forever.
+    """
     
     def __init__(
         self,
@@ -849,11 +861,6 @@ class OnlineStreamingDataLoader:
         num_workers=16,
         num_threads=512,
         default_split="all",
-        pre_map_maker=dataMapper,
-        pre_map_def={
-            "url": "URL",
-            "caption": "TEXT",
-        },
         global_process_count=1,
         global_process_index=0,
         prefetch=1000,
@@ -881,8 +888,6 @@ class OnlineStreamingDataLoader:
             num_workers: Number of worker processes.
             num_threads: Number of threads per worker.
             default_split: Default split to use when loading datasets.
-            pre_map_maker: Function to create a mapping function.
-            pre_map_def: Default mapping definition.
             global_process_count: Total number of processes.
             global_process_index: Index of this process.
             prefetch: Number of batches to prefetch.

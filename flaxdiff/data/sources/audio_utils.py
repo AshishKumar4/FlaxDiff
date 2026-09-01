@@ -6,8 +6,40 @@ This module provides alternatives to decord's AudioReader/AVReader (which have m
 import os
 import tempfile
 import subprocess
+import wave
 import numpy as np
 from typing import Tuple, Optional, Union
+
+# int16 is what ffmpeg writes for `-f wav` by default; the others are here so a
+# differently-encoded PCM file still decodes instead of returning garbage.
+_PCM_DTYPES = {1: np.uint8, 2: np.int16, 4: np.int32}
+
+
+def _read_wav_mono(path: str) -> np.ndarray:
+    """Decode a PCM WAV file to mono float32 in [-1, 1].
+
+    Uses the stdlib `wave` parser rather than reading the file as a flat array:
+    np.fromfile(path, np.int16) hands back the 44+ byte RIFF header as ~22 bogus
+    leading samples and breaks the sample count.
+    """
+    with wave.open(path, 'rb') as wav_file:
+        channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        frames = wav_file.readframes(wav_file.getnframes())
+
+    dtype = _PCM_DTYPES.get(sample_width)
+    if dtype is None:
+        raise ValueError(f"Unsupported WAV sample width: {sample_width} bytes")
+
+    samples = np.frombuffer(frames, dtype=dtype)
+    if dtype is np.uint8:  # 8-bit PCM is unsigned, centred on 128
+        audio = (samples.astype(np.float32) - 128.0) / 128.0
+    else:
+        audio = samples.astype(np.float32) / float(np.iinfo(dtype).max + 1)
+
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+    return audio
 
 
 def read_audio_ffmpeg(
@@ -26,7 +58,8 @@ def read_audio_ffmpeg(
         target_sr: Target sample rate for the audio.
         
     Returns:
-        Tuple of (audio_data, sample_rate) where audio_data is a numpy array.
+        Tuple of (audio_data, sample_rate) where audio_data is mono float32 in
+        [-1, 1], resampled to target_sr.
     """
     # Create a temporary file for the audio
     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
@@ -55,8 +88,9 @@ def read_audio_ffmpeg(
         # Execute the command
         subprocess.run(cmd, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
         
-        # Read the audio file using numpy
-        audio_data = np.fromfile(tmp_path, np.int16).astype(np.float32) / 32768.0  # Convert to float in [-1, 1]
+        # Parse the WAV container instead of reading it as a flat int16 array,
+        # which used to prepend the 44-byte RIFF header as ~22 fake samples.
+        audio_data = _read_wav_mono(tmp_path)
         
         return audio_data, target_sr
         

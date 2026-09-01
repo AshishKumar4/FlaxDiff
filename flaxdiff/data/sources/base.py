@@ -25,7 +25,8 @@ class DataSource(ABC):
         """Factory method to create a data source of the specified type.
         
         Args:
-            source_type: Type of the data source ("image", "video", etc.)
+            source_type: Registry key: "image_tfds", "image_gcs",
+                "image_combined_gcs", "video_tfds" or "video_local".
             **kwargs: Additional arguments for the specific data source.
             
         Returns:
@@ -48,7 +49,13 @@ class DataSource(ABC):
 
 
 class DataAugmenter(ABC):
-    """Base class for all data augmenters in FlaxDiff."""
+    """Base class for all data augmenters in FlaxDiff.
+
+    The contract is deliberately only `create_transform`: no grain pipeline in
+    this repo applies a filter operation, so filtering lives solely on the one
+    augmenter that has a working implementation (`ImageGCSAugmenter.create_filter`,
+    reachable through the legacy `gcs_filters` helper).
+    """
     
     @abstractmethod
     def create_transform(self, **kwargs) -> Callable[[], pygrain.MapTransform]:
@@ -62,36 +69,24 @@ class DataAugmenter(ABC):
         """
         pass
     
-    @abstractmethod
-    def create_filter(self, **kwargs) -> Callable[[], pygrain.FilterTransform]:
-        """Create a filter function for the data.
-        
-        Args:
-            **kwargs: Additional arguments for the filter.
-            
-        Returns:
-            A callable that returns a pygrain.FilterTransform instance.
-        """
-        pass
-    
     @staticmethod
     def create(augmenter_type: str, **kwargs) -> 'DataAugmenter':
         """Factory method to create a data augmenter of the specified type.
         
         Args:
-            augmenter_type: Type of the data augmenter ("image", "video", etc.)
+            augmenter_type: Registry key: "image_tfds", "image_gcs" or "video".
             **kwargs: Additional arguments for the specific augmenter.
             
         Returns:
             An instance of a DataAugmenter subclass.
         """
         from .images import ImageTFDSAugmenter, ImageGCSAugmenter
-        from .videos import VideoAugmenter
-        
+        from .videos import AudioVideoAugmenter
+
         augmenter_map = {
             "image_tfds": ImageTFDSAugmenter,
             "image_gcs": ImageGCSAugmenter,
-            "video": VideoAugmenter
+            "video": AudioVideoAugmenter,
         }
         
         if augmenter_type not in augmenter_map:
