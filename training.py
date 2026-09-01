@@ -595,6 +595,7 @@ def main(args):
         eval_metrics=eval_metrics,
         best_tracker_metric=args.best_tracker_metric,
         ema_decay=args.ema_decay,
+        grad_accum_steps=args.grad_accum_steps,
         fsdp_size=args.fsdp_size,
         fsdp_min_param_size=args.fsdp_min_param_size,
         compilation_cache_dir=args.compilation_cache_dir,

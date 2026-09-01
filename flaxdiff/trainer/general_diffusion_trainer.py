@@ -80,6 +80,7 @@ class GeneralDiffusionTrainer(SimpleTrainer):
                  eval_metrics: List[EvaluationMetric] = None,
                  best_tracker_metric: str = "train/best_loss",
                  ema_decay: float = 0.999,
+                 grad_accum_steps: int = 1,
                  loss_fn: Callable = optax.l2_loss,
                  **kwargs
                  ):
@@ -98,6 +99,9 @@ class GeneralDiffusionTrainer(SimpleTrainer):
             model_output_transform: Transform for model predictions
             autoencoder: Optional autoencoder for latent diffusion
             native_resolution: Native resolution of the data
+            grad_accum_steps: Micro-batches per optimizer update. Must match the
+                every_k_schedule of the optax.MultiSteps wrapper on `optimizer`,
+                otherwise the EMA runs on a different clock than the params.
             **kwargs: Additional arguments for parent class
         """
         # Initialize with parent DiffusionTrainer but without encoder parameter
@@ -105,6 +109,9 @@ class GeneralDiffusionTrainer(SimpleTrainer):
             autoencoder=autoencoder,
         )
         self.eval_metrics = eval_metrics
+        if grad_accum_steps < 1:
+            raise ValueError(f"grad_accum_steps must be at least 1, got {grad_accum_steps}")
+        self.grad_accum_steps = grad_accum_steps
 
         if native_resolution is None:
             sample_shape = input_config.sample_data_shape
@@ -210,6 +217,7 @@ class GeneralDiffusionTrainer(SimpleTrainer):
         """
         objective = self.objective
         ema = objective.ema
+        accum = self.grad_accum_steps
 
         def train_step(train_state: TrainState, rng_state: RandomMarkovState, batch):
             """Training step over the global batch; GSPMD partitions it."""
@@ -246,7 +254,23 @@ class GeneralDiffusionTrainer(SimpleTrainer):
 
             # The EMA copy is sharded like the params it tracks, so averaging a
             # subtree stays a local read-modify-write on every device.
-            new_state = new_state.apply_ema(ema.decay(train_state.step), ema.path)
+            #
+            # `train_state.step` counts micro-batches, and under MultiSteps the
+            # params only move on every accum-th one. The EMA has to run on that
+            # same clock: averaging every micro-step would blend in params that
+            # never changed and advance the decay schedule accum times too fast.
+            # The schedule is therefore indexed by completed updates, and the
+            # average only happens on the micro-step whose update lands.
+            update_index = train_state.step // accum
+            if accum == 1:
+                new_state = new_state.apply_ema(ema.decay(update_index), ema.path)
+            else:
+                new_state = jax.lax.cond(
+                    (train_state.step + 1) % accum == 0,
+                    lambda s: s.apply_ema(ema.decay(update_index), ema.path),
+                    lambda s: s,
+                    new_state,
+                )
 
             return new_state, loss, aux, rng_state, jnp.isfinite(loss)
 

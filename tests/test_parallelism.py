@@ -13,9 +13,11 @@ import pytest
 from jax.sharding import PartitionSpec as P
 
 from flaxdiff.inputs import DiffusionInputConfig
+from flaxdiff.metrics.common import EvaluationMetric
 from flaxdiff.models.simple_dit import SimpleDiT
 from flaxdiff.predictors import get_diffusion_preset
 from flaxdiff.trainer import GeneralDiffusionTrainer
+from flaxdiff.trainer.objectives import EMASpec, Objective
 from flaxdiff.utils import (
     DevicePrefetchIterator, batch_sharding, build_mesh, parameter_spec, shard_batch,
 )
@@ -245,7 +247,7 @@ def test_gradient_accumulation_updates_only_on_the_boundary(tmp_path):
     """
     accum = 3
     trainer = make_trainer(tmp_path, "accum", distributed_training=True, fsdp_size=2,
-                           fsdp_min_param_size=TINY,
+                           fsdp_min_param_size=TINY, grad_accum_steps=accum,
                            optimizer=optax.MultiSteps(optax.sgd(0.5), every_k_schedule=accum))
 
     train_step = trainer._define_train_step(batch_size=BATCH)
@@ -263,6 +265,124 @@ def test_gradient_accumulation_updates_only_on_the_boundary(tmp_path):
         assert moved == at_boundary, f"micro-step {micro}: moved={moved}"
         if at_boundary:
             reference = snapshot(state)
+
+
+class DeterministicObjective(Objective):
+    """Squared error against the input, straight through the real model.
+
+    No noise level, no dropout, no unconditional mask: the loss depends only
+    on the parameters and the batch. That is what makes two accumulation
+    regimes comparable - every micro-gradient in a window is identical, which
+    is exactly the "one big batch" an accumulated update stands in for, so a
+    k-accumulated run and a plain run must trace the same parameters.
+    """
+
+    tag = "deterministic"
+
+    def __init__(self, model, input_shapes, decay):
+        self.model = model
+        self.input_shapes = input_shapes
+        self.ema = EMASpec(decay=decay)
+
+    def init_params(self, rng):
+        return self.model.init(
+            rng, **{k: jnp.ones((1, *v)) for k, v in self.input_shapes.items()})
+
+    def loss(self, params, ema_params, batch, rng, step):
+        data = (jnp.asarray(batch["image"], jnp.float32) - 127.5) / 127.5
+        preds = self.model.apply(params, data, jnp.zeros((data.shape[0],), jnp.float32))
+        return jnp.mean((preds - data) ** 2), {}
+
+    def make_validation_step(self, **kwargs):
+        return lambda val_state, batch: None
+
+
+def make_deterministic_trainer(tmp_path, name, grad_accum_steps):
+    model = SimpleDiT(patch_size=4, emb_features=32, num_layers=1, num_heads=2, mlp_ratio=1)
+    input_config = DiffusionInputConfig(
+        sample_data_key="image", sample_data_shape=(RES, RES, 3), conditions=[])
+    optimizer = optax.sgd(0.5)
+    if grad_accum_steps > 1:
+        optimizer = optax.MultiSteps(optimizer, every_k_schedule=grad_accum_steps)
+    return GeneralDiffusionTrainer(
+        model=model,
+        optimizer=optimizer,
+        input_config=input_config,
+        # A ramp rather than a constant, so indexing the schedule by micro-step
+        # instead of by update is visible in the result.
+        objective=DeterministicObjective(
+            model, input_config.get_input_shapes(),
+            optax.linear_schedule(0.9, 1.0, transition_steps=8)),
+        rngs=jax.random.PRNGKey(0),
+        name=name,
+        wandb_config=None,
+        distributed_training=True,
+        fsdp_size=2,
+        fsdp_min_param_size=TINY,
+        checkpoint_base_path=str(tmp_path),
+        grad_accum_steps=grad_accum_steps,
+    )
+
+
+def ema_snapshot(state):
+    return [np.asarray(x).copy() for x in jax.tree.leaves(state.ema_params)]
+
+
+def test_ema_moves_only_on_accumulation_boundaries(tmp_path):
+    """The EMA has to run on the optimizer's clock, not the micro-batch's.
+
+    Between boundaries MultiSteps holds the params still, so an average taken
+    every micro-step would blend in parameters that never changed and pull the
+    EMA k times as far per update.
+    """
+    accum = 4
+    trainer = make_deterministic_trainer(tmp_path, "ema-accum", accum)
+    train_step = trainer._define_train_step(batch_size=BATCH)
+    source = DevicePrefetchIterator(batches(), trainer.batch_sharding)
+    state, rng = trainer.state, trainer.rngstate
+
+    reference = ema_snapshot(state)
+    for micro in range(1, accum * 2 + 1):
+        state, _, _, rng, _ = train_step(state, rng, next(source))
+        moved = any(not np.array_equal(a, b)
+                    for a, b in zip(reference, ema_snapshot(state)))
+        at_boundary = micro % accum == 0
+        assert moved == at_boundary, f"micro-step {micro}: ema moved={moved}"
+        if at_boundary:
+            reference = ema_snapshot(state)
+
+
+def test_accumulated_ema_matches_a_plain_run_at_equal_update_counts(tmp_path):
+    """k micro-batches of the same data must land where one big batch would,
+    EMA included - same params, same decay index, same average."""
+    accum, updates = 4, 3
+
+    def run(name, k):
+        trainer = make_deterministic_trainer(tmp_path / name, name, k)
+        train_step = trainer._define_train_step(batch_size=BATCH)
+        source = DevicePrefetchIterator(batches(), trainer.batch_sharding)
+        state, rng = trainer.state, trainer.rngstate
+        for _ in range(updates * k):
+            state, _, _, rng, _ = train_step(state, rng, next(source))
+        return state
+
+    plain = run("plain", 1)
+    accumulated = run("accumulated", accum)
+
+    # the comparison is only meaningful if the EMA left its starting point
+    assert any(not np.allclose(np.asarray(p), np.asarray(e))
+               for p, e in zip(jax.tree.leaves(plain.params),
+                               jax.tree.leaves(plain.ema_params)))
+    for a, b in zip(jax.tree.leaves(plain.params), jax.tree.leaves(accumulated.params)):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-6, atol=1e-7)
+    for a, b in zip(jax.tree.leaves(plain.ema_params),
+                    jax.tree.leaves(accumulated.ema_params)):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-6, atol=1e-7)
+
+
+def test_grad_accum_steps_must_be_positive(tmp_path):
+    with pytest.raises(ValueError):
+        make_deterministic_trainer(tmp_path, "bad-accum", 0)
 
 
 def grain_image_loader(num_records=256):
