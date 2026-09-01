@@ -1,6 +1,4 @@
-import jax.numpy as jnp
-from ..utils import RandomMarkovState
-from .common import NoiseScheduler, reshape_rates
+from .common import NoiseScheduler
 
 
 class ContinuousNoiseScheduler(NoiseScheduler):
